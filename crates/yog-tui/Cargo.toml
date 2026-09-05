@@ -1,0 +1,21 @@
+[package]
+name = "yog-tui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+yog-core.workspace = true
+yog-cli = { workspace = true, optional = true }
+
+ratatui.workspace = true
+
+[features]
+default = ["cli"]
+cli = ["yog-cli"]
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = 3
+panic = "abort"
+strip = true

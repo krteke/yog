@@ -7,3 +7,12 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies]
+yog-cli = { path = "crates/yog-cli" }
+yog-core = { path = "crates/yog-core" }
+yog-tui = { path = "crates/yog-tui" }
+
+clap = "4.6.6"
+ratatui = "0.30.2"
+serde = "1.0.229"
+serde_json = "1.0.151"
+toml = "1.1.5"

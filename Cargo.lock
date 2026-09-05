@@ -3,5 +3,20 @@
 version = 4
 
 [[package]]
-name = "yog"
+name = "yog-cli"
 version = "0.1.0"
+dependencies = [
+ "yog-core",
+]
+
+[[package]]
+name = "yog-core"
+version = "0.1.0"
+
+[[package]]
+name = "yog-tui"
+version = "0.1.0"
+dependencies = [
+ "yog-cli",
+ "yog-core",
+]

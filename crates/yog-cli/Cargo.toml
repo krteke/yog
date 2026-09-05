@@ -1,0 +1,15 @@
+[package]
+name = "yog-cli"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+yog-core.workspace = true
+clap = { workspace = true, features = ["derive"] }
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = 3
+panic = "abort"
+strip = true

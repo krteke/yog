@@ -169,6 +169,7 @@ impl Ffprobe {
             self.timeout,
             self.cancellation.clone(),
             decode,
+            |_| {},
         )?;
         if let Some(error) = output.value.1.take() {
             return Err(output.failure(Failure::Probe(error)));

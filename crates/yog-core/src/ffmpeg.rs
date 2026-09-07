@@ -1,6 +1,3 @@
-//! FFmpeg output formats. Command planning and encoder-selection policy belong
-//! to callers; progress is the output of `-progress pipe:1 -nostats`.
-
 use std::{
     path::PathBuf,
     sync::{Arc, atomic::AtomicBool},
@@ -8,6 +5,7 @@ use std::{
 };
 mod args;
 pub mod capabilities;
+pub mod execution;
 pub mod progress;
 pub mod vmaf;
 

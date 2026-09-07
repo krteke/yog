@@ -10,7 +10,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use yog_core::{error::Failure, ffprobe::Ffprobe};
+use yog_core::{error::Failure, ffmpeg::Ffmpeg, ffprobe::Ffprobe};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 // Avoid concurrently creating executables while another test forks: a child
@@ -158,4 +158,102 @@ fn both_pipes_are_drained_and_successful_json_does_not_hide_nonzero_exit() {
     assert!(matches!(error.reason, Failure::Exit));
     assert_eq!(error.status.unwrap().code(), Some(7));
     assert_eq!(error.stderr.len(), 140_000);
+}
+
+#[test]
+fn ffmpeg_drains_both_pipes_and_end_record_does_not_hide_failure() {
+    let tool = Tool::new(
+        r"i=0; while [ $i -lt 10000 ]; do printf 'frame=1\nprogress=continue\n'; printf 'stderr payload' >&2; i=$((i+1)); done; printf 'progress=end'; printf '\377' >&2; exit 7",
+    );
+    let mut count = 0;
+    let mut finished = false;
+    let mut diagnostics = Vec::new();
+    let error = Ffmpeg::new(&tool.path, Duration::from_secs(5))
+        .execute(
+            std::iter::empty::<&str>(),
+            |progress| {
+                count += 1;
+                finished = progress.finished;
+            },
+            |bytes| diagnostics.extend_from_slice(bytes),
+        )
+        .unwrap_err();
+    assert_eq!(count, 10001);
+    assert!(finished);
+    assert!(matches!(error.reason, Failure::Exit));
+    assert_eq!(error.status.unwrap().code(), Some(7));
+    assert_eq!(diagnostics, error.stderr);
+    assert_eq!(diagnostics.len(), 140001);
+    assert_eq!(diagnostics.last(), Some(&255));
+}
+
+#[test]
+fn ffmpeg_callbacks_can_cancel_while_child_is_running() {
+    for cancel_from_stderr in [false, true] {
+        let tool = Tool::new(
+            "printf 'diagnostic' >&2; printf 'frame=1\nprogress=continue\n'; while :; do :; done",
+        );
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let error = Ffmpeg::new(&tool.path, Duration::from_secs(5))
+            .with_cancellation(Some(cancelled.clone()))
+            .execute(
+                std::iter::empty::<&str>(),
+                |_| {
+                    if !cancel_from_stderr {
+                        cancelled.store(true, Ordering::Relaxed);
+                    }
+                },
+                |_| {
+                    if cancel_from_stderr {
+                        cancelled.store(true, Ordering::Relaxed);
+                    }
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(error.reason, Failure::Cancelled));
+        assert!(error.status.is_some());
+        assert_eq!(error.stderr, b"diagnostic");
+    }
+}
+
+#[test]
+fn ffmpeg_callback_panics_reap_before_propagation() {
+    for panic_from_stderr in [false, true] {
+        let tool =
+            Tool::new("printf 'diagnostic' >&2; printf 'progress=continue\n'; while :; do :; done");
+        let started = Instant::now();
+        let result = std::panic::catch_unwind(|| {
+            Ffmpeg::new(&tool.path, Duration::from_secs(5)).execute(
+                std::iter::empty::<&str>(),
+                |_| {
+                    assert!(panic_from_stderr, "progress callback panic");
+                },
+                |_| {
+                    assert!(!panic_from_stderr, "stderr callback panic");
+                },
+            )
+        });
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+}
+
+#[test]
+fn ffmpeg_exit_without_progress_is_valid_but_silence_still_times_out() {
+    let tool = Tool::new("exit 0");
+    Ffmpeg::new(&tool.path, Duration::from_secs(5))
+        .execute(
+            std::iter::empty::<&str>(),
+            |_| panic!("unexpected progress"),
+            |_| {},
+        )
+        .unwrap();
+    drop(tool);
+    let tool = Tool::new("printf 'waiting' >&2; while :; do :; done");
+    let error = Ffmpeg::new(&tool.path, Duration::from_millis(100))
+        .execute(std::iter::empty::<&str>(), |_| {}, |_| {})
+        .unwrap_err();
+    assert!(matches!(error.reason, Failure::TimedOut));
+    assert!(error.status.is_some());
+    assert_eq!(error.stderr, b"waiting");
 }

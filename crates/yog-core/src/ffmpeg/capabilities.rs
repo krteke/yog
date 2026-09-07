@@ -46,6 +46,7 @@ impl Ffmpeg {
                 reader.read_to_string(&mut text).map_err(Failure::Io)?;
                 Ok(text)
             },
+            |_| {},
         )?;
         if !output.status.success() {
             return Err(output.failure(Failure::Exit));

@@ -1,6 +1,20 @@
 # yog-core
 
 ```rust,no_run
+use std::{ffi::OsStr, time::Duration};
+use yog_core::ffmpeg::Ffmpeg;
+
+let ffmpeg = Ffmpeg::new("ffmpeg", Duration::from_secs(3600));
+let result = ffmpeg.execute(
+    ["-i", "input.mkv", "-map", "0", "-c", "copy", "output.mkv"].map(OsStr::new),
+    |progress| println!("{:?}", progress.out_time_us),
+    |stderr_bytes| { /* 实时处理原始诊断字节 */ },
+)?;
+assert!(result.status.success());
+# Ok::<(), yog_core::error::Error>(())
+```
+
+```rust,no_run
 use std::{path::Path, time::Duration};
 use yog_core::ffprobe::Ffprobe;
 

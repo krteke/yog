@@ -32,18 +32,20 @@ impl<T> Output<T> {
 
 /// Parse stdout while the process runs. Stderr is drained independently without
 /// a hidden retention limit. A decoder failure stops and reaps the child.
-pub(crate) fn run<T, I, O, D>(
+pub(crate) fn run<T, I, O, D, S>(
     program: &Path,
     args: I,
     timeout: Duration,
     cancellation: Option<Arc<AtomicBool>>,
     decode: D,
+    mut on_stderr: S,
 ) -> Result<Output<T>, Error>
 where
     T: Send,
     I: IntoIterator<Item = O>,
     O: AsRef<OsStr>,
     D: FnOnce(BufReader<ChildStdout>) -> Result<T, Failure> + Send,
+    S: FnMut(&[u8]) + Send,
 {
     let mut failure = Error {
         program: program.to_owned(),
@@ -53,7 +55,7 @@ where
         secondary_io: Vec::new(),
     };
     if cancellation
-        .clone()
+        .as_ref()
         .is_some_and(|flag| flag.load(Ordering::Relaxed))
     {
         return Err(failure);
@@ -80,15 +82,37 @@ where
             // The receiver lives until this reader has been joined.
             tx.send(result).ok();
         });
+        let (stderr_tx, stderr_rx) = mpsc::channel();
         let diagnostics = scope.spawn(move || {
             let mut bytes = Vec::new();
-            let result = stderr.read_to_end(&mut bytes);
+            let mut buffer = [0; 8192];
+            let result = loop {
+                match stderr.read(&mut buffer) {
+                    Ok(0) => break Ok(()),
+                    Ok(length) => {
+                        bytes.extend_from_slice(&buffer[..length]);
+                        on_stderr(&buffer[..length]);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => break Err(error),
+                }
+            };
+            stderr_tx.send(()).ok();
             (bytes, result)
         });
         let started = Instant::now();
         let mut value = None;
         let mut reason = None;
+        let mut stderr_done = false;
         loop {
+            if !stderr_done {
+                match stderr_rx.try_recv() {
+                    Ok(()) => stderr_done = true,
+                    Err(mpsc::TryRecvError::Empty) => {}
+                    // Reap the child before propagating a callback panic.
+                    Err(mpsc::TryRecvError::Disconnected) => break,
+                }
+            }
             if failure.status.is_none() {
                 match child.try_wait() {
                     Ok(status) => failure.status = status,
@@ -112,11 +136,11 @@ where
                     }
                 }
             }
-            if failure.status.is_some() && value.is_some() {
+            if failure.status.is_some() && value.is_some() && stderr_done {
                 break;
             }
             if cancellation
-                .clone()
+                .as_ref()
                 .is_some_and(|flag| flag.load(Ordering::Relaxed))
             {
                 reason = Some(Failure::Cancelled);
@@ -138,7 +162,10 @@ where
             }
         }
         let joined = reader.join();
-        let (stderr, read_result) = diagnostics.join().expect("stderr reader panicked");
+        let (stderr, read_result) = match diagnostics.join() {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        };
         failure.stderr = stderr;
         if let Err(panic) = joined {
             std::panic::resume_unwind(panic);

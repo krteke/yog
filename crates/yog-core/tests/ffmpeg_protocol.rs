@@ -1,12 +1,11 @@
 use std::fs;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use yog_core::error::Failure;
 use yog_core::ffmpeg::Ffmpeg;
-use yog_core::ffmpeg::progress::ProgressParser;
 use yog_core::ffprobe::Ffprobe;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -37,47 +36,35 @@ impl Drop for Scratch {
 fn generated_media_exercises_progress_metadata_frames_and_packets() {
     let scratch = Scratch::new();
     let input = scratch.0.join("-媒体 with spaces.mkv");
-    let encoded = Command::new("ffmpeg")
-        .args([
-            "-hide_banner",
-            "-nostdin",
-            "-loglevel",
-            "error",
-            "-nostats",
-            "-progress",
-            "pipe:1",
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc2=size=16x16:rate=10",
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=frequency=440:sample_rate=8000",
-            "-t",
-            "0.3",
-            "-c:v",
-            "ffv1",
-            "-c:a",
-            "pcm_s16le",
-            "-metadata",
-            "title=protocol fixture",
-        ])
-        .arg(&input)
-        .stdin(Stdio::null())
-        .output()
+    let mut progress = Vec::new();
+    let encoded = Ffmpeg::new("ffmpeg", TIMEOUT)
+        .execute(
+            [
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=16x16:rate=10",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=8000",
+                "-t",
+                "0.3",
+                "-c:v",
+                "ffv1",
+                "-c:a",
+                "pcm_s16le",
+                "-metadata",
+                "title=protocol fixture",
+            ]
+            .into_iter()
+            .map(std::ffi::OsString::from)
+            .chain([input.clone().into_os_string()]),
+            |record| progress.push(record),
+            |_| {},
+        )
         .unwrap();
-    assert!(
-        encoded.status.success(),
-        "{}",
-        String::from_utf8_lossy(&encoded.stderr)
-    );
-    let mut parser = ProgressParser::new();
-    let progress: Vec<_> = std::str::from_utf8(&encoded.stdout)
-        .unwrap()
-        .lines()
-        .filter_map(|line| parser.push_line(line))
-        .collect();
+    assert!(encoded.status.success());
     let last = progress.last().unwrap();
     assert!(last.finished);
     assert_eq!(last.frame, Some(3));

@@ -1,4 +1,4 @@
-use super::{args::Arg, encoding::VideoEncoding};
+use super::{args::Arg, decoding::DecodingBackend, encoding::VideoEncoding};
 use crate::{
     ffmpeg::encoding::{NvencMultipass, NvencPreset, Preset, QsvPreset, RateControl, VideoCodec},
     ffprobe::types::MediaInfo,
@@ -98,6 +98,7 @@ pub struct TranscodeRequest {
     pub output: PathBuf,
     pub container: Container,
     pub video: VideoAction,
+    pub decoding: DecodingBackend,
     pub overwrite: bool,
 }
 
@@ -166,6 +167,11 @@ impl TranscodeRequest {
         self
     }
 
+    pub fn with_decoding(mut self, decoding: DecodingBackend) -> Self {
+        self.decoding = decoding;
+        self
+    }
+
     pub fn with_overwrite(mut self, overwrite: bool) -> Self {
         self.overwrite = overwrite;
         self
@@ -187,6 +193,7 @@ impl TranscodeRequest {
         {
             Arg::VaapiDevice(device).append_to(&mut args);
         }
+        self.decoding.append_to(&mut args);
         Arg::Input(&self.input).append_to(&mut args);
         for stream in &streams {
             Arg::Map(stream.index).append_to(&mut args);
@@ -242,6 +249,7 @@ mod tests {
             output: PathBuf::from("-output.mkv"),
             container: Container::Matroska,
             overwrite: false,
+            decoding: DecodingBackend::default(),
             video: VideoAction::Encode(VideoEncoding::Nvenc {
                 codec: VideoCodec::Hevc,
                 rate: Some(RateControl::Quality(23)),
@@ -255,6 +263,8 @@ mod tests {
             plan.args(),
             [
                 "-n",
+                "-hwaccel",
+                "none",
                 "-i",
                 "input.mkv",
                 "-map",
@@ -308,6 +318,8 @@ mod tests {
             plan.args(),
             [
                 "-y",
+                "-hwaccel",
+                "none",
                 "-i",
                 "in.ts",
                 "-map",

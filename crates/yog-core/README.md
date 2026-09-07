@@ -57,3 +57,11 @@ Ffmpeg::new("ffmpeg", Duration::from_secs(3600))
     .execute(plan.args(), |_| {}, |_| {})?;
 # Ok::<(), yog_core::error::Error>(())
 ```
+
+```rust,no_run
+use yog_core::ffmpeg::{decoding::DecodingBackend, plan::{TranscodeRequest, VideoAction}};
+let request = TranscodeRequest::mkv("input.mkv", "output.mkv")
+    .with_decoding(DecodingBackend::Vaapi {
+        device: Some("/dev/dri/renderD128".into()),
+    });
+```

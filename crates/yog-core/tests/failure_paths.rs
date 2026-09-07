@@ -257,3 +257,38 @@ fn ffmpeg_exit_without_progress_is_valid_but_silence_still_times_out() {
     assert!(error.status.is_some());
     assert_eq!(error.stderr, b"waiting");
 }
+
+#[test]
+fn explicit_hardware_decode_is_passed_before_input_and_failure_is_returned() {
+    use yog_core::ffmpeg::{
+        decoding::DecodingBackend,
+        plan::{TranscodeRequest, VideoAction},
+    };
+    use yog_core::ffprobe::types::MediaInfo;
+    let tool = Tool::new(
+        r#"
+[ "$1" = '-hide_banner' ] || exit 42
+shift 5
+[ "$1" = '-n' ] || exit 42
+[ "$2" = '-hwaccel' ] && [ "$3" = 'vaapi' ] || exit 42
+[ "$4" = '-hwaccel_device' ] && [ "$5" = '/nonexistent/yog device' ] || exit 42
+[ "$6" = '-i' ] && [ "$7" = 'input.mkv' ] || exit 42
+printf 'device initialization failed' >&2
+exit 17
+"#,
+    );
+    let media: MediaInfo =
+        serde_json::from_str(r#"{"streams":[{"index":0,"codec_type":"video"}]}"#).unwrap();
+    let plan = TranscodeRequest::mkv("input.mkv", "output.mkv")
+        .with_decoding(DecodingBackend::Vaapi {
+            device: Some("/nonexistent/yog device".into()),
+        })
+        .with_video(VideoAction::encode_x264(None, None))
+        .plan(&media);
+    let error = Ffmpeg::new(&tool.path, Duration::from_secs(5))
+        .execute(plan.args(), |_| {}, |_| {})
+        .unwrap_err();
+    assert!(matches!(error.reason, Failure::Exit));
+    assert_eq!(error.status.unwrap().code(), Some(17));
+    assert_eq!(error.stderr, b"device initialization failed");
+}

@@ -1,4 +1,4 @@
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::Path;
 
 pub(super) enum VideoOption {
@@ -59,6 +59,10 @@ pub(super) enum Arg<'a> {
     Overwrite(bool),
     /// -i {path}
     Input(&'a Path),
+    /// -hwaccel {method}
+    Hwaccel(&'a str),
+    /// -hwaccel_device {device}
+    HwaccelDevice(&'a OsStr),
     /// {path}
     Output(&'a Path),
     /// -vaapi_device
@@ -85,6 +89,10 @@ impl Arg<'_> {
     pub fn append_to(self, args: &mut Vec<OsString>) {
         match self {
             Self::Overwrite(overwrite) => args.push(if overwrite { "-y" } else { "-n" }.into()),
+            Self::Hwaccel(method) => args.extend(["-hwaccel".into(), method.into()]),
+            Self::HwaccelDevice(device) => {
+                args.extend(["-hwaccel_device".into(), device.to_owned()])
+            }
             Self::Input(path) => {
                 args.push("-i".into());
                 args.push(path.as_os_str().to_owned());

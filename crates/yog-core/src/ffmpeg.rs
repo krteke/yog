@@ -5,6 +5,7 @@ use std::{
 };
 mod args;
 pub mod capabilities;
+pub mod decoding;
 pub mod encoding;
 pub mod execution;
 pub mod plan;

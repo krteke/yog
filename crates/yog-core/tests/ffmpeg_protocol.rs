@@ -77,6 +77,40 @@ fn generated_media_exercises_progress_metadata_frames_and_packets() {
     assert_eq!(media.streams[0].codec_name.as_deref(), Some("ffv1"));
     assert_eq!(media.streams[1].codec_type.as_deref(), Some("audio"));
     assert_eq!(media.format.tags["title"], "protocol fixture");
+    // Exercise the complete probe -> plan -> execute -> probe path.
+    use yog_core::ffmpeg::{
+        encoding::{Preset, RateControl},
+        plan::{TranscodeRequest, VideoAction},
+    };
+    let destination = scratch.0.join("planned 输出.mkv");
+    let request = TranscodeRequest::mkv(&input, &destination).with_video(VideoAction::encode_x264(
+        Some(RateControl::Quality(23)),
+        Some(Preset::Ultrafast),
+    ));
+    let plan = request.plan(&media);
+    let ffmpeg = Ffmpeg::new("ffmpeg", TIMEOUT);
+    let mut completed = false;
+    ffmpeg
+        .execute(plan.args(), |record| completed = record.finished, |_| {})
+        .unwrap();
+    assert!(completed);
+    let actual = probe.probe(&destination).unwrap().output;
+    assert_eq!(actual.streams.len(), 2);
+    assert_eq!(actual.streams[0].codec_name.as_deref(), Some("h264"));
+    assert_eq!(actual.streams[1].codec_name, media.streams[1].codec_name);
+    assert_eq!(actual.format.tags["title"], "protocol fixture");
+    let before = fs::read(&destination).unwrap();
+    // Some FFmpeg builds report exit 0 when -n refuses an existing output.
+    // The planner's overwrite contract is that the file stays untouched.
+    let _existing = ffmpeg.execute(plan.args(), |_| {}, |_| {});
+    assert_eq!(fs::read(&destination).unwrap(), before);
+    let copied = scratch.0.join("remux.mkv");
+    let remux = TranscodeRequest::mkv(destination, &copied).plan(&actual);
+    ffmpeg.execute(remux.args(), |_| {}, |_| {}).unwrap();
+    let copied = probe.probe(&copied).unwrap().output;
+    assert_eq!(copied.streams[0].codec_name, actual.streams[0].codec_name);
+    assert_eq!(copied.streams[1].codec_name, actual.streams[1].codec_name);
+
     let mut frames = Vec::new();
     probe
         .frames(&input, 0, "%+1", |frame| frames.push(frame))

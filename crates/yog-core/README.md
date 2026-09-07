@@ -34,3 +34,26 @@ let result = probe.packets(input, None, "%+5", |packet| {
 println!("sample bytes: {packet_bytes}, diagnostics: {:?}", result.stderr);
 # Ok::<(), yog_core::error::Error>(())
 ```
+
+```rust,no_run
+use std::{path::Path, time::Duration};
+use yog_core::{
+    ffmpeg::{
+        Ffmpeg,
+        encoding::{Preset, RateControl},
+        plan::{TranscodeRequest, VideoAction},
+    },
+    ffprobe::Ffprobe,
+};
+
+let input = Path::new("input.mkv");
+let media = Ffprobe::new("ffprobe", Duration::from_secs(30)).probe(input)?.output;
+let plan = TranscodeRequest::mkv(input, "output.mkv")
+    .with_video(VideoAction::encode_x264(
+        Some(RateControl::Quality(23)), Some(Preset::Medium),
+    ))
+    .plan(&media);
+Ffmpeg::new("ffmpeg", Duration::from_secs(3600))
+    .execute(plan.args(), |_| {}, |_| {})?;
+# Ok::<(), yog_core::error::Error>(())
+```

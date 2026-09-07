@@ -5,7 +5,9 @@ use std::{
 };
 mod args;
 pub mod capabilities;
+pub mod encoding;
 pub mod execution;
+pub mod plan;
 pub mod progress;
 pub mod vmaf;
 

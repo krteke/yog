@@ -6,14 +6,18 @@ use crate::{
 use std::{ffi::OsString, path::PathBuf};
 
 #[derive(Debug, Clone, Copy, Default)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 pub enum Container {
     #[default]
+    #[cfg_attr(feature = "clap", value(name = "mkv"))]
     Matroska,
     Mp4,
     Mov,
     Webm,
+    #[cfg_attr(feature = "clap", value(name = "ts"))]
     MpegTs,
 }
+
 impl Container {
     pub(super) fn muxer(self) -> &'static str {
         match self {
@@ -27,9 +31,12 @@ impl Container {
 }
 
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "clap", derive(clap::Subcommand))]
 pub enum VideoAction {
     #[default]
+    #[cfg_attr(feature = "clap", command(long_flag = "copy"))]
     Copy,
+    #[cfg_attr(feature = "clap", command(flatten))]
     Encode(VideoEncoding),
 }
 

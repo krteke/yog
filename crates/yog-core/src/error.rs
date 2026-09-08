@@ -40,9 +40,6 @@ impl fmt::Display for Error {
         if let Some(status) = self.status {
             write!(f, " ({status})")?;
         }
-        if !self.stderr.is_empty() {
-            write!(f, ": {}", String::from_utf8_lossy(&self.stderr).trim())?;
-        }
         for error in &self.secondary_io {
             write!(f, "; additional I/O failure: {error}")?;
         }

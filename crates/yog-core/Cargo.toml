@@ -7,3 +7,17 @@ edition.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = [
+    "process",
+    "io-util",
+    "time",
+    "rt",
+    "macros",
+] }
+tokio-util = { workspace = true, features = ["io-util", "rt"] }
+futures-util = { workspace = true, features = ["std"] }
+
+clap = { workspace = true, features = ["derive"], optional = true }
+
+[features]
+clap = ["dep:clap"]

@@ -1,18 +1,18 @@
+use tokio::process::ChildStdout;
+use tokio_util::{io::SyncIoBridge, sync::CancellationToken};
 mod args;
 mod streaming;
 pub mod types;
 
 use crate::{
     error::{Error, Failure},
-    process::run,
+    program::Program,
 };
 use args::{Arg, Entries};
 use serde::Deserialize;
 use std::{
     io::BufReader,
     path::{Path, PathBuf},
-    process::ChildStdout,
-    sync::{Arc, atomic::AtomicBool},
     time::Duration,
 };
 use types::{Chapter, Frame, MediaFormat, MediaInfo, MediaStream, Packet, ProbeError};
@@ -38,39 +38,39 @@ struct MediaResponse {
 
 #[derive(Debug, Clone)]
 pub struct Ffprobe {
-    program: PathBuf,
-    timeout: Duration,
-    cancellation: Option<Arc<AtomicBool>>,
+    inner: Program,
 }
 
 impl Ffprobe {
-    pub fn new(program: impl Into<PathBuf>, timeout: Duration) -> Self {
+    pub fn new(path: impl Into<PathBuf>, timeout: Option<Duration>) -> Self {
         Self {
-            program: program.into(),
-            timeout,
-            cancellation: None,
+            inner: Program {
+                path: path.into(),
+                timeout,
+                cancellation: CancellationToken::new(),
+            },
         }
     }
 
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = timeout;
+    pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.inner.timeout = timeout;
         self
     }
 
-    pub fn with_cancellation(mut self, cancellation: Option<Arc<AtomicBool>>) -> Self {
-        self.cancellation = cancellation;
+    pub fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
+        self.inner.cancellation = cancellation;
         self
     }
 
-    pub fn timeout(&self) -> Duration {
-        self.timeout
+    pub fn timeout(&self) -> Option<Duration> {
+        self.inner.timeout
     }
 
-    pub fn cancellation(&self) -> Option<Arc<AtomicBool>> {
-        self.cancellation.clone()
+    pub fn cancellation(&self) -> CancellationToken {
+        self.inner.cancellation.clone()
     }
 
-    pub fn probe(&self, input: &Path) -> Result<ProbeResult<MediaInfo>, Error> {
+    pub async fn probe(&self, input: &Path) -> Result<ProbeResult<MediaInfo>, Error> {
         self.query(
             input,
             [
@@ -79,7 +79,7 @@ impl Ffprobe {
                 Arg::ShowChapters,
                 Arg::ShowPrograms,
             ],
-            |reader| {
+            move |reader| {
                 let response: MediaResponse =
                     serde_json::from_reader(reader).map_err(Failure::Json)?;
                 Ok((
@@ -93,17 +93,21 @@ impl Ffprobe {
                 ))
             },
         )
+        .await
     }
 
-    /// Delivers frames on the reader thread. Records are provisional until this
+    /// Delivers frames in a blocking parser task. Records are provisional until this
     /// method returns Ok; cancellation/failure can follow already delivered frames.
-    /// The callback must return promptly so that cancellation can finish joining it.
-    pub fn frames(
+    /// The callback must return promptly so cancellation can finish waiting for it.
+    /// It must own its captures (`Send + 'static`); use a channel or shared state
+    /// to return records to the caller. Cancelling the token and awaiting this
+    /// method completes cleanup; dropping the future only requests a kill.
+    pub async fn frames(
         &self,
         input: &Path,
         stream_index: usize,
         read_intervals: &str,
-        mut consume: impl FnMut(Frame) + Send,
+        mut consume: impl FnMut(Frame) + Send + 'static,
     ) -> Result<ProbeResult<()>, Error> {
         self.query(
             input,
@@ -113,22 +117,23 @@ impl Ffprobe {
                 Arg::ShowFrames,
                 Arg::ShowEntries(Entries::Frame),
             ],
-            |reader| {
+            move |reader| {
                 let error =
                     streaming::records(reader, "frames", &mut consume).map_err(Failure::Json)?;
                 Ok(((), error))
             },
         )
+        .await
     }
 
     /// Streams packets without collecting them. None selects all streams.
     /// As with frames(), callbacks precede the final success/failure result.
-    pub fn packets(
+    pub async fn packets(
         &self,
         input: &Path,
         stream_index: Option<usize>,
         read_intervals: &str,
-        mut consume: impl FnMut(Packet) + Send,
+        mut consume: impl FnMut(Packet) + Send + 'static,
     ) -> Result<ProbeResult<()>, Error> {
         let args = [
             Arg::ReadIntervals(read_intervals),
@@ -137,23 +142,26 @@ impl Ffprobe {
         ]
         .into_iter()
         .chain(stream_index.map(Arg::SelectStream));
-        self.query(input, args, |reader| {
+        self.query(input, args, move |reader| {
             let error =
                 streaming::records(reader, "packets", &mut consume).map_err(Failure::Json)?;
             Ok(((), error))
         })
+        .await
     }
 
-    fn query<'a, I, T, D>(
+    async fn query<'a, I, T, D>(
         &self,
         input: &Path,
         options: I,
         decode: D,
     ) -> Result<ProbeResult<T>, Error>
     where
-        T: Send,
+        T: Send + 'static,
         I: IntoIterator<Item = Arg<'a>>,
-        D: FnOnce(BufReader<ChildStdout>) -> Result<(T, Option<ProbeError>), Failure> + Send,
+        D: FnOnce(BufReader<SyncIoBridge<ChildStdout>>) -> Result<(T, Option<ProbeError>), Failure>
+            + Send
+            + 'static,
     {
         let mut args = Vec::new();
         for option in [Arg::ErrorsOnly, Arg::Json, Arg::ShowError]
@@ -163,14 +171,20 @@ impl Ffprobe {
             option.append_to(&mut args);
         }
         Arg::Input(input).append_to(&mut args);
-        let mut output = run(
-            &self.program,
-            &args,
-            self.timeout,
-            self.cancellation.clone(),
-            decode,
-            |_| {},
-        )?;
+        let mut output = self
+            .inner
+            .run(
+                &args,
+                |stdout| async move {
+                    let reader = BufReader::new(SyncIoBridge::new(stdout));
+                    match tokio::task::spawn_blocking(move || decode(reader)).await {
+                        Ok(result) => result,
+                        Err(error) => std::panic::resume_unwind(error.into_panic()),
+                    }
+                },
+                |_| {},
+            )
+            .await?;
         if let Some(error) = output.value.1.take() {
             return Err(output.failure(Failure::Probe(error)));
         }

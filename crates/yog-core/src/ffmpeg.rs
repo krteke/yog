@@ -1,8 +1,7 @@
-use std::{
-    path::PathBuf,
-    sync::{Arc, atomic::AtomicBool},
-    time::Duration,
-};
+use std::{path::PathBuf, time::Duration};
+use tokio_util::sync::CancellationToken;
+
+use crate::program::Program;
 mod args;
 pub mod capabilities;
 pub mod decoding;
@@ -13,35 +12,35 @@ pub mod progress;
 pub mod vmaf;
 
 pub struct Ffmpeg {
-    program: PathBuf,
-    timeout: Duration,
-    cancellation: Option<Arc<AtomicBool>>,
+    inner: Program,
 }
 
 impl Ffmpeg {
-    pub fn new(program: impl Into<PathBuf>, timeout: Duration) -> Self {
+    pub fn new(path: impl Into<PathBuf>, timeout: Option<Duration>) -> Self {
         Self {
-            program: program.into(),
-            timeout,
-            cancellation: None,
+            inner: Program {
+                path: path.into(),
+                timeout,
+                cancellation: CancellationToken::new(),
+            },
         }
     }
 
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = timeout;
+    pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.inner.timeout = timeout;
         self
     }
 
-    pub fn with_cancellation(mut self, cancellation: Option<Arc<AtomicBool>>) -> Self {
-        self.cancellation = cancellation;
+    pub fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
+        self.inner.cancellation = cancellation;
         self
     }
 
-    pub fn timeout(&self) -> Duration {
-        self.timeout
+    pub fn timeout(&self) -> Option<Duration> {
+        self.inner.timeout
     }
 
-    pub fn cancellation(&self) -> Option<Arc<AtomicBool>> {
-        self.cancellation.clone()
+    pub fn cancellation(&self) -> CancellationToken {
+        self.inner.cancellation.clone()
     }
 }

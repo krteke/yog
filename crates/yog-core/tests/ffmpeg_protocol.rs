@@ -31,13 +31,13 @@ impl Drop for Scratch {
     }
 }
 
-#[test]
+#[tokio::test]
 #[ignore = "requires installed ffmpeg and ffprobe"]
-fn generated_media_exercises_progress_metadata_frames_and_packets() {
+async fn generated_media_exercises_progress_metadata_frames_and_packets() {
     let scratch = Scratch::new();
     let input = scratch.0.join("-媒体 with spaces.mkv");
     let mut progress = Vec::new();
-    let encoded = Ffmpeg::new("ffmpeg", TIMEOUT)
+    let encoded = Ffmpeg::new("ffmpeg", Some(TIMEOUT))
         .execute(
             [
                 "-f",
@@ -63,6 +63,7 @@ fn generated_media_exercises_progress_metadata_frames_and_packets() {
             |record| progress.push(record),
             |_| {},
         )
+        .await
         .unwrap();
     assert!(encoded.status.success());
     let last = progress.last().unwrap();
@@ -71,8 +72,8 @@ fn generated_media_exercises_progress_metadata_frames_and_packets() {
     assert!(last.out_time_us.unwrap() > 0);
     assert!(last.total_size.unwrap() > 0);
 
-    let probe = Ffprobe::new("ffprobe", TIMEOUT);
-    let media = probe.probe(&input).unwrap().output;
+    let probe = Ffprobe::new("ffprobe", Some(TIMEOUT));
+    let media = probe.probe(&input).await.unwrap().output;
     assert_eq!(media.streams.len(), 2);
     assert_eq!(media.streams[0].codec_name.as_deref(), Some("ffv1"));
     assert_eq!(media.streams[1].codec_type.as_deref(), Some("audio"));
@@ -88,13 +89,14 @@ fn generated_media_exercises_progress_metadata_frames_and_packets() {
         Some(Preset::Ultrafast),
     ));
     let plan = request.plan(&media);
-    let ffmpeg = Ffmpeg::new("ffmpeg", TIMEOUT);
+    let ffmpeg = Ffmpeg::new("ffmpeg", Some(TIMEOUT));
     let mut completed = false;
     ffmpeg
         .execute(plan.args(), |record| completed = record.finished, |_| {})
+        .await
         .unwrap();
     assert!(completed);
-    let actual = probe.probe(&destination).unwrap().output;
+    let actual = probe.probe(&destination).await.unwrap().output;
     assert_eq!(actual.streams.len(), 2);
     assert_eq!(actual.streams[0].codec_name.as_deref(), Some("h264"));
     assert_eq!(actual.streams[1].codec_name, media.streams[1].codec_name);
@@ -102,35 +104,45 @@ fn generated_media_exercises_progress_metadata_frames_and_packets() {
     let before = fs::read(&destination).unwrap();
     // Some FFmpeg builds report exit 0 when -n refuses an existing output.
     // The planner's overwrite contract is that the file stays untouched.
-    let _existing = ffmpeg.execute(plan.args(), |_| {}, |_| {});
+    let _existing = ffmpeg.execute(plan.args(), |_| {}, |_| {}).await;
     assert_eq!(fs::read(&destination).unwrap(), before);
     let copied = scratch.0.join("remux.mkv");
     let remux = TranscodeRequest::mkv(destination, &copied).plan(&actual);
-    ffmpeg.execute(remux.args(), |_| {}, |_| {}).unwrap();
-    let copied = probe.probe(&copied).unwrap().output;
+    ffmpeg.execute(remux.args(), |_| {}, |_| {}).await.unwrap();
+    let copied = probe.probe(&copied).await.unwrap().output;
     assert_eq!(copied.streams[0].codec_name, actual.streams[0].codec_name);
     assert_eq!(copied.streams[1].codec_name, actual.streams[1].codec_name);
 
-    let mut frames = Vec::new();
+    let (sender, receiver) = std::sync::mpsc::channel();
     probe
-        .frames(&input, 0, "%+1", |frame| frames.push(frame))
+        .frames(&input, 0, "%+1", move |frame| sender.send(frame).unwrap())
+        .await
         .unwrap();
+    let frames: Vec<_> = receiver.try_iter().collect();
     assert_eq!(frames.len(), 3);
     assert_eq!(frames[0].pix_fmt.as_deref(), Some("yuv420p"));
-    let mut packets = Vec::new();
+    let (sender, receiver) = std::sync::mpsc::channel();
     probe
-        .packets(&input, None, "%+1", |packet| packets.push(packet))
+        .packets(&input, None, "%+1", move |packet| {
+            sender.send(packet).unwrap()
+        })
+        .await
         .unwrap();
+    let packets: Vec<_> = receiver.try_iter().collect();
     assert!(packets.iter().any(|packet| packet.stream_index == 1));
     assert!(
         packets
             .iter()
             .all(|packet| packet.size.as_ref().unwrap().parse::<u64>().unwrap() > 0)
     );
-    let mut video_packets = Vec::new();
+    let (sender, receiver) = std::sync::mpsc::channel();
     probe
-        .packets(&input, Some(0), "%+1", |packet| video_packets.push(packet))
+        .packets(&input, Some(0), "%+1", move |packet| {
+            sender.send(packet).unwrap()
+        })
+        .await
         .unwrap();
+    let video_packets: Vec<_> = receiver.try_iter().collect();
     assert_eq!(video_packets.len(), 3);
     assert!(video_packets.iter().all(|packet| packet.stream_index == 0));
 
@@ -144,7 +156,7 @@ fn generated_media_exercises_progress_metadata_frames_and_packets() {
         .output()
         .unwrap();
     assert!(output.status.success());
-    let audio = probe.probe(&audio).unwrap().output;
+    let audio = probe.probe(&audio).await.unwrap().output;
     assert_eq!(audio.streams.len(), 1);
     assert_eq!(audio.streams[0].codec_type.as_deref(), Some("audio"));
 
@@ -155,27 +167,38 @@ fn generated_media_exercises_progress_metadata_frames_and_packets() {
             .0
             .join(std::ffi::OsString::from_vec(b"non-utf8-\xff.mkv".to_vec()));
         fs::copy(&input, &byte_path).unwrap();
-        assert_eq!(probe.probe(&byte_path).unwrap().output.streams.len(), 2);
+        assert_eq!(
+            probe.probe(&byte_path).await.unwrap().output.streams.len(),
+            2
+        );
     }
 
-    let failure = probe.probe(&scratch.0.join("missing.mkv")).unwrap_err();
+    let failure = probe
+        .probe(&scratch.0.join("missing.mkv"))
+        .await
+        .unwrap_err();
     assert!(!failure.stderr.is_empty());
     assert!(!failure.status.unwrap().success());
     assert!(matches!(failure.reason, Failure::Probe(_)));
 }
 
-#[test]
+#[tokio::test]
 #[ignore = "requires installed ffmpeg and ffprobe"]
-fn installed_tools_exercise_capability_parsers() {
-    let ffmpeg = Ffmpeg::new("ffmpeg", TIMEOUT);
-    let help = ffmpeg.encoder_help("ffv1").unwrap();
+async fn installed_tools_exercise_capability_parsers() {
+    let ffmpeg = Ffmpeg::new("ffmpeg", Some(TIMEOUT));
+    let help = ffmpeg.encoder_help("ffv1").await.unwrap();
     assert!(
         help.pixel_formats
             .unwrap()
             .iter()
             .any(|format| format == "yuv420p")
     );
-    assert!(ffmpeg.encoder_help("yog_nonexistent_encoder").is_err());
+    assert!(
+        ffmpeg
+            .encoder_help("yog_nonexistent_encoder")
+            .await
+            .is_err()
+    );
 }
 
 #[test]

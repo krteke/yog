@@ -2,9 +2,8 @@ use super::args::Arg;
 use crate::{
     error::{Error, Failure},
     ffmpeg::Ffmpeg,
-    process::run,
 };
-use std::io::Read;
+use tokio::io::AsyncReadExt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncoderHelp {
@@ -31,23 +30,26 @@ pub fn parse_encoder_help(text: &str) -> Result<EncoderHelp, Failure> {
 }
 
 impl Ffmpeg {
-    pub fn encoder_help(&self, encoder: &str) -> Result<EncoderHelp, Error> {
+    pub async fn encoder_help(&self, encoder: &str) -> Result<EncoderHelp, Error> {
         let mut args = Vec::new();
         for arg in [Arg::HideBanner, Arg::EncoderHelp(encoder)] {
             arg.append_to(&mut args);
         }
-        let output = run(
-            &self.program,
-            &args,
-            self.timeout,
-            self.cancellation.clone(),
-            |mut reader| {
-                let mut text = String::new();
-                reader.read_to_string(&mut text).map_err(Failure::Io)?;
-                Ok(text)
-            },
-            |_| {},
-        )?;
+        let output = self
+            .inner
+            .run(
+                &args,
+                |mut reader| async move {
+                    let mut text = String::new();
+                    reader
+                        .read_to_string(&mut text)
+                        .await
+                        .map_err(Failure::Io)?;
+                    Ok(text)
+                },
+                |_| {},
+            )
+            .await?;
         if !output.status.success() {
             return Err(output.failure(Failure::Exit));
         }

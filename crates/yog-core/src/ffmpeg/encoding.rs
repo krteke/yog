@@ -1,7 +1,11 @@
 use super::args::{Arg, VideoOption};
 use std::{ffi::OsString, num::NonZeroU64, path::PathBuf};
 
+#[cfg(feature = "clap")]
+mod cli;
+
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 pub enum VideoCodec {
     H264,
     Hevc,
@@ -15,6 +19,7 @@ pub enum RateControl {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 pub enum Preset {
     Ultrafast,
     Superfast,
@@ -44,6 +49,7 @@ impl Preset {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 pub enum QsvPreset {
     Veryfast,
     Faster,
@@ -69,6 +75,7 @@ impl QsvPreset {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 pub enum NvencPreset {
     P1,
     P2,
@@ -94,9 +101,12 @@ impl NvencPreset {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 pub enum NvencMultipass {
     Disabled,
+    #[cfg_attr(feature = "clap", value(name = "qres"))]
     QuarterResolution,
+    #[cfg_attr(feature = "clap", value(name = "fullres"))]
     FullResolution,
 }
 
@@ -111,41 +121,67 @@ impl NvencMultipass {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "clap", derive(clap::Subcommand))]
 pub enum VideoEncoding {
+    #[cfg_attr(feature = "clap", command(long_flag = "encode-x264"))]
     X264 {
+        #[cfg_attr(feature = "clap", command(flatten))]
         rate: Option<RateControl>,
+        #[cfg_attr(feature = "clap", arg(long, short))]
         preset: Option<Preset>,
     },
+    #[cfg_attr(feature = "clap", command(long_flag = "encode-x265"))]
     X265 {
+        #[cfg_attr(feature = "clap", command(flatten))]
         rate: Option<RateControl>,
+        #[cfg_attr(feature = "clap", arg(long, short))]
         preset: Option<Preset>,
     },
+    #[cfg_attr(feature = "clap", command(long_flag = "encode-svt-av1"))]
     SvtAv1 {
+        #[cfg_attr(feature = "clap", command(flatten))]
         rate: Option<RateControl>,
+        #[cfg_attr(feature = "clap", arg(long, short))]
         preset: Option<u8>,
     },
+    #[cfg_attr(feature = "clap", command(long_flag = "encode-aom-av1"))]
     AomAv1 {
+        #[cfg_attr(feature = "clap", command(flatten))]
         rate: Option<RateControl>,
+        #[cfg_attr(feature = "clap", arg(long, short))]
         cpu_used: Option<u8>,
     },
+    #[cfg_attr(feature = "clap", command(long_flag = "encode-rav1e"))]
     Rav1e {
+        #[cfg_attr(feature = "clap", command(flatten))]
         rate: Option<RateControl>,
+        #[cfg_attr(feature = "clap", arg(long, short))]
         speed: Option<u8>,
     },
+    #[cfg_attr(feature = "clap", command(long_flag = "encode-nvenc"))]
     Nvenc {
         codec: VideoCodec,
+        #[cfg_attr(feature = "clap", command(flatten))]
         rate: Option<RateControl>,
+        #[cfg_attr(feature = "clap", arg(long, short))]
         preset: Option<NvencPreset>,
+        #[cfg_attr(feature = "clap", arg(long, short))]
         multipass: Option<NvencMultipass>,
     },
+    #[cfg_attr(feature = "clap", command(long_flag = "encode-qsv"))]
     Qsv {
         codec: VideoCodec,
+        #[cfg_attr(feature = "clap", command(flatten))]
         rate: Option<RateControl>,
+        #[cfg_attr(feature = "clap", arg(long, short))]
         preset: Option<QsvPreset>,
     },
+    #[cfg_attr(feature = "clap", command(long_flag = "encode-vaapi"))]
     Vaapi {
         codec: VideoCodec,
+        #[cfg_attr(feature = "clap", command(flatten))]
         rate: Option<RateControl>,
+        #[cfg_attr(feature = "clap", arg(long, short))]
         device: PathBuf,
     },
 }
@@ -205,10 +241,10 @@ impl VideoEncoding {
             .append_to(args)
         };
         match rate {
-            Some(RateControl::Bitrate(value)) => {
-                append(VideoOption::Bitrate, value.to_string().into())
+            Some(RateControl::Bitrate(bitrate)) => {
+                append(VideoOption::Bitrate, bitrate.to_string().into())
             }
-            Some(RateControl::Quality(value)) => {
+            Some(RateControl::Quality(quality)) => {
                 let option = match self {
                     Self::Nvenc { .. } => {
                         append(VideoOption::RateControl, "vbr".into());
@@ -227,7 +263,7 @@ impl VideoEncoding {
                     }
                     _ => VideoOption::Crf,
                 };
-                append(option, value.to_string().into());
+                append(option, quality.to_string().into());
             }
             None => {}
         }

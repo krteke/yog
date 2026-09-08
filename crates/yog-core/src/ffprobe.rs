@@ -8,7 +8,7 @@ use crate::{
     error::{Error, Failure},
     program::Program,
 };
-use args::{Arg, Entries};
+use args::{Arg, ArgsExt, Entries};
 use serde::Deserialize;
 use std::{
     io::BufReader,
@@ -164,13 +164,9 @@ impl Ffprobe {
             + 'static,
     {
         let mut args = Vec::new();
-        for option in [Arg::ErrorsOnly, Arg::Json, Arg::ShowError]
-            .into_iter()
-            .chain(options)
-        {
-            option.append_to(&mut args);
-        }
-        Arg::Input(input).append_to(&mut args);
+        args.extend([Arg::ErrorsOnly, Arg::Json, Arg::ShowError]);
+        args.extend(options);
+        args.add(Arg::Input(input));
         let mut output = self
             .inner
             .run(

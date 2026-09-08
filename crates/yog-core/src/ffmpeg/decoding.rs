@@ -11,16 +11,13 @@ pub enum DecodingBackend {
 }
 
 impl DecodingBackend {
-    pub(super) fn append_to(&self, args: &mut Vec<OsString>) {
+    pub(super) fn args(&self) -> impl Iterator<Item = Arg<'_>> {
         let (method, device) = match self {
             Self::Software => ("none", None),
             Self::Vaapi(device) => ("vaapi", device.as_deref()),
             Self::Cuda(device) => ("cuda", device.as_deref()),
             Self::Qsv(device) => ("qsv", device.as_deref()),
         };
-        Arg::Hwaccel(method).append_to(args);
-        if let Some(device) = device {
-            Arg::HwaccelDevice(device).append_to(args);
-        }
+        std::iter::once(Arg::Hwaccel(method)).chain(device.map(Arg::HwaccelDevice))
     }
 }

@@ -42,25 +42,36 @@ impl From<Entries> for OsString {
     }
 }
 
-impl Arg<'_> {
-    /// An option expands to one or two argv elements, never a shell fragment.
-    pub fn append_to(self, args: &mut Vec<OsString>) {
-        let (flag, value) = match self {
-            Self::ErrorsOnly => ("-v", Some("error".into())),
-            Self::Json => ("-of", Some("json".into())),
-            Self::ShowError => ("-show_error", None),
-            Self::ShowFormat => ("-show_format", None),
-            Self::ShowStreams => ("-show_streams", None),
-            Self::ShowChapters => ("-show_chapters", None),
-            Self::ShowPrograms => ("-show_programs", None),
-            Self::ShowFrames => ("-show_frames", None),
-            Self::ShowPackets => ("-show_packets", None),
-            Self::SelectStream(index) => ("-select_streams", Some(index.to_string().into())),
-            Self::ReadIntervals(intervals) => ("-read_intervals", Some(intervals.into())),
-            Self::ShowEntries(entries) => ("-show_entries", Some(entries.into())),
-            Self::Input(path) => ("--", Some(path.as_os_str().to_owned())),
+pub(super) trait ArgsExt {
+    fn add(&mut self, arg: Arg<'_>);
+}
+
+impl ArgsExt for Vec<OsString> {
+    fn add(&mut self, arg: Arg<'_>) {
+        let (flag, value): (&str, Option<OsString>) = match arg {
+            Arg::ErrorsOnly => ("-v", Some("error".into())),
+            Arg::Json => ("-of", Some("json".into())),
+            Arg::ShowError => ("-show_error", None),
+            Arg::ShowFormat => ("-show_format", None),
+            Arg::ShowStreams => ("-show_streams", None),
+            Arg::ShowChapters => ("-show_chapters", None),
+            Arg::ShowPrograms => ("-show_programs", None),
+            Arg::ShowFrames => ("-show_frames", None),
+            Arg::ShowPackets => ("-show_packets", None),
+            Arg::SelectStream(index) => ("-select_streams", Some(index.to_string().into())),
+            Arg::ReadIntervals(intervals) => ("-read_intervals", Some(intervals.into())),
+            Arg::ShowEntries(entries) => ("-show_entries", Some(entries.into())),
+            Arg::Input(path) => ("--", Some(path.as_os_str().to_owned())),
         };
-        args.push(flag.into());
-        args.extend(value);
+        self.push(flag.into());
+        self.extend(value);
+    }
+}
+
+impl<'a> Extend<Arg<'a>> for Vec<OsString> {
+    fn extend<T: IntoIterator<Item = Arg<'a>>>(&mut self, args: T) {
+        for arg in args {
+            self.add(arg);
+        }
     }
 }

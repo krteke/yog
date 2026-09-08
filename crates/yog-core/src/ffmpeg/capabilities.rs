@@ -3,6 +3,7 @@ use crate::{
     error::{Error, Failure},
     ffmpeg::Ffmpeg,
 };
+use std::ffi::OsString;
 use tokio::io::AsyncReadExt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,10 +32,8 @@ pub fn parse_encoder_help(text: &str) -> Result<EncoderHelp, Failure> {
 
 impl Ffmpeg {
     pub async fn encoder_help(&self, encoder: &str) -> Result<EncoderHelp, Error> {
-        let mut args = Vec::new();
-        for arg in [Arg::HideBanner, Arg::EncoderHelp(encoder)] {
-            arg.append_to(&mut args);
-        }
+        let mut args: Vec<OsString> = Vec::new();
+        args.extend([Arg::HideBanner, Arg::EncoderHelp(encoder)]);
         let output = self
             .inner
             .run(

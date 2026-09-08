@@ -32,14 +32,12 @@ impl Ffmpeg {
         O: AsRef<OsStr>,
     {
         let mut options = Vec::new();
-        for option in [
+        options.extend([
             Arg::HideBanner,
             Arg::NoStdin,
             Arg::NoStats,
             Arg::ProgressStdout,
-        ] {
-            option.append_to(&mut options);
-        }
+        ]);
         options.extend(args.into_iter().map(|arg| arg.as_ref().to_owned()));
         let output = self
             .inner

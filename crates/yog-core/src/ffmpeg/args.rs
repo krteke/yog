@@ -73,11 +73,14 @@ pub(super) enum Arg<'a> {
     MapMetadata,
     /// -map_chapters 0
     MapChapters,
-    /// -c:{index} {name}
-    Codec { index: usize, name: &'a str },
-    /// {option}:v:{ordinal} {value}
+    /// -c copy
+    CopyAll,
+    /// -c:v {name}
+    VideoCodec(&'a str),
+    /// -c:{output_index} copy
+    CopyStream(usize),
+    /// {option}:v {value}
     Video {
-        ordinal: usize,
         option: VideoOption,
         value: OsString,
     },
@@ -85,42 +88,42 @@ pub(super) enum Arg<'a> {
     Format(&'a str),
 }
 
-impl Arg<'_> {
-    pub fn append_to(self, args: &mut Vec<OsString>) {
-        match self {
-            Self::Overwrite(overwrite) => args.push(if overwrite { "-y" } else { "-n" }.into()),
-            Self::Hwaccel(method) => args.extend(["-hwaccel".into(), method.into()]),
-            Self::HwaccelDevice(device) => {
-                args.extend(["-hwaccel_device".into(), device.to_owned()])
-            }
-            Self::Input(path) => {
-                args.push("-i".into());
-                args.push(path.as_os_str().to_owned());
-            }
-            Self::Output(path) => {
-                args.push(path.as_os_str().to_owned());
-            }
-            Self::VaapiDevice(path) => {
-                args.extend(["-vaapi_device".into(), path.as_os_str().to_owned()])
-            }
-            Self::Map(index) => args.extend(["-map".into(), format!("0:{index}").into()]),
-            Self::MapMetadata => args.extend(["-map_metadata".into(), "0".into()]),
-            Self::MapChapters => args.extend(["-map_chapters".into(), "0".into()]),
-            Self::Codec { index, name } => args.extend([format!("-c:{index}").into(), name.into()]),
-            Self::Video {
-                ordinal,
-                option,
-                value,
-            } => args.extend([format!("{}:v:{ordinal}", option.flag()).into(), value]),
-            Self::Format(format) => args.extend(["-f".into(), format.into()]),
-            Self::HideBanner => args.push("-hide_banner".into()),
-            Self::NoStdin => args.push("-nostdin".into()),
-            Self::NoStats => args.push("-nostats".into()),
-            Self::ProgressStdout => args.extend(["-progress".into(), "pipe:1".into()]),
-            Self::EncoderHelp(encoder) => {
-                args.push("-h".into());
-                args.push(format!("encoder={encoder}").into());
-            }
+pub(super) trait ArgsExt {
+    fn add(&mut self, arg: Arg<'_>);
+}
+
+impl ArgsExt for Vec<OsString> {
+    fn add(&mut self, arg: Arg<'_>) {
+        let (flag, value): (OsString, Option<OsString>) = match arg {
+            Arg::Overwrite(overwrite) => (if overwrite { "-y" } else { "-n" }.into(), None),
+            Arg::Hwaccel(method) => ("-hwaccel".into(), Some(method.into())),
+            Arg::HwaccelDevice(device) => ("-hwaccel_device".into(), Some(device.to_owned())),
+            Arg::Input(path) => ("-i".into(), Some(path.as_os_str().to_owned())),
+            Arg::Output(path) => (path.as_os_str().to_owned(), None),
+            Arg::VaapiDevice(path) => ("-vaapi_device".into(), Some(path.as_os_str().to_owned())),
+            Arg::Map(index) => ("-map".into(), Some(format!("0:{index}").into())),
+            Arg::MapMetadata => ("-map_metadata".into(), Some("0".into())),
+            Arg::MapChapters => ("-map_chapters".into(), Some("0".into())),
+            Arg::CopyAll => ("-c".into(), Some("copy".into())),
+            Arg::VideoCodec(name) => ("-c:v".into(), Some(name.into())),
+            Arg::CopyStream(index) => (format!("-c:{index}").into(), Some("copy".into())),
+            Arg::Video { option, value } => (format!("{}:v", option.flag()).into(), Some(value)),
+            Arg::Format(format) => ("-f".into(), Some(format.into())),
+            Arg::HideBanner => ("-hide_banner".into(), None),
+            Arg::NoStdin => ("-nostdin".into(), None),
+            Arg::NoStats => ("-nostats".into(), None),
+            Arg::ProgressStdout => ("-progress".into(), Some("pipe:1".into())),
+            Arg::EncoderHelp(encoder) => ("-h".into(), Some(format!("encoder={encoder}").into())),
+        };
+        self.push(flag);
+        self.extend(value);
+    }
+}
+
+impl<'a> Extend<Arg<'a>> for Vec<OsString> {
+    fn extend<T: IntoIterator<Item = Arg<'a>>>(&mut self, args: T) {
+        for arg in args {
+            self.add(arg);
         }
     }
 }

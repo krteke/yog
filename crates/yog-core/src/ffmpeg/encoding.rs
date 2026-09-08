@@ -1,4 +1,4 @@
-use super::args::{Arg, VideoOption};
+use super::args::{Arg, ArgsExt, VideoOption};
 use std::{ffi::OsString, num::NonZeroU64, path::PathBuf};
 
 #[cfg(feature = "clap")]
@@ -181,7 +181,10 @@ pub enum VideoEncoding {
         codec: VideoCodec,
         #[cfg_attr(feature = "clap", command(flatten))]
         rate: Option<RateControl>,
-        #[cfg_attr(feature = "clap", arg(long, short))]
+        #[cfg_attr(
+            feature = "clap",
+            arg(long, short, default_value = "/dev/dri/renderD128")
+        )]
         device: PathBuf,
     },
 }
@@ -221,7 +224,7 @@ impl VideoEncoding {
         }
     }
 
-    pub(super) fn append_options(&self, ordinal: usize, args: &mut Vec<OsString>) {
+    pub(super) fn append_options(&self, args: &mut Vec<OsString>) {
         let rate = match self {
             Self::X264 { rate, .. }
             | Self::X265 { rate, .. }
@@ -232,14 +235,7 @@ impl VideoEncoding {
             | Self::Qsv { rate, .. }
             | Self::Vaapi { rate, .. } => *rate,
         };
-        let mut append = |option, value: OsString| {
-            Arg::Video {
-                ordinal,
-                option,
-                value,
-            }
-            .append_to(args)
-        };
+        let mut append = |option, value: OsString| args.add(Arg::Video { option, value });
         match rate {
             Some(RateControl::Bitrate(bitrate)) => {
                 append(VideoOption::Bitrate, bitrate.to_string().into())
@@ -320,35 +316,35 @@ mod tests {
                     rate: quality,
                     preset: None,
                 },
-                vec!["-crf:v:2", "30"],
+                vec!["-crf:v", "30"],
             ),
             (
                 VideoEncoding::X265 {
                     rate: quality,
                     preset: None,
                 },
-                vec!["-crf:v:2", "30"],
+                vec!["-crf:v", "30"],
             ),
             (
                 VideoEncoding::SvtAv1 {
                     rate: quality,
                     preset: None,
                 },
-                vec!["-crf:v:2", "30"],
+                vec!["-crf:v", "30"],
             ),
             (
                 VideoEncoding::AomAv1 {
                     rate: quality,
                     cpu_used: None,
                 },
-                vec!["-b:v:2", "0", "-crf:v:2", "30"],
+                vec!["-b:v", "0", "-crf:v", "30"],
             ),
             (
                 VideoEncoding::Rav1e {
                     rate: quality,
                     speed: None,
                 },
-                vec!["-qp:v:2", "30"],
+                vec!["-qp:v", "30"],
             ),
             (
                 VideoEncoding::Qsv {
@@ -356,7 +352,7 @@ mod tests {
                     rate: quality,
                     preset: None,
                 },
-                vec!["-global_quality:v:2", "30"],
+                vec!["-global_quality:v", "30"],
             ),
             (
                 VideoEncoding::Vaapi {
@@ -364,7 +360,7 @@ mod tests {
                     rate: quality,
                     device: "/dev/dri/renderD128".into(),
                 },
-                vec!["-rc_mode:v:2", "CQP", "-qp:v:2", "30"],
+                vec!["-rc_mode:v", "CQP", "-qp:v", "30"],
             ),
             (
                 VideoEncoding::Nvenc {
@@ -373,12 +369,12 @@ mod tests {
                     preset: None,
                     multipass: None,
                 },
-                vec!["-b:v:2", "4000000"],
+                vec!["-b:v", "4000000"],
             ),
         ];
         for (encoding, expected) in cases {
             let mut args = Vec::new();
-            encoding.append_options(2, &mut args);
+            encoding.append_options(&mut args);
             assert_eq!(
                 args,
                 expected.into_iter().map(OsString::from).collect::<Vec<_>>(),

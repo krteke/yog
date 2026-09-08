@@ -70,10 +70,11 @@ async fn generated_media_exercises_progress_metadata_frames_and_packets() {
     assert!(last.finished);
     assert_eq!(last.frame, Some(3));
     assert!(last.out_time_us.unwrap() > 0);
+    assert!(last.speed.unwrap() > 0.0);
     assert!(last.total_size.unwrap() > 0);
 
     let probe = Ffprobe::new("ffprobe", Some(TIMEOUT));
-    let media = probe.probe(&input).await.unwrap().output;
+    let mut media = probe.probe(&input).await.unwrap().output;
     assert_eq!(media.streams.len(), 2);
     assert_eq!(media.streams[0].codec_name.as_deref(), Some("ffv1"));
     assert_eq!(media.streams[1].codec_type.as_deref(), Some("audio"));
@@ -84,6 +85,8 @@ async fn generated_media_exercises_progress_metadata_frames_and_packets() {
         plan::{TranscodeRequest, VideoAction},
     };
     let destination = scratch.0.join("planned 输出.mkv");
+    // Verify FFmpeg follows the caller's stream order.
+    media.streams.reverse();
     let request = TranscodeRequest::mkv(&input, &destination).with_video(VideoAction::encode_x264(
         Some(RateControl::Quality(23)),
         Some(Preset::Ultrafast),
@@ -98,8 +101,8 @@ async fn generated_media_exercises_progress_metadata_frames_and_packets() {
     assert!(completed);
     let actual = probe.probe(&destination).await.unwrap().output;
     assert_eq!(actual.streams.len(), 2);
-    assert_eq!(actual.streams[0].codec_name.as_deref(), Some("h264"));
-    assert_eq!(actual.streams[1].codec_name, media.streams[1].codec_name);
+    assert_eq!(actual.streams[0].codec_name, media.streams[0].codec_name);
+    assert_eq!(actual.streams[1].codec_name.as_deref(), Some("h264"));
     assert_eq!(actual.format.tags["title"], "protocol fixture");
     let before = fs::read(&destination).unwrap();
     // Some FFmpeg builds report exit 0 when -n refuses an existing output.
@@ -180,6 +183,121 @@ async fn generated_media_exercises_progress_metadata_frames_and_packets() {
     assert!(!failure.stderr.is_empty());
     assert!(!failure.status.unwrap().success());
     assert!(matches!(failure.reason, Failure::Probe(_)));
+}
+
+#[tokio::test]
+#[ignore = "requires installed ffmpeg and ffprobe"]
+async fn shared_video_encoding_keeps_reordered_cover_and_audio_as_copy() {
+    use yog_core::ffmpeg::{
+        encoding::{Preset, RateControl},
+        plan::{TranscodeRequest, VideoAction},
+    };
+
+    let scratch = Scratch::new();
+    let input = scratch.0.join("with-cover.mp4");
+    let output = scratch.0.join("encoded.mp4");
+    let ffmpeg = Ffmpeg::new("ffmpeg", Some(TIMEOUT));
+    ffmpeg
+        .execute(
+            [
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=64x64:rate=10:duration=0.3",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=blue:size=64x64:rate=10:duration=0.3",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=0.3",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=red:size=64x64:rate=10:duration=0.1",
+                "-map",
+                "0:v",
+                "-map",
+                "2:a",
+                "-map",
+                "1:v",
+                "-map",
+                "3:v",
+                "-c:v",
+                "mpeg4",
+                "-c:v:2",
+                "mjpeg",
+                "-disposition:v:2",
+                "attached_pic",
+                "-c:a",
+                "aac",
+            ]
+            .into_iter()
+            .map(std::ffi::OsString::from)
+            .chain([input.clone().into_os_string()]),
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+    let probe = Ffprobe::new("ffprobe", Some(TIMEOUT));
+    let mut media = probe.probe(&input).await.unwrap().output;
+    assert_eq!(media.streams.len(), 4);
+    let cover_position = media
+        .streams
+        .iter()
+        .position(|stream| stream.disposition.get("attached_pic") == Some(&1))
+        .unwrap();
+    let cover = media.streams.remove(cover_position);
+    assert_ne!(cover.index, 0);
+    media.streams.insert(0, cover);
+    // The copy override must use output index 0, not the cover's input index.
+    let plan = TranscodeRequest::mp4(&input, &output)
+        .with_video(VideoAction::encode_x264(
+            Some(RateControl::Quality(23)),
+            Some(Preset::Ultrafast),
+        ))
+        .plan(&media);
+    ffmpeg.execute(plan.args(), |_| {}, |_| {}).await.unwrap();
+    let actual = probe.probe(&output).await.unwrap().output;
+    assert_eq!(actual.streams.len(), 4);
+    assert_eq!(
+        actual
+            .streams
+            .iter()
+            .filter(|stream| stream.codec_name.as_deref() == Some("h264"))
+            .count(),
+        2
+    );
+    let cover = actual
+        .streams
+        .iter()
+        .find(|stream| stream.disposition.get("attached_pic") == Some(&1))
+        .unwrap();
+    assert_eq!(cover.codec_name.as_deref(), Some("mjpeg"));
+
+    // Compare copied packet payloads, not merely codecs that could also be re-encoded.
+    for selector in ["0:disp:attached_pic", "0:a"] {
+        let mut payloads = Vec::new();
+        for path in [&input, &output] {
+            let result = Command::new("ffmpeg")
+                .args(["-v", "error", "-nostdin", "-i"])
+                .arg(path)
+                .args(["-map", selector, "-c", "copy", "-f", "data", "pipe:1"])
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(!result.stdout.is_empty());
+            payloads.push(result.stdout);
+        }
+        assert_eq!(payloads[0], payloads[1], "{selector}");
+    }
 }
 
 #[tokio::test]

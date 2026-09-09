@@ -1,9 +1,12 @@
 use super::{
+    Ffmpeg,
     args::{Arg, ArgsExt},
     decoding::DecodingBackend,
     encoding::VideoEncoding,
+    pixel_format,
 };
 use crate::{
+    error::PlanError,
     ffmpeg::encoding::{NvencMultipass, NvencPreset, Preset, QsvPreset, RateControl, VideoCodec},
     ffprobe::types::MediaInfo,
 };
@@ -188,41 +191,94 @@ impl TranscodeRequest {
         self
     }
 
-    pub fn plan(&self, media: &MediaInfo) -> TranscodePlan {
-        let mut args = Vec::new();
-        args.add(Arg::Overwrite(self.overwrite));
-        args.extend(self.decoding.args());
-        args.extend([
-            Arg::Input(&self.input),
-            Arg::MapMetadata,
-            Arg::MapChapters,
-            Arg::CopyAll,
-        ]);
-        let mut has_video = false;
-        let mut covers = Vec::new();
+    pub async fn plan(
+        &self,
+        media: &MediaInfo,
+        ffmpeg: &Ffmpeg,
+    ) -> Result<TranscodePlan, PlanError> {
+        let formats = match self.active_encoding(media) {
+            Some(encoding)
+                if !matches!(encoding, VideoEncoding::Vaapi { .. })
+                    && self.decoding.direct_format(encoding).is_none() =>
+            {
+                ffmpeg
+                    .encoder_help(encoding.name())
+                    .await?
+                    .pixel_formats
+                    .unwrap_or_default()
+            }
+            _ => Vec::new(),
+        };
+        self.build(media, &formats)
+    }
+
+    fn active_encoding(&self, media: &MediaInfo) -> Option<&VideoEncoding> {
+        match &self.video {
+            VideoAction::Encode(encoding) if media.streams.iter().any(|s| s.is_regular_video()) => {
+                Some(encoding)
+            }
+            _ => None,
+        }
+    }
+
+    fn build(&self, media: &MediaInfo, formats: &[String]) -> Result<TranscodePlan, PlanError> {
+        let mut input_args = Vec::new();
+        let mut output_args = Vec::new();
+        input_args.add(Arg::Overwrite(self.overwrite));
+        output_args.extend([Arg::MapMetadata, Arg::MapChapters, Arg::CopyAll]);
+
+        let encoding = self.active_encoding(media);
+        if let Some(encoding) = encoding {
+            output_args.add(Arg::VideoCodec(encoding.name()));
+            encoding.append_options(&mut output_args);
+            if let VideoEncoding::Vaapi { device, .. } = encoding
+                && self.decoding.direct_format(encoding).is_none()
+            {
+                input_args.add(Arg::VaapiDevice(device));
+            }
+        }
+
         for (output_index, stream) in media.streams.iter().enumerate() {
-            args.add(Arg::Map(stream.index));
-            if stream.codec_type.as_deref() == Some("video") {
-                if stream.disposition.get("attached_pic").copied().unwrap_or(0) != 0 {
-                    covers.push(output_index);
-                } else {
-                    has_video = true;
+            output_args.add(Arg::Map(stream.index));
+            let Some(encoding) = encoding else { continue };
+
+            if !stream.is_regular_video() {
+                if stream.codec_type.as_deref() == Some("video") {
+                    output_args.add(Arg::CopyStream(output_index));
                 }
+                continue;
             }
+
+            let source =
+                media
+                    .pixel_format(stream)
+                    .ok_or_else(|| PlanError::MissingPixelFormat {
+                        stream_index: stream.index,
+                        format: stream.pix_fmt.clone(),
+                    })?;
+
+            let target = if matches!(encoding, VideoEncoding::Vaapi { .. }) {
+                pixel_format::vaapi_qsv_format(source)
+            } else {
+                pixel_format::encoder_format(media, source, formats)
+            };
+
+            let frame = self
+                .decoding
+                .plan(encoding, source, stream.index, output_index, target);
+
+            input_args.extend(frame.input_args);
+            output_args.extend(frame.output_args);
         }
-        if has_video && let VideoAction::Encode(encoding) = &self.video {
-            args.add(Arg::VideoCodec(encoding.name()));
-            encoding.append_options(&mut args);
-            if let VideoEncoding::Vaapi { device, .. } = encoding {
-                args.add(Arg::VaapiDevice(device));
-            }
-            args.extend(covers.into_iter().map(Arg::CopyStream));
-        }
-        args.extend([
+
+        input_args.add(Arg::Input(&self.input));
+        input_args.extend(output_args);
+        input_args.extend([
             Arg::Format(self.container.muxer()),
             Arg::Output(&self.output),
         ]);
-        TranscodePlan { args }
+
+        Ok(TranscodePlan { args: input_args })
     }
 }
 
@@ -231,18 +287,25 @@ mod tests {
     use super::*;
     use crate::ffmpeg::encoding::{NvencMultipass, NvencPreset, RateControl, VideoCodec};
 
+    fn descriptors() -> Vec<crate::ffprobe::types::PixelFormat> {
+        serde_json::from_str::<MediaInfo>(include_str!("test_pixel_formats.json"))
+            .unwrap()
+            .pixel_formats
+    }
+
     #[test]
     fn mapping_preserves_order_and_covers_override_shared_encoding() {
-        let media: MediaInfo = serde_json::from_str(
+        let mut media: MediaInfo = serde_json::from_str(
             r#"{"streams":[
-            {"index":9,"codec_type":"video","field_order":"tt","pix_fmt":"nv12"},
-            {"index":1,"codec_type":"audio"},
             {"index":4,"codec_type":"video","disposition":{"attached_pic":1}},
+            {"index":1,"codec_type":"audio"},
+            {"index":9,"codec_type":"video","field_order":"tt","pix_fmt":"nv12"},
             {"index":7,"codec_type":"subtitle"},
-            {"index":2,"codec_type":"video","disposition":{"still_image":1}}
+            {"index":2,"codec_type":"video","pix_fmt":"nv12","disposition":{"still_image":1}}
         ]}"#,
         )
         .unwrap();
+        media.pixel_formats = descriptors();
         let plan = TranscodeRequest {
             input: PathBuf::from("input.mkv"),
             output: PathBuf::from("-output.mkv"),
@@ -256,14 +319,15 @@ mod tests {
                 multipass: Some(NvencMultipass::FullResolution),
             }),
         }
-        .plan(&media);
+        .build(&media, &["nv12".into()])
+        .unwrap();
         let maps: Vec<_> = plan
             .args()
             .windows(2)
             .filter(|pair| pair[0] == "-map")
             .map(|pair| pair[1].to_str().unwrap())
             .collect();
-        assert_eq!(maps, ["0:9", "0:1", "0:4", "0:7", "0:2"]);
+        assert_eq!(maps, ["0:4", "0:1", "0:9", "0:7", "0:2"]);
         // Exact option sequence catches misplaced cover overrides and per-video duplication.
         let options: Vec<_> = plan
             .args()
@@ -286,14 +350,14 @@ mod tests {
                 ("-cq:v", "23"),
                 ("-preset:v", "p4"),
                 ("-multipass:v", "fullres"),
-                ("-c:2", "copy"),
+                ("-c:0", "copy"),
             ]
         );
         assert!(
             !plan
                 .args()
                 .iter()
-                .any(|arg| ["-vf", "-pix_fmt", "-filter_complex"].contains(&arg.to_str().unwrap()))
+                .any(|arg| arg.to_str().unwrap().starts_with("-filter:"))
         );
     }
 
@@ -305,13 +369,12 @@ mod tests {
             .with_output("out.webm")
             .with_container(Container::Webm)
             .with_overwrite(true)
-            .plan(&media);
+            .build(&media, &["nv12".into()])
+            .unwrap();
         assert_eq!(
             plan.args(),
             [
                 "-y",
-                "-hwaccel",
-                "none",
                 "-i",
                 "in.ts",
                 "-map_metadata",
@@ -340,18 +403,21 @@ mod tests {
                 0,
             ),
             (
-                r#"[{"index":0,"codec_type":"video"},{"index":1,"codec_type":"video"}]"#,
+                r#"[{"index":0,"codec_type":"video","pix_fmt":"yuv420p"},{"index":1,"codec_type":"video","pix_fmt":"yuv420p10le"}]"#,
                 1,
             ),
         ] {
-            let media = serde_json::from_str(&format!(r#"{{"streams":{streams}}}"#)).unwrap();
+            let mut media: MediaInfo =
+                serde_json::from_str(&format!(r#"{{"streams":{streams}}}"#)).unwrap();
+            media.pixel_formats = descriptors();
             let plan = TranscodeRequest::mkv("input", "output")
                 .with_video(VideoAction::encode_vaapi(
                     VideoCodec::Av1,
                     "/dev/dri/custom",
                     Some(RateControl::Quality(28)),
                 ))
-                .plan(&media);
+                .build(&media, &["nv12".into()])
+                .unwrap();
             assert_eq!(
                 plan.args()
                     .windows(2)
@@ -365,6 +431,160 @@ mod tests {
                     devices
                 );
             }
+        }
+    }
+    #[test]
+    fn frame_paths_cover_all_decoder_encoder_pairs_and_device_boundaries() {
+        let mut media: MediaInfo = serde_json::from_str(
+            r#"{"streams":[
+            {"index":5,"codec_type":"audio"},
+            {"index":9,"codec_type":"video","pix_fmt":"yuv420p10le"},
+            {"index":3,"codec_type":"video","disposition":{"attached_pic":1}}
+        ]}"#,
+        )
+        .unwrap();
+        media.pixel_formats = descriptors();
+        let decoders = [
+            DecodingBackend::Software,
+            DecodingBackend::Vaapi(None),
+            DecodingBackend::Cuda(None),
+            DecodingBackend::Qsv(None),
+        ];
+        let encoders = [
+            VideoAction::encode_x264(None, None),
+            VideoAction::encode_vaapi(VideoCodec::Hevc, "/dev/dri/renderD128", None),
+            VideoAction::encode_nvenc(VideoCodec::Hevc, None, None, None),
+            VideoAction::encode_qsv(VideoCodec::Hevc, None, None),
+        ];
+        for (d, decoding) in decoders.iter().enumerate() {
+            for (e, video) in encoders.iter().enumerate() {
+                let formats = if e == 0 {
+                    vec!["yuv420p10le".into()]
+                } else {
+                    vec!["p010le".into()]
+                };
+                let plan = TranscodeRequest::mkv("input", "output")
+                    .with_video(video.clone())
+                    .with_decoding(decoding.clone())
+                    .build(&media, &formats)
+                    .unwrap();
+                let value = |key: &str| {
+                    plan.args()
+                        .windows(2)
+                        .find(|p| p[0] == key)
+                        .map(|p| p[1].to_str().unwrap())
+                };
+                let direct = d != 0 && d == e;
+                assert_eq!(
+                    value("-pix_fmt:1"),
+                    Some(if direct {
+                        ["", "+vaapi", "+cuda", "+qsv"][d]
+                    } else if e == 1 {
+                        "+vaapi"
+                    } else if e == 0 {
+                        "+yuv420p10le"
+                    } else {
+                        "+p010le"
+                    })
+                );
+                let filter = value("-filter:1").unwrap_or("");
+                assert_eq!(
+                    filter.contains("hwdownload"),
+                    d != 0 && !direct,
+                    "d={d} e={e}: {filter}"
+                );
+                assert_eq!(
+                    filter.contains("hwupload"),
+                    e == 1 && !direct,
+                    "d={d} e={e}: {filter}"
+                );
+                assert_eq!(value("-vaapi_device").is_some(), e == 1 && !direct);
+                if direct {
+                    assert!(filter.is_empty());
+                }
+                assert_eq!(value("-c:2"), Some("copy"));
+                assert!(value("-pix_fmt:2").is_none());
+                assert!(value("-hwaccel:3").is_none());
+                let input = plan.args().iter().position(|a| a == "-i").unwrap();
+                assert!(plan.args()[..input].iter().any(|a| a == "-hwaccel:9"));
+            }
+        }
+        for device in [
+            None,
+            Some("/dev/dri/renderD128"),
+            Some("/dev/dri/renderD129"),
+        ] {
+            let plan = TranscodeRequest::mkv("input", "output")
+                .with_video(encoders[1].clone())
+                .with_decoding(DecodingBackend::Vaapi(device.map(OsString::from)))
+                .build(&media, &[])
+                .unwrap();
+            let value = |key: &str| {
+                plan.args()
+                    .windows(2)
+                    .find(|p| p[0] == key)
+                    .map(|p| p[1].to_str().unwrap())
+            };
+            assert_eq!(
+                value("-hwaccel_device:9"),
+                Some(device.unwrap_or("/dev/dri/renderD128"))
+            );
+            assert_eq!(
+                value("-filter:1"),
+                if device == Some("/dev/dri/renderD129") {
+                    Some("hwdownload,format=p010le,hwupload")
+                } else {
+                    None
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn only_equivalent_layouts_are_selected_and_ffmpeg_owns_rejection() {
+        for (input, supported, target, filter) in [
+            (
+                "yuv420p10le",
+                "p010le",
+                "+p010le",
+                Some("format=yuv420p10le,scale=iw:ih,format=p010le"),
+            ),
+            ("yuv444p12le", "yuv420p10le", "+yuv444p12le", None),
+            ("rgb24", "yuv444p", "+rgb24", None),
+            (
+                "rgb24",
+                "gbrp",
+                "+gbrp",
+                Some("format=rgb24,scale=iw:ih,format=gbrp"),
+            ),
+            ("rgb565le", "rgb24", "+rgb565le", None),
+            (
+                "rgb565le",
+                "rgb565be",
+                "+rgb565be",
+                Some("format=rgb565le,scale=iw:ih,format=rgb565be"),
+            ),
+            ("pal8", "yuv420p", "+pal8", None),
+            ("yuva420p", "yuv420p", "+yuva420p", None),
+            ("gray", "yuv420p", "+gray", None),
+        ] {
+            let mut media: MediaInfo = serde_json::from_str(&format!(
+                r#"{{"streams":[{{"index":0,"codec_type":"video","pix_fmt":"{input}"}}]}}"#
+            ))
+            .unwrap();
+            media.pixel_formats = descriptors();
+            let plan = TranscodeRequest::mkv("input", "output")
+                .with_video(VideoAction::encode_x264(None, None))
+                .build(&media, &[supported.into()])
+                .unwrap();
+            let value = |key: &str| {
+                plan.args()
+                    .windows(2)
+                    .find(|p| p[0] == key)
+                    .map(|p| p[1].to_str().unwrap())
+            };
+            assert_eq!(value("-pix_fmt:0"), Some(target));
+            assert_eq!(value("-filter:0"), filter);
         }
     }
 }

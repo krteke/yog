@@ -11,6 +11,8 @@ use std::{
 use tokio::task::{JoinHandle, spawn_blocking};
 use tokio_util::sync::CancellationToken;
 
+const DIAGNOSTICS_INTERVAL: Duration = Duration::from_millis(10);
+
 pub struct Diagnostics {
     sender: Option<Sender<Vec<u8>>>,
     worker: Option<JoinHandle<()>>,
@@ -38,7 +40,7 @@ impl Diagnostics {
                                 return;
                             }
                             // TODO: ??
-                            thread::sleep(Duration::from_millis(10));
+                            thread::sleep(DIAGNOSTICS_INTERVAL);
                         }
                         Err(_) => return,
                     }
@@ -68,7 +70,10 @@ impl Diagnostics {
     pub fn error(&self, error: &anyhow::Error) {
         self.write(format!("{error:#}\n").as_bytes());
 
-        let Some(err) = error.downcast_ref::<yog_core::error::Error>() else {
+        let Some(err) = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<yog_core::error::Error>())
+        else {
             return;
         };
         if !err.stderr.is_empty() {

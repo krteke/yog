@@ -1,6 +1,7 @@
 use tokio::process::ChildStdout;
 use tokio_util::{io::SyncIoBridge, sync::CancellationToken};
 mod args;
+pub mod pixel_format;
 mod streaming;
 pub mod types;
 
@@ -33,6 +34,8 @@ struct MediaResponse {
     programs: Vec<serde_json::Value>,
     #[serde(default)]
     format: MediaFormat,
+    #[serde(default)]
+    pixel_formats: Vec<types::PixelFormat>,
     error: Option<ProbeError>,
 }
 
@@ -78,6 +81,7 @@ impl Ffprobe {
                 Arg::ShowStreams,
                 Arg::ShowChapters,
                 Arg::ShowPrograms,
+                Arg::ShowPixelFormats,
             ],
             move |reader| {
                 let response: MediaResponse =
@@ -88,6 +92,7 @@ impl Ffprobe {
                         chapters: response.chapters,
                         programs: response.programs,
                         format: response.format,
+                        pixel_formats: response.pixel_formats,
                     },
                     response.error,
                 ))

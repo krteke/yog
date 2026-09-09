@@ -11,6 +11,8 @@ pub struct MediaInfo {
     pub programs: Vec<serde_json::Value>,
     #[serde(default)]
     pub format: MediaFormat,
+    #[serde(default)]
+    pub pixel_formats: Vec<PixelFormat>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -117,6 +119,37 @@ pub struct Packet {
     pub duration_time: Option<String>,
     pub size: Option<String>,
     pub flags: Option<String>,
+}
+
+impl MediaStream {
+    pub fn is_regular_video(&self) -> bool {
+        self.codec_type.as_deref() == Some("video")
+            && self.disposition.get("attached_pic").copied().unwrap_or(0) == 0
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PixelFormat {
+    pub name: String,
+    pub nb_components: u8,
+    pub log2_chroma_w: Option<u8>,
+    pub log2_chroma_h: Option<u8>,
+    pub flags: PixelFormatFlags,
+    #[serde(default)]
+    pub components: Vec<PixelComponent>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PixelFormatFlags {
+    pub rgb: u8,
+    pub alpha: u8,
+    pub palette: u8,
+    pub hwaccel: u8,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PixelComponent {
+    pub bit_depth: u8,
 }
 
 #[cfg(test)]

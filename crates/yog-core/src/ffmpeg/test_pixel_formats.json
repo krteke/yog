@@ -1,0 +1,347 @@
+{
+  "pixel_formats": [
+    {
+      "name": "yuv420p",
+      "nb_components": 3,
+      "log2_chroma_w": 1,
+      "log2_chroma_h": 1,
+      "flags": {
+        "palette": 0,
+        "hwaccel": 0,
+        "rgb": 0,
+        "alpha": 0
+      },
+      "components": [
+        {
+          "bit_depth": 8
+        },
+        {
+          "bit_depth": 8
+        },
+        {
+          "bit_depth": 8
+        }
+      ]
+    },
+    {
+      "name": "rgb24",
+      "nb_components": 3,
+      "flags": {
+        "palette": 0,
+        "hwaccel": 0,
+        "rgb": 1,
+        "alpha": 0
+      },
+      "components": [
+        {
+          "bit_depth": 8
+        },
+        {
+          "bit_depth": 8
+        },
+        {
+          "bit_depth": 8
+        }
+      ]
+    },
+    {
+      "name": "yuv422p",
+      "nb_components": 3,
+      "log2_chroma_w": 1,
+      "log2_chroma_h": 0,
+      "flags": {
+        "palette": 0,
+        "hwaccel": 0,
+        "rgb": 0,
+        "alpha": 0
+      },
+      "components": [
+        {
+          "bit_depth": 8
+        },
+        {
+          "bit_depth": 8
+        },
+        {
+          "bit_depth": 8
+        }
+      ]
+    },
+    {
+      "name": "yuv444p",
+      "nb_components": 3,
+      "log2_chroma_w": 0,
+      "log2_chroma_h": 0,
+      "flags": {
+        "palette": 0,
+        "hwaccel": 0,
+        "rgb": 0,
+        "alpha": 0
+      },
+      "components": [
+        {
+          "bit_depth": 8
+        },
+        {
+          "bit_depth": 8
+        },
+        {
+          "bit_depth": 8
+        }
+      ]
+    },
+    {
+      "name": "gray",
+      "nb_components": 1,
+      "flags": {
+        "palette": 0,
+        "hwaccel": 0,
+        "rgb": 0,
+        "alpha": 0
+      },
+      "components": [
+        {
+          "bit_depth": 8
+        }
+      ]
+    },
+    {
+      "name": "nv12",
+      "nb_components": 3,
+      "log2_chroma_w": 1,
+      "log2_chroma_h": 1,
+      "flags": {
+        "palette": 0,
+        "hwaccel": 0,
+        "rgb": 0,
+        "alpha": 0
+      },
+      "components": [
+        {
+          "bit_depth": 8
+        },
+        {
+          "bit_depth": 8
+        },
+        {
+          "bit_depth": 8
+        }
+      ]
+    },
+    {
+      "name": "yuva420p",
+      "nb_components": 4,
+      "log2_chroma_w": 1,
+      "log2_chroma_h": 1,
+      "flags": {
+        "palette": 0,
+        "hwaccel": 0,
+        "rgb": 0,
+        "alpha": 1
+      },
+      "components": [
+        {
+          "bit_depth": 8
+        },
+        {
+          "bit_depth": 8
+        },
+        {
+          "bit_depth": 8
+        },
+        {
+          "bit_depth": 8
+        }
+      ]
+    },
+    {
+      "name": "yuv420p10le",
+      "nb_components": 3,
+      "log2_chroma_w": 1,
+      "log2_chroma_h": 1,
+      "flags": {
+        "palette": 0,
+        "hwaccel": 0,
+        "rgb": 0,
+        "alpha": 0
+      },
+      "components": [
+        {
+          "bit_depth": 10
+        },
+        {
+          "bit_depth": 10
+        },
+        {
+          "bit_depth": 10
+        }
+      ]
+    },
+    {
+      "name": "gbrp",
+      "nb_components": 3,
+      "flags": {
+        "palette": 0,
+        "hwaccel": 0,
+        "rgb": 1,
+        "alpha": 0
+      },
+      "components": [
+        {
+          "bit_depth": 8
+        },
+        {
+          "bit_depth": 8
+        },
+        {
+          "bit_depth": 8
+        }
+      ]
+    },
+    {
+      "name": "yuv444p12le",
+      "nb_components": 3,
+      "log2_chroma_w": 0,
+      "log2_chroma_h": 0,
+      "flags": {
+        "palette": 0,
+        "hwaccel": 0,
+        "rgb": 0,
+        "alpha": 0
+      },
+      "components": [
+        {
+          "bit_depth": 12
+        },
+        {
+          "bit_depth": 12
+        },
+        {
+          "bit_depth": 12
+        }
+      ]
+    },
+    {
+      "name": "p010le",
+      "nb_components": 3,
+      "log2_chroma_w": 1,
+      "log2_chroma_h": 1,
+      "flags": {
+        "palette": 0,
+        "hwaccel": 0,
+        "rgb": 0,
+        "alpha": 0
+      },
+      "components": [
+        {
+          "bit_depth": 10
+        },
+        {
+          "bit_depth": 10
+        },
+        {
+          "bit_depth": 10
+        }
+      ]
+    },
+    {
+      "name": "p012le",
+      "nb_components": 3,
+      "log2_chroma_w": 1,
+      "log2_chroma_h": 1,
+      "flags": {
+        "palette": 0,
+        "hwaccel": 0,
+        "rgb": 0,
+        "alpha": 0
+      },
+      "components": [
+        {
+          "bit_depth": 12
+        },
+        {
+          "bit_depth": 12
+        },
+        {
+          "bit_depth": 12
+        }
+      ]
+    },
+    {
+      "name": "rgb565le",
+      "nb_components": 3,
+      "bits_per_pixel": 16,
+      "flags": {
+        "big_endian": 0,
+        "palette": 0,
+        "bitstream": 0,
+        "hwaccel": 0,
+        "planar": 0,
+        "rgb": 1,
+        "alpha": 0
+      },
+      "components": [
+        {
+          "index": 1,
+          "bit_depth": 5
+        },
+        {
+          "index": 2,
+          "bit_depth": 6
+        },
+        {
+          "index": 3,
+          "bit_depth": 5
+        }
+      ]
+    },
+    {
+      "name": "rgb565be",
+      "nb_components": 3,
+      "bits_per_pixel": 16,
+      "flags": {
+        "big_endian": 1,
+        "palette": 0,
+        "bitstream": 0,
+        "hwaccel": 0,
+        "planar": 0,
+        "rgb": 1,
+        "alpha": 0
+      },
+      "components": [
+        {
+          "index": 1,
+          "bit_depth": 5
+        },
+        {
+          "index": 2,
+          "bit_depth": 6
+        },
+        {
+          "index": 3,
+          "bit_depth": 5
+        }
+      ]
+    },
+    {
+      "name": "pal8",
+      "nb_components": 1,
+      "bits_per_pixel": 8,
+      "flags": {
+        "big_endian": 0,
+        "palette": 1,
+        "bitstream": 0,
+        "hwaccel": 0,
+        "planar": 0,
+        "rgb": 0,
+        "alpha": 1
+      },
+      "components": [
+        {
+          "index": 1,
+          "bit_depth": 8
+        }
+      ]
+    }
+  ]
+}

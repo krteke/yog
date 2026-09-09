@@ -9,7 +9,8 @@ pub enum RunError {
 impl From<anyhow::Error> for RunError {
     fn from(error: anyhow::Error) -> Self {
         if error
-            .downcast_ref::<yog_core::error::Error>()
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<yog_core::error::Error>())
             .is_some_and(|error| matches!(error.reason, Failure::Cancelled))
         {
             Self::Cancelled

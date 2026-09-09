@@ -91,8 +91,8 @@ async fn generated_media_exercises_progress_metadata_frames_and_packets() {
         Some(RateControl::Quality(23)),
         Some(Preset::Ultrafast),
     ));
-    let plan = request.plan(&media);
     let ffmpeg = Ffmpeg::new("ffmpeg", Some(TIMEOUT));
+    let plan = request.plan(&media, &ffmpeg).await.unwrap();
     let mut completed = false;
     ffmpeg
         .execute(plan.args(), |record| completed = record.finished, |_| {})
@@ -110,7 +110,10 @@ async fn generated_media_exercises_progress_metadata_frames_and_packets() {
     let _existing = ffmpeg.execute(plan.args(), |_| {}, |_| {}).await;
     assert_eq!(fs::read(&destination).unwrap(), before);
     let copied = scratch.0.join("remux.mkv");
-    let remux = TranscodeRequest::mkv(destination, &copied).plan(&actual);
+    let remux = TranscodeRequest::mkv(destination, &copied)
+        .plan(&actual, &ffmpeg)
+        .await
+        .unwrap();
     ffmpeg.execute(remux.args(), |_| {}, |_| {}).await.unwrap();
     let copied = probe.probe(&copied).await.unwrap().output;
     assert_eq!(copied.streams[0].codec_name, actual.streams[0].codec_name);
@@ -259,7 +262,9 @@ async fn shared_video_encoding_keeps_reordered_cover_and_audio_as_copy() {
             Some(RateControl::Quality(23)),
             Some(Preset::Ultrafast),
         ))
-        .plan(&media);
+        .plan(&media, &ffmpeg)
+        .await
+        .unwrap();
     ffmpeg.execute(plan.args(), |_| {}, |_| {}).await.unwrap();
     let actual = probe.probe(&output).await.unwrap().output;
     assert_eq!(actual.streams.len(), 4);

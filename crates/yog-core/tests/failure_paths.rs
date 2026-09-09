@@ -302,25 +302,35 @@ async fn explicit_hardware_decode_is_passed_before_input_and_failure_is_returned
     let tool = Tool::new(
         r#"
 [ "$1" = '-hide_banner' ] || exit 42
+if [ "$2" = '-h' ]; then
+    printf 'Encoder libx264 [H264]:\n Supported pixel formats: yuv420p\n'
+    exit 0
+fi
 shift 5
 [ "$1" = '-n' ] || exit 42
-[ "$2" = '-hwaccel' ] && [ "$3" = 'vaapi' ] || exit 42
-[ "$4" = '-hwaccel_device' ] && [ "$5" = '/nonexistent/yog device' ] || exit 42
-[ "$6" = '-i' ] && [ "$7" = 'input.mkv' ] || exit 42
+[ "$2" = '-hwaccel:0' ] && [ "$3" = 'vaapi' ] || exit 42
+[ "$4" = '-hwaccel_device:0' ] && [ "$5" = '/nonexistent/yog device' ] || exit 42
+[ "$6" = '-hwaccel_output_format:0' ] && [ "$7" = 'vaapi' ] || exit 42
+[ "$8" = '-i' ] && [ "$9" = 'input.mkv' ] || exit 42
 printf 'device initialization failed' >&2
 exit 17
 "#,
     )
     .await;
-    let media: MediaInfo =
-        serde_json::from_str(r#"{"streams":[{"index":0,"codec_type":"video"}]}"#).unwrap();
+    let mut media: MediaInfo =
+        serde_json::from_str(include_str!("../src/ffmpeg/test_pixel_formats.json")).unwrap();
+    media.streams =
+        serde_json::from_str(r#"[{"index":0,"codec_type":"video","pix_fmt":"yuv420p"}]"#).unwrap();
+    let ffmpeg = Ffmpeg::new(&tool.path, Some(Duration::from_secs(5)));
     let plan = TranscodeRequest::mkv("input.mkv", "output.mkv")
         .with_decoding(DecodingBackend::Vaapi(Some(
             "/nonexistent/yog device".into(),
         )))
         .with_video(VideoAction::encode_x264(None, None))
-        .plan(&media);
-    let error = Ffmpeg::new(&tool.path, Some(Duration::from_secs(5)))
+        .plan(&media, &ffmpeg)
+        .await
+        .unwrap();
+    let error = ffmpeg
         .execute(plan.args(), |_| {}, |_| {})
         .await
         .unwrap_err();

@@ -49,9 +49,10 @@ impl FromArgMatches for RateControl {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        ffmpeg::plan::{TranscodeRequest, VideoAction},
-        ffprobe::types::MediaInfo,
+    use crate::ffmpeg::{
+        args::{Arg, ArgsExt},
+        encoding::VideoEncoding,
+        plan::VideoAction,
     };
     use clap::Parser;
 
@@ -62,9 +63,7 @@ mod tests {
     }
 
     #[test]
-    fn backend_specific_types_reach_the_transcode_plan() {
-        let media: MediaInfo =
-            serde_json::from_str(r#"{"streams":[{"index":0,"codec_type":"video"}]}"#).unwrap();
+    fn backend_specific_types_reach_encoder_options() {
         for (flags, expected) in [
             (
                 vec!["--encode-x265", "--preset", "slow", "--bitrate", "4000000"],
@@ -124,16 +123,21 @@ mod tests {
             let video = Cli::try_parse_from(["yog"].into_iter().chain(flags.iter().copied()))
                 .unwrap()
                 .video;
-            let plan = TranscodeRequest::mkv("input", "output")
-                .with_video(video)
-                .plan(&media);
+            let VideoAction::Encode(encoding) = video else {
+                panic!("expected encoder")
+            };
+            let mut args = Vec::new();
+            args.add(Arg::VideoCodec(encoding.name()));
+            encoding.append_options(&mut args);
+            if let VideoEncoding::Vaapi { device, .. } = &encoding {
+                args.add(Arg::VaapiDevice(device));
+            }
             for (option, value) in expected {
                 assert!(
-                    plan.args()
-                        .windows(2)
+                    args.windows(2)
                         .any(|pair| pair[0] == option && pair[1] == value),
                     "{flags:?}: missing {option} {value} in {:?}",
-                    plan.args()
+                    args
                 );
             }
         }

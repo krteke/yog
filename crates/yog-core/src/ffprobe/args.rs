@@ -15,6 +15,8 @@ pub(super) enum Arg<'a> {
     ShowChapters,
     /// -show_programs
     ShowPrograms,
+    /// -show_pixel_formats
+    ShowPixelFormats,
     /// -show_frames
     ShowFrames,
     /// -show_packets
@@ -56,6 +58,7 @@ impl ArgsExt for Vec<OsString> {
             Arg::ShowStreams => ("-show_streams", None),
             Arg::ShowChapters => ("-show_chapters", None),
             Arg::ShowPrograms => ("-show_programs", None),
+            Arg::ShowPixelFormats => ("-show_pixel_formats", None),
             Arg::ShowFrames => ("-show_frames", None),
             Arg::ShowPackets => ("-show_packets", None),
             Arg::SelectStream(index) => ("-select_streams", Some(index.to_string().into())),

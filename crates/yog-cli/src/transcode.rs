@@ -35,17 +35,20 @@ pub async fn run(
     request.output = output.part().to_owned();
     request.overwrite = true;
 
-    let media = Ffprobe::new(options.ffprobe, timeout)
-        .with_cancellation(cancelled.clone())
+    let probe = Ffprobe::new(options.ffprobe, timeout).with_cancellation(cancelled.clone());
+    let ffmpeg = Ffmpeg::new(options.ffmpeg, timeout).with_cancellation(cancelled.clone());
+    let media = probe
         .probe(&request.input)
         .await
         .context("probe failed")?
         .output;
 
-    let plan = request.plan(&media);
+    let plan = request
+        .plan(&media, &ffmpeg)
+        .await
+        .context("cannot plan strict pixel formats")?;
     progress.start(media.format.duration.as_deref());
-    Ffmpeg::new(options.ffmpeg, timeout)
-        .with_cancellation(cancelled.clone())
+    ffmpeg
         .execute(
             plan.args(),
             |record| progress.update(record),

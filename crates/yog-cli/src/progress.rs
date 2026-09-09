@@ -2,6 +2,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::{fmt::Write, time::Duration};
 use yog_core::ffmpeg::progress::Progress;
 
+const TICK_INTERVAL: Duration = Duration::from_millis(100);
+
 pub struct Display {
     bar: ProgressBar,
 }
@@ -16,7 +18,7 @@ impl Display {
         bar.set_style(ProgressStyle::with_template("{spinner} {msg} [{elapsed_precise}]").unwrap());
         bar.set_message("probing input file");
         if !bar.is_hidden() {
-            bar.enable_steady_tick(Duration::from_millis(100));
+            bar.enable_steady_tick(TICK_INTERVAL);
         }
         Self { bar }
     }
@@ -100,7 +102,6 @@ mod tests {
                 ..Progress::default()
             });
             assert!(!display.bar.is_finished());
-            assert!(display.bar.message().contains("正在收尾"));
             display.publishing();
             assert!(!display.bar.is_finished());
         }

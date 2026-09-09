@@ -65,7 +65,7 @@ impl Drop for Fixture {
 fn only_the_part_file_is_written_and_success_is_published_by_rename() {
     let fixture = Fixture::new(
         r#"for last do :; done
-case "$last" in */output.mkv.part) ;; *) exit 8 ;; esac
+case "$last" in output.mkv.part|*/output.mkv.part) ;; *) exit 8 ;; esac
 test -f "$last" || exit 9
 test ! -e output.mkv || exit 10
 printf encoded > "$last"
@@ -76,7 +76,7 @@ printf 'frame=1\nout_time_us=1000000\nprogress=end\n'"#,
     assert_eq!(fs::read(fixture.0.join("output.mkv")).unwrap(), b"encoded");
     assert!(!fixture.0.join("output.mkv.part").exists());
     assert_eq!(fs::read_dir(&fixture.0).unwrap().count(), 4);
-    assert!(String::from_utf8_lossy(&result.stderr).contains("完成"));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("complete:"));
     assert!(!result.stderr.contains(&0x1b));
 }
 
@@ -95,7 +95,7 @@ fn failures_delete_only_our_part_and_preserve_existing_targets() {
         assert_eq!(result.status.code(), Some(1), "{body}");
         assert_eq!(fs::read(fixture.0.join("output.mkv")).unwrap(), b"original");
         assert!(!fixture.0.join("output.mkv.part").exists());
-        assert!(!String::from_utf8_lossy(&result.stderr).contains("完成"));
+        assert!(!String::from_utf8_lossy(&result.stderr).contains("complete:"));
     }
     fixture.tool(
         "ffmpeg",
@@ -152,9 +152,16 @@ fn probe_and_ffmpeg_diagnostics_are_emitted_once_in_both_output_modes() {
         let error = String::from_utf8_lossy(&result.stderr);
         assert_eq!(result.status.code(), Some(1));
         assert_eq!(error.matches("FFMPEG-DIAGNOSTIC").count(), 1, "{error}");
-        assert!(error.contains("转码失败"));
-        assert!(!error.contains("完成"));
+        assert!(error.contains("transcode failed"));
+        assert!(!error.contains("complete:"));
     }
+    // Encoder-help errors are nested in PlanError; retain their diagnostics.
+    let result = fixture.command().arg("--encode-x264").output().unwrap();
+    let error = String::from_utf8_lossy(&result.stderr);
+    assert_eq!(result.status.code(), Some(1));
+    assert_eq!(error.matches("FFMPEG-DIAGNOSTIC").count(), 1, "{error}");
+    assert_eq!(error.matches("process failed").count(), 1, "{error}");
+    assert!(!fixture.0.join("output.mkv.part").exists());
     fixture.tool(
         "ffprobe",
         "printf 'FFPROBE-DIAGNOSTIC\\n' >&2; printf '{}'; exit 8",
@@ -168,7 +175,7 @@ fn probe_and_ffmpeg_diagnostics_are_emitted_once_in_both_output_modes() {
         let error = String::from_utf8_lossy(&result.stderr);
         assert_eq!(result.status.code(), Some(1));
         assert_eq!(error.matches("FFPROBE-DIAGNOSTIC").count(), 1, "{error}");
-        assert!(error.contains("探测输入失败"));
+        assert!(error.contains("probe failed"));
         assert!(!fixture.0.join("output.mkv.part").exists());
     }
 }
@@ -239,17 +246,28 @@ while :; do :; done"#,
 
 #[test]
 fn cancellation_during_probe_or_encoding_uses_one_exit_status_and_cleans_part() {
-    for phase in ["ffprobe", "ffmpeg"] {
+    for phase in ["ffprobe", "ffmpeg", "encoder-help"] {
         let fixture = Fixture::new("");
         fixture.tool(
-            phase,
+            if phase == "encoder-help" {
+                "ffmpeg"
+            } else {
+                phase
+            },
             "printf '%s' \"$$\" > child-pid; printf waiting >&2; while :; do :; done",
         );
         fs::write(fixture.0.join("output.mkv"), b"original").unwrap();
         let mut child = Running(
             fixture
                 .command()
-                .args(["-O", "--copy"])
+                .args([
+                    "-O",
+                    if phase == "encoder-help" {
+                        "--encode-x264"
+                    } else {
+                        "--copy"
+                    },
+                ])
                 .process_group(0)
                 .stderr(Stdio::piped())
                 .spawn()

@@ -54,16 +54,16 @@ use yog_core::{
 };
 
 # #[tokio::main(flavor = "current_thread")]
-# async fn main() -> Result<(), yog_core::error::Error> {
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
 let input = Path::new("input.mkv");
+let ffmpeg = Ffmpeg::new("ffmpeg", Some(Duration::from_secs(3600)));
 let media = Ffprobe::new("ffprobe", Some(Duration::from_secs(30))).probe(input).await?.output;
 let plan = TranscodeRequest::mkv(input, "output.mkv")
     .with_video(VideoAction::encode_x264(
         Some(RateControl::Quality(23)), Some(Preset::Medium),
     ))
-    .plan(&media);
-Ffmpeg::new("ffmpeg", Some(Duration::from_secs(3600)))
-    .execute(plan.args(), |_| {}, |_| {}).await?;
+    .plan(&media, &ffmpeg).await?;
+ffmpeg.execute(plan.args(), |_| {}, |_| {}).await?;
 # Ok(())
 # }
 ```

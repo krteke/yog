@@ -7,6 +7,7 @@ pub mod capabilities;
 pub mod decoding;
 pub mod encoding;
 pub mod execution;
+mod pixel_format;
 pub mod plan;
 pub mod progress;
 pub mod vmaf;

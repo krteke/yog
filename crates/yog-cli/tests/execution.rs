@@ -84,6 +84,81 @@ printf 'frame=1\nout_time_us=1000000\nprogress=end\n'"#,
 }
 
 #[test]
+fn verification_is_opt_in_and_warnings_do_not_prevent_publication() {
+    let fixture = Fixture::new("for last do :; done; printf encoded > \"$last\"");
+    fixture.tool("ffprobe", r#"
+printf '%s\n' "$*" >> probe-calls
+for last do :; done
+case "$last" in
+  input) printf '%s' '{"streams":[{"index":8,"codec_type":"audio","codec_name":"aac"}],"format":{"tags":{"title":"original"}}}' ;;
+  *.part)
+    test ! -e output.mkv || exit 8
+    test "$(cat "$last")" = encoded || exit 9
+    printf '%s' '{"streams":[],"format":{"tags":{"title":"changed"}}}' ;;
+  *) exit 10 ;;
+esac
+"#);
+    let result = fixture.command().arg("--copy").output().unwrap();
+    assert!(result.status.success());
+    let calls = fs::read_to_string(fixture.0.join("probe-calls")).unwrap();
+    assert_eq!(calls.lines().count(), 1);
+    assert!(!calls.contains("-show_data_hash"));
+    assert!(!String::from_utf8_lossy(&result.stderr).contains("warning: verify:"));
+    for flags in [["-v", "--copy"], ["--copy", "--verify"]] {
+        fs::remove_file(fixture.0.join("output.mkv")).unwrap();
+        fs::write(fixture.0.join("probe-calls"), "").unwrap();
+        let result = fixture.command().args(flags).output().unwrap();
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(result.status.success(), "{stderr}");
+        assert!(stderr.contains("audio stream #8: missing"), "{stderr}");
+        assert!(stderr.contains("metadata \"title\""), "{stderr}");
+        assert!(stderr.find("warning: verify:").unwrap() < stderr.find("complete:").unwrap());
+        assert!(!fixture.0.join("output.mkv.part").exists());
+        assert_eq!(fs::read(fixture.0.join("output.mkv")).unwrap(), b"encoded");
+        let calls = fs::read_to_string(fixture.0.join("probe-calls")).unwrap();
+        assert_eq!(calls.lines().count(), 2);
+        assert!(
+            calls
+                .lines()
+                .all(|line| line.contains("-show_data_hash sha256"))
+        );
+    }
+}
+
+#[test]
+fn verification_probe_and_packet_failures_warn_instead_of_deleting_the_output() {
+    let fixture = Fixture::new("for last do :; done; printf encoded > \"$last\"");
+    for failure in ["metadata", "packets"] {
+        fixture.tool(
+            "ffprobe",
+            &format!(
+                r#"
+for last do :; done
+case "$*" in *-show_packets*) echo 'broken packet probe' >&2; exit 7 ;; esac
+if test "$last" != input && test '{failure}' = metadata; then
+  echo 'broken output probe' >&2
+  exit 6
+fi
+printf '%s' '{{"streams":[{{"index":0,"codec_type":"audio"}}]}}'
+"#
+            ),
+        );
+        let result = fixture
+            .command()
+            .args(["--copy", "--verify", "-O"])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(result.status.success(), "{stderr}");
+        assert!(stderr.contains("verification incomplete"), "{stderr}");
+        assert!(stderr.contains("broken"), "{stderr}");
+        assert!(stderr.contains("complete:"));
+        assert!(!fixture.0.join("output.mkv.part").exists());
+        assert_eq!(fs::read(fixture.0.join("output.mkv")).unwrap(), b"encoded");
+    }
+}
+
+#[test]
 fn failures_delete_only_our_part_and_preserve_existing_targets() {
     let fixture = Fixture::new("");
     for body in [
@@ -249,23 +324,41 @@ while :; do :; done"#,
 }
 
 #[test]
-fn cancellation_during_probe_or_encoding_uses_one_exit_status_and_cleans_part() {
-    for phase in ["ffprobe", "ffmpeg", "encoder-help"] {
+fn cancellation_during_probe_encoding_or_verification_cleans_only_the_part() {
+    for phase in [
+        "ffprobe",
+        "ffmpeg",
+        "encoder-help",
+        "verify",
+        "verify-packets",
+    ] {
         let fixture = Fixture::new("");
-        fixture.tool(
-            if phase == "encoder-help" {
-                "ffmpeg"
+        let blocking = "printf '%s' \"$$\" > child-pid; printf waiting >&2; while :; do :; done";
+        if phase.starts_with("verify") {
+            fixture.tool("ffmpeg", "for last do :; done; printf encoded > \"$last\"");
+            let condition = if phase == "verify" {
+                "for last do :; done; test \"$last\" != input"
             } else {
-                phase
-            },
-            "printf '%s' \"$$\" > child-pid; printf waiting >&2; while :; do :; done",
-        );
+                "case \"$*\" in *-show_packets*) true ;; *) false ;; esac"
+            };
+            fixture.tool("ffprobe", &format!("if {condition}; then {blocking}; fi\nprintf '%s' '{{\"streams\":[{{\"index\":0,\"codec_type\":\"audio\"}}]}}'"));
+        } else {
+            fixture.tool(
+                if phase == "encoder-help" {
+                    "ffmpeg"
+                } else {
+                    phase
+                },
+                blocking,
+            );
+        }
         fs::write(fixture.0.join("output.mkv"), b"original").unwrap();
         let mut child = Running(
             fixture
                 .command()
                 .args([
                     "-O",
+                    "--verify",
                     if phase == "encoder-help" {
                         "--encode-x264"
                     } else {

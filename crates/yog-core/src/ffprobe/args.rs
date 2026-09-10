@@ -17,6 +17,8 @@ pub(super) enum Arg<'a> {
     ShowPrograms,
     /// -show_pixel_formats
     ShowPixelFormats,
+    /// -show_data_hash sha256
+    DataHash,
     /// -show_frames
     ShowFrames,
     /// -show_packets
@@ -33,6 +35,7 @@ pub(super) enum Arg<'a> {
 pub(super) enum Entries {
     Frame,
     Packet,
+    PacketHash,
 }
 
 impl From<Entries> for OsString {
@@ -40,6 +43,7 @@ impl From<Entries> for OsString {
         match entries {
             Entries::Frame => "frame=stream_index,media_type,pts_time,best_effort_timestamp_time,duration_time,pix_fmt,color_range,color_space,color_transfer,color_primaries,chroma_location,interlaced_frame,top_field_first:frame_side_data",
             Entries::Packet => "packet=stream_index,pts_time,dts_time,duration_time,size,flags",
+            Entries::PacketHash => "packet=stream_index,data_hash,pts_time,duration_time",
         }.into()
     }
 }
@@ -59,6 +63,7 @@ impl ArgsExt for Vec<OsString> {
             Arg::ShowChapters => ("-show_chapters", None),
             Arg::ShowPrograms => ("-show_programs", None),
             Arg::ShowPixelFormats => ("-show_pixel_formats", None),
+            Arg::DataHash => ("-show_data_hash", Some("sha256".into())),
             Arg::ShowFrames => ("-show_frames", None),
             Arg::ShowPackets => ("-show_packets", None),
             Arg::SelectStream(index) => ("-select_streams", Some(index.to_string().into())),

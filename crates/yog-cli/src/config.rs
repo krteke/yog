@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::{fs, path::Path, sync::OnceLock};
+use std::{fs, io, path::Path, sync::OnceLock};
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
@@ -23,15 +23,18 @@ impl Default for Config {
 impl Config {
     fn load(path: Option<&Path>) -> Result<Self> {
         let config = match path {
-            Some(path) => path.to_owned(),
+            Some(path) => path,
             None => match dirs::config_dir() {
-                Some(dir) => dir.join("yog").join("config.toml"),
+                Some(dir) => &dir.join("yog").join("config.toml"),
                 None => return Ok(Self::default()),
             },
         };
 
-        let Ok(content) = fs::read_to_string(&config) else {
-            return Ok(Self::default());
+        let content = match fs::read_to_string(config) {
+            Err(error) if path.is_none() && error.kind() == io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            result => result.with_context(|| format!("cannot read config {}", config.display()))?,
         };
 
         toml::from_str(&content).with_context(|| format!("invalid config {}", config.display()))

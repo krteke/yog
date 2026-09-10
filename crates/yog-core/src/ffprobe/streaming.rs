@@ -1,3 +1,5 @@
+use crate::ffprobe::types::MediaStream;
+
 use super::types::ProbeError;
 use serde::de::{DeserializeOwned, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use std::{fmt, io::Read, marker::PhantomData};
@@ -69,6 +71,16 @@ impl<'de, T: DeserializeOwned, F: FnMut(T)> Visitor<'de> for Records<'_, T, F> {
             (self.consume)(record);
         }
         Ok(())
+    }
+}
+
+impl MediaStream {
+    pub fn kind(&self) -> &str {
+        if self.codec_type.as_deref() == Some("video") && !self.is_regular_video() {
+            "cover"
+        } else {
+            self.codec_type.as_deref().unwrap_or("unknown")
+        }
     }
 }
 

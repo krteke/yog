@@ -1,12 +1,16 @@
 use crate::{
     args::ExecutionOptions, diagnostics::Diagnostics, error::RunError, output::Output,
-    progress::Display,
+    progress::Display, verify::Verifier,
 };
 use anyhow::Context;
+use rustix::path::Arg;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use yog_core::{
-    ffmpeg::{Ffmpeg, plan::TranscodeRequest},
+    ffmpeg::{
+        Ffmpeg,
+        plan::{TranscodeRequest, VideoAction},
+    },
     ffprobe::Ffprobe,
 };
 
@@ -35,7 +39,9 @@ pub async fn run(
     request.output = output.part().to_owned();
     request.overwrite = true;
 
-    let probe = Ffprobe::new(options.ffprobe, timeout).with_cancellation(cancelled.clone());
+    let probe = Ffprobe::new(options.ffprobe, timeout)
+        .with_cancellation(cancelled.clone())
+        .with_data_hashes(options.verify);
     let ffmpeg = Ffmpeg::new(options.ffmpeg, timeout).with_cancellation(cancelled.clone());
     let media = probe
         .probe(&request.input)
@@ -57,14 +63,43 @@ pub async fn run(
         .await
         .context("transcode failed")?;
 
+    let mut warnings = Vec::new();
+    if options.verify {
+        progress.verifying();
+        if let Err(error) = probe
+            .verify(
+                &request.input,
+                output.part(),
+                &media,
+                matches!(request.video, VideoAction::Copy),
+                |warning| warnings.push(warning),
+            )
+            .await
+        {
+            if matches!(error.reason, yog_core::error::Failure::Cancelled) {
+                return Err(RunError::Cancelled);
+            }
+            warnings.push(format!("verification incomplete: {error}"));
+            if !error.stderr.is_empty() {
+                warnings.push(error.stderr.to_string_lossy().trim_end().to_owned());
+            }
+        }
+    }
     if cancelled.is_cancelled() {
         return Err(RunError::Cancelled);
     }
 
     progress.publishing();
-    output
+    let published = output
         .publish()
-        .with_context(|| format!("cannot publish output {}", target.display()))?;
+        .with_context(|| format!("cannot publish output {}", target.display()));
+
+    drop(progress);
+
+    for warning in warnings {
+        diagnostics.write(format!("warning: verify: {warning}\n").as_bytes());
+    }
+    published?;
 
     Ok(())
 }

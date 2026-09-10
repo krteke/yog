@@ -57,6 +57,54 @@ impl Drop for Tool {
 }
 
 #[tokio::test]
+async fn packet_fingerprints_separate_stream_order_payload_and_presentation_time() {
+    let tool = Tool::new(r#"
+for last do :; done
+case "$last" in
+  original) printf '%s' '{"packets":[{"stream_index":4,"data_hash":"A","pts_time":"0.000000"},{"stream_index":9,"data_hash":"C"},{"stream_index":4,"data_hash":"B","pts_time":"0.020000"},{"stream_index":20,"data_hash":"ignored"}]}' ;;
+  interleaved) printf '%s' '{"packets":[{"stream_index":9,"data_hash":"C"},{"stream_index":4,"data_hash":"A","pts_time":"0.000000"},{"stream_index":20,"data_hash":"different"},{"stream_index":4,"data_hash":"B","pts_time":"0.020000"}]}' ;;
+  payload) printf '%s' '{"packets":[{"stream_index":4,"data_hash":"B","pts_time":"0.000000"},{"stream_index":9,"data_hash":"C"},{"stream_index":4,"data_hash":"A","pts_time":"0.020000"}]}' ;;
+  timing) printf '%s' '{"packets":[{"stream_index":4,"data_hash":"A","pts_time":"0.010000"},{"stream_index":9,"data_hash":"C"},{"stream_index":4,"data_hash":"B","pts_time":"0.030000"}]}' ;;
+  missing) printf '%s' '{"packets":[{"stream_index":4}]}' ;;
+esac
+"#).await;
+    let probe = tool.probe().with_timeout(Some(Duration::from_secs(5)));
+    let original = probe
+        .packet_fingerprints(Path::new("original"), &[4, 9])
+        .await
+        .unwrap()
+        .output;
+    let interleaved = probe
+        .packet_fingerprints(Path::new("interleaved"), &[4, 9])
+        .await
+        .unwrap()
+        .output;
+    assert_eq!(original, interleaved);
+    assert_eq!(original.len(), 2);
+    let payload = probe
+        .packet_fingerprints(Path::new("payload"), &[4, 9])
+        .await
+        .unwrap()
+        .output;
+    assert_eq!(original[&4].packets, payload[&4].packets);
+    assert_ne!(original[&4].sha256, payload[&4].sha256);
+    assert_eq!(original[&4].timing_sha256, payload[&4].timing_sha256);
+    assert_eq!(original[&9], payload[&9]);
+    let timing = probe
+        .packet_fingerprints(Path::new("timing"), &[4, 9])
+        .await
+        .unwrap()
+        .output;
+    assert_eq!(original[&4].sha256, timing[&4].sha256);
+    assert_ne!(original[&4].timing_sha256, timing[&4].timing_sha256);
+    let error = probe
+        .packet_fingerprints(Path::new("missing"), &[4])
+        .await
+        .unwrap_err();
+    assert!(matches!(error.reason, Failure::Json(_)));
+}
+
+#[tokio::test]
 async fn failed_process_preserves_json_error_stderr_and_exit_status() {
     let tool = Tool::new(
         "printf '%s' '{\"error\":{\"code\":-22,\"string\":\"invalid input\"}}'; printf 'decoder detail' >&2; exit 9",

@@ -7,6 +7,7 @@ mod output;
 mod progress;
 mod terminal;
 mod transcode;
+mod verify;
 
 use anyhow::Context;
 use args::Args;

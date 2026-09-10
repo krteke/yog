@@ -37,6 +37,8 @@ pub struct ExecutionOptions {
     pub timeout: Option<u64>,
     #[arg(long, global = true)]
     pub verbose: bool,
+    #[arg(short, long, global = true)]
+    pub verify: bool,
 }
 
 impl Args {

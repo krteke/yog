@@ -71,6 +71,13 @@ impl Display {
     pub fn publishing(&self) {
         self.bar.set_message("publishing");
     }
+
+    pub fn verifying(&self) {
+        self.bar.set_style(
+            ProgressStyle::with_template("{spinner} {msg} [{elapsed_precise}]").unwrap(),
+        );
+        self.bar.set_message("verifying output");
+    }
 }
 
 impl Drop for Display {

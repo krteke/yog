@@ -11,7 +11,9 @@ use crate::{
 };
 use args::{Arg, ArgsExt, Entries};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeMap,
     io::BufReader,
     path::{Path, PathBuf},
     time::Duration,
@@ -42,6 +44,14 @@ struct MediaResponse {
 #[derive(Debug, Clone)]
 pub struct Ffprobe {
     inner: Program,
+    data_hashes: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct PacketFingerprint {
+    pub packets: u64,
+    pub sha256: [u8; 32],
+    pub timing_sha256: [u8; 32],
 }
 
 impl Ffprobe {
@@ -52,6 +62,7 @@ impl Ffprobe {
                 timeout,
                 cancellation: CancellationToken::new(),
             },
+            data_hashes: false,
         }
     }
 
@@ -62,6 +73,11 @@ impl Ffprobe {
 
     pub fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
         self.inner.cancellation = cancellation;
+        self
+    }
+
+    pub fn with_data_hashes(mut self, enabled: bool) -> Self {
+        self.data_hashes = enabled;
         self
     }
 
@@ -82,7 +98,9 @@ impl Ffprobe {
                 Arg::ShowChapters,
                 Arg::ShowPrograms,
                 Arg::ShowPixelFormats,
-            ],
+            ]
+            .into_iter()
+            .chain(self.data_hashes.then_some(Arg::DataHash)),
             move |reader| {
                 let response: MediaResponse =
                     serde_json::from_reader(reader).map_err(Failure::Json)?;
@@ -95,6 +113,78 @@ impl Ffprobe {
                         pixel_formats: response.pixel_formats,
                     },
                     response.error,
+                ))
+            },
+        )
+        .await
+    }
+
+    pub async fn packet_fingerprints(
+        &self,
+        input: &Path,
+        stream_indices: &[usize],
+    ) -> Result<ProbeResult<BTreeMap<usize, PacketFingerprint>>, Error> {
+        #[derive(Deserialize)]
+        struct PacketHash {
+            stream_index: usize,
+            data_hash: String,
+            pts_time: Option<String>,
+            duration_time: Option<String>,
+        }
+        #[derive(Default)]
+        struct StreamHashes {
+            packets: u64,
+            data: Sha256,
+            timing: Sha256,
+        }
+
+        let mut hashes: BTreeMap<_, _> = stream_indices
+            .iter()
+            .map(|&index| (index, StreamHashes::default()))
+            .collect();
+        let select = match stream_indices {
+            [index] => Some(Arg::SelectStream(*index)),
+            _ => None,
+        };
+
+        self.query(
+            input,
+            [
+                Arg::ShowPackets,
+                Arg::DataHash,
+                Arg::ShowEntries(Entries::PacketHash),
+            ]
+            .into_iter()
+            .chain(select),
+            move |reader| {
+                let error = streaming::records(reader, "packets", &mut |packet: PacketHash| {
+                    let Some(hash) = hashes.get_mut(&packet.stream_index) else {
+                        return;
+                    };
+                    hash.data.update(packet.data_hash.as_bytes());
+                    hash.data.update(b"\n");
+                    for time in [packet.pts_time, packet.duration_time] {
+                        hash.timing.update(time.as_deref().unwrap_or("").as_bytes());
+                        hash.timing.update(b"\n");
+                    }
+                    hash.packets += 1;
+                })
+                .map_err(Failure::Json)?;
+                Ok((
+                    hashes
+                        .into_iter()
+                        .map(|(index, hash)| {
+                            (
+                                index,
+                                PacketFingerprint {
+                                    packets: hash.packets,
+                                    sha256: hash.data.finalize().into(),
+                                    timing_sha256: hash.timing.finalize().into(),
+                                },
+                            )
+                        })
+                        .collect(),
+                    error,
                 ))
             },
         )

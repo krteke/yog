@@ -58,7 +58,10 @@ pub struct MediaStream {
     pub sample_rate: Option<String>,
     pub channels: Option<u32>,
     pub channel_layout: Option<String>,
+    pub bits_per_sample: Option<u32>,
+    pub bits_per_raw_sample: Option<String>,
     pub extradata_size: Option<u64>,
+    pub extradata_hash: Option<String>,
     #[serde(default)]
     pub disposition: BTreeMap<String, i32>,
     #[serde(default)]

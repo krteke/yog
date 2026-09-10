@@ -1,8 +1,7 @@
+use crate::config;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::{fmt::Write, time::Duration};
 use yog_core::ffmpeg::progress::Progress;
-
-const TICK_INTERVAL: Duration = Duration::from_millis(100);
 
 pub struct Display {
     bar: ProgressBar,
@@ -18,7 +17,9 @@ impl Display {
         bar.set_style(ProgressStyle::with_template("{spinner} {msg} [{elapsed_precise}]").unwrap());
         bar.set_message("probing input file");
         if !bar.is_hidden() {
-            bar.enable_steady_tick(TICK_INTERVAL);
+            bar.enable_steady_tick(Duration::from_millis(
+                config::get().progress_tick_interval_ms,
+            ));
         }
         Self { bar }
     }

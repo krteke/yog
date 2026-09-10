@@ -8,9 +8,11 @@ use yog_core::ffmpeg::{
 use crate::decoding::DecodingArgs;
 
 #[derive(Debug, Parser)]
-#[command(name = "yog", version, about)]
+#[command(version, about)]
 pub struct Args {
     input: PathBuf,
+    #[arg(long, global = true)]
+    pub config: Option<PathBuf>,
     #[arg(short, long, global = true, required = false)]
     output: PathBuf,
     #[arg(short = 'C', long, default_value = "mkv", global = true)]

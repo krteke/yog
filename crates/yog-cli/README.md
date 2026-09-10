@@ -9,3 +9,10 @@ cargo run -p yog-cli -- input.mkv --encode-vaapi hevc -o output.mkv --device /de
 cargo run -p yog-cli -- --help
 cargo run -p yog-cli -- --encode-nvenc --help
 ```
+
+config.toml
+
+```toml
+progress_tick_interval_ms = 100
+diagnostics_retry_interval_ms = 10
+```

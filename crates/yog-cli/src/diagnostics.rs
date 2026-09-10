@@ -11,7 +11,7 @@ use std::{
 use tokio::task::{JoinHandle, spawn_blocking};
 use tokio_util::sync::CancellationToken;
 
-const DIAGNOSTICS_INTERVAL: Duration = Duration::from_millis(10);
+use crate::config;
 
 pub struct Diagnostics {
     sender: Option<Sender<Vec<u8>>>,
@@ -23,9 +23,12 @@ pub struct Diagnostics {
 
 impl Diagnostics {
     pub fn new(verbose: bool, cancelled: CancellationToken) -> Self {
+        let retry_interval = Duration::from_millis(config::get().diagnostics_retry_interval_ms);
+
         let (sender, receiver) = mpsc::channel::<Vec<u8>>();
         let stopping = CancellationToken::new();
         let stop = stopping.clone();
+
         let worker = spawn_blocking(move || {
             for bytes in receiver {
                 let mut remaining = bytes.as_slice();
@@ -39,14 +42,14 @@ impl Diagnostics {
                             if stop.is_cancelled() || cancelled.is_cancelled() {
                                 return;
                             }
-                            // TODO: ??
-                            thread::sleep(DIAGNOSTICS_INTERVAL);
+                            thread::sleep(retry_interval);
                         }
                         Err(_) => return,
                     }
                 }
             }
         });
+
         Self {
             sender: Some(sender),
             worker: Some(worker),
@@ -76,6 +79,7 @@ impl Diagnostics {
         else {
             return;
         };
+
         if !err.stderr.is_empty() {
             if !self.streamed.load(Ordering::Relaxed) {
                 self.write(&err.stderr);

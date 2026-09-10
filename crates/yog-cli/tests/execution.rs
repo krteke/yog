@@ -40,17 +40,20 @@ impl Fixture {
 
     fn command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_yog"));
-        command.current_dir(&self.0).args([
-            "input",
-            "-o",
-            "output.mkv",
-            "--ffprobe",
-            "./ffprobe",
-            "--ffmpeg",
-            "./ffmpeg",
-            "--timeout",
-            "3",
-        ]);
+        command
+            .current_dir(&self.0)
+            .env("XDG_CONFIG_HOME", &self.0)
+            .args([
+                "input",
+                "-o",
+                "output.mkv",
+                "--ffprobe",
+                "./ffprobe",
+                "--ffmpeg",
+                "./ffmpeg",
+                "--timeout",
+                "3",
+            ]);
         command
     }
 }
@@ -205,6 +208,7 @@ while :; do :; done"#,
     let mut child = Running(
         command
             .current_dir(&fixture.0)
+            .env("XDG_CONFIG_HOME", &fixture.0)
             .args([
                 "input",
                 "-o",

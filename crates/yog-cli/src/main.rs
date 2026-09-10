@@ -1,4 +1,5 @@
 mod args;
+mod config;
 mod decoding;
 mod diagnostics;
 mod error;
@@ -18,9 +19,13 @@ use crate::error::RunError;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
-    let (request, options) = Args::parse()
-        .into_request()
-        .unwrap_or_else(|error| error.exit());
+    let args = Args::parse();
+    if let Err(error) = config::init(args.config.as_deref()) {
+        eprintln!("{error:#}");
+        return ExitCode::FAILURE;
+    }
+
+    let (request, options) = args.into_request().unwrap_or_else(|error| error.exit());
 
     let _terminal = match terminal::NonblockingStderr::new() {
         Ok(terminal) => terminal,

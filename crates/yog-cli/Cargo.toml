@@ -11,6 +11,9 @@ clap = { workspace = true, features = ["derive"] }
 rustix = { workspace = true, features = ["fs"] }
 indicatif.workspace = true
 anyhow.workspace = true
+serde = { workspace = true, features = ["derive"] }
+toml.workspace = true
+dirs.workspace = true
 
 [profile.release]
 codegen-units = 1

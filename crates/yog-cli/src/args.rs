@@ -1,9 +1,6 @@
 use clap::{CommandFactory, Parser};
 use std::path::PathBuf;
-use yog_core::ffmpeg::{
-    encoding::VideoEncoding,
-    plan::{Container, TranscodeRequest, VideoAction},
-};
+use yog_core::ffmpeg::plan::{Container, TranscodeRequest, VideoAction};
 
 use crate::decoding::DecodingArgs;
 
@@ -44,10 +41,7 @@ pub struct ExecutionOptions {
 impl Args {
     pub fn into_request(self) -> Result<(TranscodeRequest, ExecutionOptions), clap::Error> {
         let request = TranscodeRequest::new(self.input, self.output, self.container)
-            .with_video(
-                self.video
-                    .unwrap_or_else(|| VideoAction::Encode(VideoEncoding::default())),
-            )
+            .with_video(self.video.unwrap_or_default())
             .with_decoding(
                 self.decoding
                     .try_into()
@@ -64,7 +58,7 @@ mod tests {
     use clap::{CommandFactory, error::ErrorKind};
     use yog_core::ffmpeg::{
         decoding::DecodingBackend,
-        encoding::{NvencMultipass, NvencPreset, Preset, RateControl, VideoCodec},
+        encoding::{NvencMultipass, NvencPreset, Preset, RateControl, VideoCodec, VideoEncoding},
     };
 
     #[test]
@@ -314,7 +308,7 @@ mod tests {
 
     #[test]
     fn omitted_mode_and_omitted_rate_keep_their_defaults() {
-        for flags in [vec![], vec!["--encode-x264"]] {
+        for flags in [vec![], vec!["--copy"]] {
             let (request, _) =
                 Args::try_parse_from(["yog", "input", "-o", "output"].into_iter().chain(flags))
                     .unwrap()
@@ -322,13 +316,7 @@ mod tests {
                     .unwrap();
             assert!(matches!(request.container, Container::Matroska));
             assert!(matches!(request.decoding, DecodingBackend::Software));
-            assert!(matches!(
-                request.video,
-                VideoAction::Encode(VideoEncoding::X264 {
-                    rate: None,
-                    preset: None
-                })
-            ));
+            assert!(matches!(request.video, VideoAction::Copy));
         }
         let (request, _) = Args::try_parse_from([
             "yog",
@@ -456,9 +444,6 @@ mod tests {
                 .unwrap();
         assert_eq!(request.input, PathBuf::from("--encode-nvenc"));
         assert_eq!(request.output, PathBuf::from("--encode-vaapi"));
-        assert!(matches!(
-            request.video,
-            VideoAction::Encode(VideoEncoding::X264 { .. })
-        ));
+        assert!(matches!(request.video, VideoAction::Copy));
     }
 }

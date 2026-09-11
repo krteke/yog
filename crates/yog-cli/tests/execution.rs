@@ -84,6 +84,117 @@ printf 'frame=1\nout_time_us=1000000\nprogress=end\n'"#,
 }
 
 #[test]
+fn temporary_covers_are_readable_and_cleaned_on_success_or_failure() {
+    let fixture = Fixture::new(
+        r#"
+case "$*" in
+    *image2pipe*)
+        case "$COVER_FAILURE" in
+            empty) exit 0 ;;
+            extraction) printf partial; printf EXTRACTION-ERROR >&2; exit 7 ;;
+            second) case "$*" in *'0:3'*) printf partial; exit 8 ;; esac ;;
+            extraction-timeout) printf partial; while :; do :; done ;;
+        esac
+        printf original-image
+        exit 0 ;;
+esac
+previous=''
+for arg do
+    if test "$previous" = -attach; then
+        test "$(cat "$arg")" = original-image || exit 9
+        printf '%s\n' "$arg" >> cover-paths
+    fi
+    previous="$arg"
+done
+printf partial > "$arg"
+case "$COVER_FAILURE" in
+    encoding) printf ENCODING-ERROR >&2; exit 10 ;;
+    encoding-timeout) while :; do :; done ;;
+esac
+printf encoded > "$arg"
+"#,
+    );
+    fixture.tool("ffprobe", r#"printf '%s' '{"streams":[{"index":1,"codec_type":"video","codec_name":"png","disposition":{"attached_pic":1}},{"index":2,"codec_type":"audio"},{"index":3,"codec_type":"video","codec_name":"mjpeg","disposition":{"attached_pic":1}}]}'"#);
+    let temporary = fixture.0.join("temporary covers");
+    fs::create_dir(&temporary).unwrap();
+    for failure in [
+        "none",
+        "empty",
+        "extraction",
+        "second",
+        "encoding",
+        "extraction-timeout",
+        "encoding-timeout",
+        "tempdir",
+    ] {
+        fs::write(fixture.0.join("output.mkv"), b"original").unwrap();
+        fs::write(fixture.0.join("cover-paths"), b"").unwrap();
+        let result = fixture
+            .command()
+            .env(
+                "TMPDIR",
+                if failure == "tempdir" {
+                    temporary.join("missing")
+                } else {
+                    temporary.clone()
+                },
+            )
+            .env("COVER_FAILURE", failure)
+            .args(["--copy", "-O", "--timeout", "1"])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert_eq!(
+            result.status.code(),
+            Some(if failure == "none" { 0 } else { 1 }),
+            "{failure}: {stderr}"
+        );
+        let expected: &[u8] = if failure == "none" {
+            b"encoded"
+        } else {
+            b"original"
+        };
+        assert_eq!(
+            fs::read(fixture.0.join("output.mkv")).unwrap(),
+            expected,
+            "{failure}"
+        );
+        assert!(!fixture.0.join("output.mkv.part").exists(), "{failure}");
+        assert_eq!(
+            fs::read_dir(&temporary).unwrap().count(),
+            0,
+            "{failure}: leaked cover directory"
+        );
+        let paths: Vec<_> = fs::read_to_string(fixture.0.join("cover-paths"))
+            .unwrap()
+            .lines()
+            .map(PathBuf::from)
+            .collect();
+        if matches!(failure, "none" | "encoding" | "encoding-timeout") {
+            assert_eq!(paths.len(), 2, "{failure}");
+            assert_eq!(paths[0].parent(), paths[1].parent());
+            assert_ne!(paths[0], paths[1]);
+            assert!(
+                paths
+                    .iter()
+                    .all(|path| path.starts_with(&temporary) && !path.exists())
+            );
+        } else {
+            assert!(
+                paths.is_empty(),
+                "{failure}: encoding started after extraction failed"
+            );
+        }
+        if failure == "empty" {
+            assert!(
+                stderr.contains("cover extraction produced no image data"),
+                "{stderr}"
+            );
+        }
+    }
+}
+
+#[test]
 fn verification_is_opt_in_and_warnings_do_not_prevent_publication() {
     let fixture = Fixture::new("for last do :; done; printf encoded > \"$last\"");
     fixture.tool("ffprobe", r#"
@@ -122,6 +233,126 @@ esac
                 .lines()
                 .all(|line| line.contains("-show_data_hash sha256"))
         );
+    }
+}
+
+#[test]
+fn verification_uses_planned_cover_tags_and_preserves_content_checks() {
+    use serde_json::{Value, json};
+    let fixture = Fixture::new(
+        r#"
+case "$*" in *image2pipe*) printf image; exit 0 ;; esac
+for last do :; done
+printf encoded > "$last"
+"#,
+    );
+    fixture.tool(
+        "ffprobe",
+        r#"
+for last do :; done
+case "$last" in input) prefix=input ;; *) prefix=output ;; esac
+case "$*" in *-show_packets*) cat "$prefix-packets.json" ;; *) cat "$prefix.json" ;; esac
+"#,
+    );
+    let mut original = json!({"streams":[
+        {"index":8,"codec_type":"video","codec_name":"png","pix_fmt":"yuv420p","disposition":{"attached_pic":1}},
+        {"index":2,"codec_type":"audio","codec_name":"aac"},
+        {"index":5,"codec_type":"video","codec_name":"mjpeg","pix_fmt":"yuv420p","disposition":{"attached_pic":1},"tags":{"filename":"back.jpg","mimetype":"image/jpeg","title":"Keep this"}}
+    ]});
+    original["pixel_formats"] = serde_json::from_str::<Value>(include_str!(
+        "../../yog-core/src/ffmpeg/test_pixel_formats.json"
+    ))
+    .unwrap()["pixel_formats"]
+        .clone();
+    fs::write(fixture.0.join("input.json"), original.to_string()).unwrap();
+    let source_packets = json!({"packets":[
+        {"stream_index":8,"data_hash":"SHA256:front","pts_time":"0.500000","duration_time":"10.000000"},
+        {"stream_index":2,"data_hash":"SHA256:audio","pts_time":"0.000000","duration_time":"0.100000"},
+        {"stream_index":5,"data_hash":"SHA256:back","pts_time":"0.000000"}
+    ]});
+    fs::write(
+        fixture.0.join("input-packets.json"),
+        source_packets.to_string(),
+    )
+    .unwrap();
+
+    for (case, expected) in [
+        ("ok", None),
+        ("missing filename", Some("metadata \"filename\"")),
+        ("wrong mime", Some("metadata \"mimetype\"")),
+        ("changed original title", Some("metadata \"title\"")),
+        ("unplanned tag", Some("metadata \"extra\"")),
+        ("changed image", Some("cover stream #8 -> #1: packet data")),
+        ("lost cover", Some("cover stream #5: missing")),
+        ("cover as video", Some("video stream #2: added")),
+        (
+            "audio timing",
+            Some("audio stream #2 -> #0: packet presentation"),
+        ),
+        ("unplanned mp4 tags", Some("metadata \"FILENAME\": added")),
+    ] {
+        let mut actual = original.clone();
+        actual["streams"] = json!([
+            original["streams"][1],
+            original["streams"][0],
+            original["streams"][2]
+        ]);
+        for (index, stream) in actual["streams"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .enumerate()
+        {
+            stream["index"] = json!(index);
+        }
+        actual["streams"][1]["tags"] = json!({"FILENAME":"cover.png","MIMETYPE":"image/png"});
+        let mut packets = source_packets.clone();
+        packets["packets"][0]["stream_index"] = json!(1);
+        packets["packets"][0]["pts_time"] = json!("0.000000");
+        packets["packets"][0]["duration_time"] = Value::Null;
+        packets["packets"][1]["stream_index"] = json!(0);
+        packets["packets"][2]["stream_index"] = json!(2);
+        match case {
+            "ok" | "unplanned mp4 tags" => {}
+            "missing filename" => {
+                actual["streams"][1]["tags"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("FILENAME");
+            }
+            "wrong mime" => actual["streams"][1]["tags"]["MIMETYPE"] = json!("image/jpeg"),
+            "changed original title" => actual["streams"][2]["tags"]["title"] = json!("Lost"),
+            "unplanned tag" => actual["streams"][1]["tags"]["extra"] = json!("unexpected"),
+            "changed image" => packets["packets"][0]["data_hash"] = json!("SHA256:changed"),
+            "lost cover" => {
+                actual["streams"].as_array_mut().unwrap().pop();
+            }
+            "cover as video" => actual["streams"][2]["disposition"]["attached_pic"] = json!(0),
+            "audio timing" => packets["packets"][1]["pts_time"] = json!("0.200000"),
+            _ => unreachable!(),
+        }
+        fs::write(fixture.0.join("output.json"), actual.to_string()).unwrap();
+        fs::write(fixture.0.join("output-packets.json"), packets.to_string()).unwrap();
+        let mut command = fixture.command();
+        command.args(["--copy", "--verify", "-O"]);
+        if case == "unplanned mp4 tags" {
+            command.args(["-C", "mp4"]);
+        }
+        let result = command.output().unwrap();
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(result.status.success(), "{case}: {stderr}");
+        match expected {
+            Some(expected) => assert!(stderr.contains(expected), "{case}: {stderr}"),
+            None => assert!(!stderr.contains("warning: verify:"), "{stderr}"),
+        }
+        assert_eq!(
+            stderr
+                .lines()
+                .any(|line| line.contains("cover stream") && line.contains("packet presentation")),
+            case == "unplanned mp4 tags",
+            "{case}: {stderr}"
+        );
+        assert!(!fixture.0.join("output.mkv.part").exists());
     }
 }
 
@@ -329,12 +560,27 @@ fn cancellation_during_probe_encoding_or_verification_cleans_only_the_part() {
         "ffprobe",
         "ffmpeg",
         "encoder-help",
+        "cover-extraction",
+        "cover-encoding",
         "verify",
         "verify-packets",
     ] {
         let fixture = Fixture::new("");
+        let temporary = fixture.0.join("temporary covers");
+        fs::create_dir(&temporary).unwrap();
         let blocking = "printf '%s' \"$$\" > child-pid; printf waiting >&2; while :; do :; done";
-        if phase.starts_with("verify") {
+        if phase.starts_with("cover-") {
+            fixture.tool("ffprobe", r#"printf '%s' '{"streams":[{"index":0,"codec_type":"audio"},{"index":1,"codec_type":"video","codec_name":"png","disposition":{"attached_pic":1}}]}'"#);
+            let extract = if phase == "cover-extraction" {
+                blocking
+            } else {
+                "printf image; exit 0"
+            };
+            fixture.tool(
+                "ffmpeg",
+                &format!("case \"$*\" in *image2pipe*) {extract} ;; esac\n{blocking}"),
+            );
+        } else if phase.starts_with("verify") {
             fixture.tool("ffmpeg", "for last do :; done; printf encoded > \"$last\"");
             let condition = if phase == "verify" {
                 "for last do :; done; test \"$last\" != input"
@@ -356,6 +602,7 @@ fn cancellation_during_probe_encoding_or_verification_cleans_only_the_part() {
         let mut child = Running(
             fixture
                 .command()
+                .env("TMPDIR", &temporary)
                 .args([
                     "-O",
                     "--verify",
@@ -396,6 +643,11 @@ fn cancellation_during_probe_encoding_or_verification_cleans_only_the_part() {
             thread::sleep(Duration::from_millis(10));
         };
         assert_eq!(status.code(), Some(130), "{phase}");
+        assert_eq!(
+            fs::read_dir(&temporary).unwrap().count(),
+            0,
+            "{phase}: leaked cover directory"
+        );
         assert!(!fixture.0.join("output.mkv.part").exists());
         assert_eq!(fs::read(fixture.0.join("output.mkv")).unwrap(), b"original");
         let pid = fs::read_to_string(fixture.0.join("child-pid")).unwrap();

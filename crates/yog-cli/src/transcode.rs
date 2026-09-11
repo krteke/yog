@@ -56,7 +56,7 @@ pub async fn run(
     progress.start(media.format.duration.as_deref());
     ffmpeg
         .execute(
-            plan.args(),
+            &plan,
             |record| progress.update(record),
             |bytes| diagnostics.ffmpeg(bytes),
         )
@@ -72,6 +72,7 @@ pub async fn run(
                 output.part(),
                 &media,
                 matches!(request.video, VideoAction::Copy),
+                &plan,
                 |warning| warnings.push(warning),
             )
             .await

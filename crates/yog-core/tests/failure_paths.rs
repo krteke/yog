@@ -14,7 +14,14 @@ use std::{
 };
 use tokio::sync::{Mutex, MutexGuard};
 use tokio_util::sync::CancellationToken;
-use yog_core::{error::Failure, ffmpeg::Ffmpeg, ffprobe::Ffprobe};
+use yog_core::{
+    error::Failure,
+    ffmpeg::{
+        Ffmpeg,
+        plan::{TranscodePlan, TranscodeRequest},
+    },
+    ffprobe::Ffprobe,
+};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 // Avoid concurrently creating executables while another test forks: a child
@@ -45,6 +52,15 @@ impl Tool {
             path,
             _guard: guard,
         }
+    }
+    async fn plan(&self) -> TranscodePlan {
+        TranscodeRequest::mkv("input", "unused-output")
+            .plan(
+                &serde_json::from_str(r#"{"streams":[{"index":0,"codec_type":"audio"}]}"#).unwrap(),
+                &Ffmpeg::new(&self.path, None),
+            )
+            .await
+            .unwrap()
     }
     fn probe(&self) -> Ffprobe {
         Ffprobe::new(&self.path, Some(Duration::from_millis(10)))
@@ -242,7 +258,7 @@ async fn ffmpeg_drains_both_pipes_and_end_record_does_not_hide_failure() {
     let mut diagnostics = Vec::new();
     let error = Ffmpeg::new(&tool.path, Some(Duration::from_secs(5)))
         .execute(
-            std::iter::empty::<&str>(),
+            &tool.plan().await,
             |progress| {
                 count += 1;
                 finished = progress.finished;
@@ -271,7 +287,7 @@ async fn ffmpeg_callbacks_can_cancel_while_child_is_running() {
         let error = Ffmpeg::new(&tool.path, Some(Duration::from_secs(5)))
             .with_cancellation(cancelled.clone())
             .execute(
-                std::iter::empty::<&str>(),
+                &tool.plan().await,
                 |_| {
                     if !cancel_from_stderr {
                         cancelled.cancel();
@@ -301,7 +317,7 @@ async fn ffmpeg_callback_panics_reap_before_propagation() {
         let result = AssertUnwindSafe(async {
             Ffmpeg::new(&tool.path, Some(Duration::from_secs(5)))
                 .execute(
-                    std::iter::empty::<&str>(),
+                    &tool.plan().await,
                     |_| {
                         assert!(panic_from_stderr, "progress callback panic");
                     },
@@ -323,7 +339,7 @@ async fn ffmpeg_exit_without_progress_is_valid_but_silence_still_times_out() {
     let tool = Tool::new("exit 0").await;
     Ffmpeg::new(&tool.path, Some(Duration::from_secs(5)))
         .execute(
-            std::iter::empty::<&str>(),
+            &tool.plan().await,
             |_| panic!("unexpected progress"),
             |_| {},
         )
@@ -332,7 +348,7 @@ async fn ffmpeg_exit_without_progress_is_valid_but_silence_still_times_out() {
     drop(tool);
     let tool = Tool::new("printf 'waiting' >&2; while :; do :; done").await;
     let error = Ffmpeg::new(&tool.path, Some(Duration::from_millis(100)))
-        .execute(std::iter::empty::<&str>(), |_| {}, |_| {})
+        .execute(&tool.plan().await, |_| {}, |_| {})
         .await
         .unwrap_err();
     assert!(matches!(error.reason, Failure::TimedOut));
@@ -378,10 +394,7 @@ exit 17
         .plan(&media, &ffmpeg)
         .await
         .unwrap();
-    let error = ffmpeg
-        .execute(plan.args(), |_| {}, |_| {})
-        .await
-        .unwrap_err();
+    let error = ffmpeg.execute(&plan, |_| {}, |_| {}).await.unwrap_err();
     assert!(matches!(error.reason, Failure::Exit));
     assert_eq!(error.status.unwrap().code(), Some(17));
     assert_eq!(error.stderr, b"device initialization failed");
@@ -393,7 +406,7 @@ async fn continuous_progress_does_not_extend_the_process_deadline() {
     let started = Instant::now();
     let mut records = 0;
     let error = Ffmpeg::new(&tool.path, Some(Duration::from_millis(100)))
-        .execute(std::iter::empty::<&str>(), |_| records += 1, |_| {})
+        .execute(&tool.plan().await, |_| records += 1, |_| {})
         .await
         .unwrap_err();
     assert!(records > 0);

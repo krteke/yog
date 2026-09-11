@@ -85,6 +85,14 @@ pub(super) enum Arg<'a> {
     VideoCodec(&'a str),
     /// -c:{output_index} copy
     CopyStream(usize),
+    /// -frames:v 1
+    OneVideoFrame,
+    /// pipe:1
+    ImageStdout,
+    /// -attach {path}
+    Attach(&'a Path),
+    /// -metadata:s:{output_index} {key}={value}
+    StreamMetadata(usize, &'a str, &'a str),
     /// {option}:v {value}
     Video {
         option: VideoOption,
@@ -127,6 +135,13 @@ impl ArgsExt for Vec<OsString> {
             Arg::CopyAll => ("-c".into(), Some("copy".into())),
             Arg::VideoCodec(name) => ("-c:v".into(), Some(name.into())),
             Arg::CopyStream(index) => (format!("-c:{index}").into(), Some("copy".into())),
+            Arg::OneVideoFrame => ("-frames:v".into(), Some("1".into())),
+            Arg::ImageStdout => ("pipe:1".into(), None),
+            Arg::Attach(path) => ("-attach".into(), Some(path.as_os_str().to_owned())),
+            Arg::StreamMetadata(index, key, value) => (
+                format!("-metadata:s:{index}").into(),
+                Some(format!("{key}={value}").into()),
+            ),
             Arg::Video { option, value } => (format!("{}:v", option.flag()).into(), Some(value)),
             Arg::Format(format) => ("-f".into(), Some(format.into())),
             Arg::HideBanner => ("-hide_banner".into(), None),

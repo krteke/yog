@@ -2,6 +2,7 @@ use rustix::path::Arg;
 use std::{collections::BTreeMap, fmt::Debug, path::Path};
 use yog_core::{
     error::Error,
+    ffmpeg::plan::TranscodePlan,
     ffprobe::{
         Ffprobe,
         types::{MediaInfo, MediaStream},
@@ -15,6 +16,7 @@ pub trait Verifier {
         output: &Path,
         original: &MediaInfo,
         copy_video: bool,
+        plan: &TranscodePlan,
         warn: impl FnMut(String),
     ) -> Result<(), Error>;
 }
@@ -26,6 +28,7 @@ impl Verifier for Ffprobe {
         output: &Path,
         original: &MediaInfo,
         copy_video: bool,
+        plan: &TranscodePlan,
         mut warn: impl FnMut(String),
     ) -> Result<(), Error> {
         let actual = self.probe(output).await?;
@@ -35,7 +38,7 @@ impl Verifier for Ffprobe {
                 actual.stderr.to_string_lossy().trim()
             ));
         }
-        let pairs = compare_structure(original, &actual.output, copy_video, &mut warn);
+        let pairs = compare_structure(original, &actual.output, copy_video, plan, &mut warn);
         if pairs.is_empty() {
             return Ok(());
         }
@@ -71,7 +74,9 @@ impl Verifier for Ffprobe {
                     source.packets, destination.packets
                 ));
             }
-            if source.timing_sha256 != destination.timing_sha256 {
+            if plan.cover_metadata(before.index).is_none()
+                && source.timing_sha256 != destination.timing_sha256
+            {
                 warn(format!(
                     "{scope}: packet presentation times/durations differ"
                 ));
@@ -86,6 +91,7 @@ fn compare_structure<'a>(
     original: &'a MediaInfo,
     actual: &'a MediaInfo,
     copy_video: bool,
+    plan: &TranscodePlan,
     warn: &mut impl FnMut(String),
 ) -> Vec<(&'a MediaStream, &'a MediaStream)> {
     tags(
@@ -160,7 +166,12 @@ fn compare_structure<'a>(
             before.index,
             after.index
         );
-        tags(&scope, &before.tags, &after.tags, warn);
+        tags(
+            &scope,
+            plan.cover_metadata(before.index).unwrap_or(&before.tags),
+            &after.tags,
+            warn,
+        );
 
         let before_flags: BTreeMap<_, _> = before
             .disposition
@@ -304,6 +315,7 @@ fn tags(
 mod tests {
     use super::*;
     use serde_json::json;
+    use yog_core::ffmpeg::{Ffmpeg, plan::TranscodeRequest};
 
     fn media(value: serde_json::Value) -> MediaInfo {
         let mut media: MediaInfo = serde_json::from_value(value).unwrap();
@@ -315,8 +327,8 @@ mod tests {
         media
     }
 
-    #[test]
-    fn matching_handles_renumbering_cover_relocation_and_equivalent_pixel_layouts() {
+    #[tokio::test]
+    async fn matching_handles_renumbering_cover_relocation_and_equivalent_pixel_layouts() {
         let before = media(json!({
             "streams": [
                 {"index": 9, "codec_type": "video", "codec_name": "mjpeg", "pix_fmt":"yuv420p", "disposition":{"attached_pic":1}},
@@ -337,8 +349,12 @@ mod tests {
             "format":{"tags":{"TITLE":"unchanged"}},
             "chapters":[{"id":0,"time_base":"1/1000000","start":500000,"start_time":"0.500000","end_time":"1.000000"}]
         }));
+        let plan = TranscodeRequest::mp4("input", "output")
+            .plan(&before, &Ffmpeg::new("unused", None))
+            .await
+            .unwrap();
         let mut warnings = Vec::new();
-        let pairs = compare_structure(&before, &after, false, &mut |warning| {
+        let pairs = compare_structure(&before, &after, false, &plan, &mut |warning| {
             warnings.push(warning)
         });
         assert!(warnings.is_empty(), "{warnings:#?}");
@@ -349,7 +365,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             [(9, 3), (5, 0), (15, 2)]
         );
-        compare_structure(&before, &after, true, &mut |warning| warnings.push(warning));
+        compare_structure(&before, &after, true, &plan, &mut |warning| {
+            warnings.push(warning)
+        });
         assert!(
             warnings
                 .iter()
@@ -357,8 +375,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn lost_streams_metadata_chapters_and_sample_changes_are_reported_individually() {
+    #[tokio::test]
+    async fn lost_streams_metadata_chapters_and_sample_changes_are_reported_individually() {
         let before = media(json!({
             "streams":[
                 {"index":0,"codec_type":"video","pix_fmt":"yuv444p12le","color_transfer":"smpte2084"},
@@ -380,8 +398,12 @@ mod tests {
             "format":{"tags":{"encoder":"new","comment":"added"}},
             "chapters":[{"start_time":"0.000000","end_time":"0.500000","tags":{}}]
         }));
+        let plan = TranscodeRequest::mp4("input", "output")
+            .plan(&before, &Ffmpeg::new("unused", None))
+            .await
+            .unwrap();
         let mut warnings = Vec::new();
-        compare_structure(&before, &after, false, &mut |warning| {
+        compare_structure(&before, &after, false, &plan, &mut |warning| {
             warnings.push(warning)
         });
         for expected in [
@@ -407,7 +429,7 @@ mod tests {
         }
         let unknown = media(json!({"streams":[{"index":0,"codec_type":"video","pix_fmt":"pal8"}]}));
         warnings.clear();
-        compare_structure(&unknown, &unknown, false, &mut |warning| {
+        compare_structure(&unknown, &unknown, false, &plan, &mut |warning| {
             warnings.push(warning)
         });
         assert!(

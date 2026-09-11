@@ -1,23 +1,6 @@
 # yog-core
 
 ```rust,no_run
-use std::{ffi::OsStr, time::Duration};
-use yog_core::ffmpeg::Ffmpeg;
-
-# #[tokio::main(flavor = "current_thread")]
-# async fn main() -> Result<(), yog_core::error::Error> {
-let ffmpeg = Ffmpeg::new("ffmpeg", Some(Duration::from_secs(3600)));
-let result = ffmpeg.execute(
-    ["-i", "input.mkv", "-map", "0", "-c", "copy", "output.mkv"].map(OsStr::new),
-    |progress| println!("{:?}", progress.out_time_us),
-    |stderr_bytes| { /* 实时处理原始诊断字节 */ },
-).await?;
-assert!(result.status.success());
-# Ok(())
-# }
-```
-
-```rust,no_run
 use std::{path::Path, time::Duration};
 use yog_core::ffprobe::Ffprobe;
 
@@ -63,7 +46,7 @@ let plan = TranscodeRequest::mkv(input, "output.mkv")
         Some(RateControl::Quality(23)), Some(Preset::Medium),
     ))
     .plan(&media, &ffmpeg).await?;
-ffmpeg.execute(plan.args(), |_| {}, |_| {}).await?;
+ffmpeg.execute(&plan, |_| {}, |_| {}).await?;
 # Ok(())
 # }
 ```

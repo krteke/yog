@@ -36,9 +36,8 @@ impl Drop for Scratch {
 async fn generated_media_exercises_progress_metadata_frames_and_packets() {
     let scratch = Scratch::new();
     let input = scratch.0.join("-媒体 with spaces.mkv");
-    let mut progress = Vec::new();
-    let encoded = Ffmpeg::new("ffmpeg", Some(TIMEOUT))
-        .execute(
+    let encoded = Command::new("ffmpeg")
+        .args(
             [
                 "-f",
                 "lavfi",
@@ -60,18 +59,10 @@ async fn generated_media_exercises_progress_metadata_frames_and_packets() {
             .into_iter()
             .map(std::ffi::OsString::from)
             .chain([input.clone().into_os_string()]),
-            |record| progress.push(record),
-            |_| {},
         )
-        .await
+        .output()
         .unwrap();
     assert!(encoded.status.success());
-    let last = progress.last().unwrap();
-    assert!(last.finished);
-    assert_eq!(last.frame, Some(3));
-    assert!(last.out_time_us.unwrap() > 0);
-    assert!(last.speed.unwrap() > 0.0);
-    assert!(last.total_size.unwrap() > 0);
 
     let probe = Ffprobe::new("ffprobe", Some(TIMEOUT));
     let mut media = probe.probe(&input).await.unwrap().output;
@@ -93,12 +84,17 @@ async fn generated_media_exercises_progress_metadata_frames_and_packets() {
     ));
     let ffmpeg = Ffmpeg::new("ffmpeg", Some(TIMEOUT));
     let plan = request.plan(&media, &ffmpeg).await.unwrap();
-    let mut completed = false;
+    let mut progress = Vec::new();
     ffmpeg
-        .execute(plan.args(), |record| completed = record.finished, |_| {})
+        .execute(&plan, |record| progress.push(record), |_| {})
         .await
         .unwrap();
-    assert!(completed);
+    let last = progress.last().unwrap();
+    assert!(last.finished);
+    assert_eq!(last.frame, Some(3));
+    assert!(last.out_time_us.unwrap() > 0);
+    assert!(last.speed.unwrap() > 0.0);
+    assert!(last.total_size.unwrap() > 0);
     let actual = probe.probe(&destination).await.unwrap().output;
     assert_eq!(actual.streams.len(), 2);
     assert_eq!(actual.streams[0].codec_name, media.streams[0].codec_name);
@@ -107,14 +103,14 @@ async fn generated_media_exercises_progress_metadata_frames_and_packets() {
     let before = fs::read(&destination).unwrap();
     // Some FFmpeg builds report exit 0 when -n refuses an existing output.
     // The planner's overwrite contract is that the file stays untouched.
-    let _existing = ffmpeg.execute(plan.args(), |_| {}, |_| {}).await;
+    let _existing = ffmpeg.execute(&plan, |_| {}, |_| {}).await;
     assert_eq!(fs::read(&destination).unwrap(), before);
     let copied = scratch.0.join("remux.mkv");
     let remux = TranscodeRequest::mkv(destination, &copied)
         .plan(&actual, &ffmpeg)
         .await
         .unwrap();
-    ffmpeg.execute(remux.args(), |_| {}, |_| {}).await.unwrap();
+    ffmpeg.execute(&remux, |_| {}, |_| {}).await.unwrap();
     let copied = probe.probe(&copied).await.unwrap().output;
     assert_eq!(copied.streams[0].codec_name, actual.streams[0].codec_name);
     assert_eq!(copied.streams[1].codec_name, actual.streams[1].codec_name);
@@ -200,8 +196,8 @@ async fn shared_video_encoding_keeps_reordered_cover_and_audio_as_copy() {
     let input = scratch.0.join("with-cover.mp4");
     let output = scratch.0.join("encoded.mp4");
     let ffmpeg = Ffmpeg::new("ffmpeg", Some(TIMEOUT));
-    ffmpeg
-        .execute(
+    let generated = Command::new("ffmpeg")
+        .args(
             [
                 "-f",
                 "lavfi",
@@ -239,11 +235,14 @@ async fn shared_video_encoding_keeps_reordered_cover_and_audio_as_copy() {
             .into_iter()
             .map(std::ffi::OsString::from)
             .chain([input.clone().into_os_string()]),
-            |_| {},
-            |_| {},
         )
-        .await
+        .output()
         .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
 
     let probe = Ffprobe::new("ffprobe", Some(TIMEOUT));
     let mut media = probe.probe(&input).await.unwrap().output;
@@ -265,7 +264,7 @@ async fn shared_video_encoding_keeps_reordered_cover_and_audio_as_copy() {
         .plan(&media, &ffmpeg)
         .await
         .unwrap();
-    ffmpeg.execute(plan.args(), |_| {}, |_| {}).await.unwrap();
+    ffmpeg.execute(&plan, |_| {}, |_| {}).await.unwrap();
     let actual = probe.probe(&output).await.unwrap().output;
     assert_eq!(actual.streams.len(), 4);
     assert_eq!(

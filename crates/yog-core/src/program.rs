@@ -88,9 +88,11 @@ impl Program {
                 }
             })
             .catch_unwind();
+
             tokio::pin!(decoded, diagnostics);
             let mut stdout_done = false;
             let mut stderr_done = false;
+
             while failure.status.is_none() || !stdout_done || !stderr_done {
                 tokio::select! {
                     _ = self.cancellation.cancelled() => {

@@ -3,6 +3,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::program::Program;
 mod args;
+mod attachment;
 pub mod capabilities;
 pub mod decoding;
 pub mod encoding;

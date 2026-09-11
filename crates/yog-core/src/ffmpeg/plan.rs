@@ -10,7 +10,7 @@ use crate::{
     ffmpeg::encoding::{NvencMultipass, NvencPreset, Preset, QsvPreset, RateControl, VideoCodec},
     ffprobe::types::MediaInfo,
 };
-use std::{ffi::OsString, path::PathBuf};
+use std::{collections::BTreeMap, ffi::OsString, path::PathBuf};
 
 #[derive(Debug, Clone, Copy, Default)]
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
@@ -118,12 +118,27 @@ pub struct TranscodeRequest {
 
 #[derive(Debug)]
 pub struct TranscodePlan {
-    args: Vec<OsString>,
+    pub(super) input: PathBuf,
+    pub(super) output: PathBuf,
+    pub(super) args: Vec<OsString>,
+    pub(super) covers: Vec<CoverAttachment>,
+}
+
+#[derive(Debug)]
+pub(super) struct CoverAttachment {
+    pub input_index: usize,
+    pub output_index: usize,
+    pub metadata: BTreeMap<String, String>,
 }
 
 impl TranscodePlan {
-    pub fn args(&self) -> &[OsString] {
-        &self.args
+    /// Expected tags for an input picture reattached by this plan. `None` means
+    /// the stream uses the ordinary mapping, without attachment tag changes.
+    pub fn cover_metadata(&self, input_index: usize) -> Option<&BTreeMap<String, String>> {
+        self.covers
+            .iter()
+            .find(|cover| cover.input_index == input_index)
+            .map(|cover| &cover.metadata)
     }
 }
 
@@ -238,7 +253,18 @@ impl TranscodeRequest {
             }
         }
 
-        for (output_index, stream) in media.streams.iter().enumerate() {
+        let mut covers = Vec::new();
+        let mut mapped_streams = 0;
+        for stream in &media.streams {
+            if matches!(self.container, Container::Matroska)
+                && stream.codec_type.as_deref() == Some("video")
+                && !stream.is_regular_video()
+            {
+                covers.push(stream);
+                continue;
+            }
+            let output_index = mapped_streams;
+            mapped_streams += 1;
             output_args.add(Arg::Map(stream.index));
             let Some(encoding) = encoding else { continue };
 
@@ -273,12 +299,48 @@ impl TranscodeRequest {
 
         input_args.add(Arg::Input(&self.input));
         input_args.extend(output_args);
-        input_args.extend([
-            Arg::Format(self.container.muxer()),
-            Arg::Output(&self.output),
-        ]);
+        input_args.add(Arg::Format(self.container.muxer()));
+        let covers = covers
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, stream)| {
+                let mut metadata = stream.tags.clone();
+                // MP4 pictures may have neither tag; Matroska attachments require them.
+                // Preserve existing values and only supply known PNG/JPEG defaults.
+                let image = match stream.codec_name.as_deref() {
+                    Some("png") => Some(("png", "image/png")),
+                    Some("mjpeg") => Some(("jpg", "image/jpeg")),
+                    _ => None,
+                };
+                if let Some((extension, mime)) = image {
+                    let filename = if ordinal == 0 {
+                        format!("cover.{extension}")
+                    } else {
+                        format!("cover-{ordinal}.{extension}")
+                    };
+                    for (key, value) in [("filename", filename), ("mimetype", mime.to_owned())] {
+                        if !metadata
+                            .keys()
+                            .any(|existing| existing.eq_ignore_ascii_case(key))
+                        {
+                            metadata.insert(key.to_owned(), value);
+                        }
+                    }
+                }
+                CoverAttachment {
+                    input_index: stream.index,
+                    output_index: mapped_streams + ordinal,
+                    metadata,
+                }
+            })
+            .collect();
 
-        Ok(TranscodePlan { args: input_args })
+        Ok(TranscodePlan {
+            input: self.input.clone(),
+            output: self.output.clone(),
+            args: input_args,
+            covers,
+        })
     }
 }
 
@@ -309,7 +371,7 @@ mod tests {
         let plan = TranscodeRequest {
             input: PathBuf::from("input.mkv"),
             output: PathBuf::from("-output.mkv"),
-            container: Container::Matroska,
+            container: Container::Mp4,
             overwrite: false,
             decoding: DecodingBackend::default(),
             video: VideoAction::Encode(VideoEncoding::Nvenc {
@@ -322,7 +384,7 @@ mod tests {
         .build(&media, &["nv12".into()])
         .unwrap();
         let maps: Vec<_> = plan
-            .args()
+            .args
             .windows(2)
             .filter(|pair| pair[0] == "-map")
             .map(|pair| pair[1].to_str().unwrap())
@@ -330,7 +392,7 @@ mod tests {
         assert_eq!(maps, ["0:4", "0:1", "0:9", "0:7", "0:2"]);
         // Exact option sequence catches misplaced cover overrides and per-video duplication.
         let options: Vec<_> = plan
-            .args()
+            .args
             .windows(2)
             .filter(|pair| {
                 pair[0] == "-c"
@@ -355,10 +417,79 @@ mod tests {
         );
         assert!(
             !plan
-                .args()
+                .args
                 .iter()
                 .any(|arg| arg.to_str().unwrap().starts_with("-filter:"))
         );
+    }
+
+    #[test]
+    fn matroska_covers_are_appended_without_shifting_video_options_or_overwriting_metadata() {
+        let mut media: MediaInfo = serde_json::from_str(r#"{"streams":[
+            {"index":8,"codec_type":"video","codec_name":"png","disposition":{"attached_pic":1},"tags":{"filename":"原封面.png","mimetype":"image/png","title":"Front","custom":"keep me"}},
+            {"index":5,"codec_type":"audio"},
+            {"index":9,"codec_type":"video","pix_fmt":"yuv420p10le"},
+            {"index":12,"codec_type":"video","codec_name":"mjpeg","disposition":{"attached_pic":1}},
+            {"index":15,"codec_type":"attachment","tags":{"filename":"font.ttf","mimetype":"font/ttf"}},
+            {"index":20,"codec_type":"video","pix_fmt":"yuv444p12le"}
+        ]}"#).unwrap();
+        media.pixel_formats = descriptors();
+        for video in [VideoAction::Copy, VideoAction::encode_x264(None, None)] {
+            let plan = TranscodeRequest::mkv("input", "output")
+                .with_video(video.clone())
+                .build(&media, &["yuv420p10le".into(), "yuv444p12le".into()])
+                .unwrap();
+            let maps: Vec<_> = plan
+                .args
+                .windows(2)
+                .filter(|p| p[0] == "-map")
+                .map(|p| p[1].to_str().unwrap())
+                .collect();
+            assert_eq!(maps, ["0:5", "0:9", "0:15", "0:20"]);
+            assert_eq!(
+                plan.covers
+                    .iter()
+                    .map(|c| (c.input_index, c.output_index))
+                    .collect::<Vec<_>>(),
+                [(8, 4), (12, 5)]
+            );
+            assert_eq!(plan.covers[0].metadata, media.streams[0].tags);
+            assert_eq!(plan.covers[1].metadata["filename"], "cover-1.jpg");
+            assert_eq!(plan.covers[1].metadata["mimetype"], "image/jpeg");
+            let formats: Vec<_> = plan
+                .args
+                .windows(2)
+                .filter(|p| p[0].to_str().unwrap().starts_with("-pix_fmt:"))
+                .map(|p| (p[0].to_str().unwrap(), p[1].to_str().unwrap()))
+                .collect();
+            assert_eq!(
+                formats,
+                if matches!(video, VideoAction::Copy) {
+                    vec![]
+                } else {
+                    vec![
+                        ("-pix_fmt:1", "+yuv420p10le"),
+                        ("-pix_fmt:3", "+yuv444p12le"),
+                    ]
+                }
+            );
+        }
+        // The Matroska-specific rewrite must not add extraction to MP4/MOV/WebM/TS.
+        for container in [
+            Container::Mp4,
+            Container::Mov,
+            Container::Webm,
+            Container::MpegTs,
+        ] {
+            let plan = TranscodeRequest::new("input", "output", container)
+                .build(&media, &[])
+                .unwrap();
+            assert!(plan.covers.is_empty());
+            assert_eq!(
+                plan.args.iter().filter(|arg| *arg == "-map").count(),
+                media.streams.len()
+            );
+        }
     }
 
     #[test]
@@ -372,7 +503,7 @@ mod tests {
             .build(&media, &["nv12".into()])
             .unwrap();
         assert_eq!(
-            plan.args(),
+            plan.args,
             [
                 "-y",
                 "-i",
@@ -389,7 +520,6 @@ mod tests {
                 "0:2",
                 "-f",
                 "webm",
-                "out.webm"
             ]
             .map(OsString::from)
         );
@@ -419,7 +549,7 @@ mod tests {
                 .build(&media, &["nv12".into()])
                 .unwrap();
             assert_eq!(
-                plan.args()
+                plan.args
                     .windows(2)
                     .filter(|pair| pair[0] == "-vaapi_device" && pair[1] == "/dev/dri/custom")
                     .count(),
@@ -427,7 +557,7 @@ mod tests {
             );
             for option in ["-c:v", "-rc_mode:v", "-qp:v"] {
                 assert_eq!(
-                    plan.args().iter().filter(|arg| *arg == option).count(),
+                    plan.args.iter().filter(|arg| *arg == option).count(),
                     devices
                 );
             }
@@ -469,7 +599,7 @@ mod tests {
                     .build(&media, &formats)
                     .unwrap();
                 let value = |key: &str| {
-                    plan.args()
+                    plan.args
                         .windows(2)
                         .find(|p| p[0] == key)
                         .map(|p| p[1].to_str().unwrap())
@@ -502,11 +632,13 @@ mod tests {
                 if direct {
                     assert!(filter.is_empty());
                 }
-                assert_eq!(value("-c:2"), Some("copy"));
+                assert_eq!(value("-c:2"), None);
+                assert_eq!(plan.covers[0].input_index, 3);
+                assert_eq!(plan.covers[0].output_index, 2);
                 assert!(value("-pix_fmt:2").is_none());
                 assert!(value("-hwaccel:3").is_none());
-                let input = plan.args().iter().position(|a| a == "-i").unwrap();
-                assert!(plan.args()[..input].iter().any(|a| a == "-hwaccel:9"));
+                let input = plan.args.iter().position(|a| a == "-i").unwrap();
+                assert!(plan.args[..input].iter().any(|a| a == "-hwaccel:9"));
             }
         }
         for device in [
@@ -520,7 +652,7 @@ mod tests {
                 .build(&media, &[])
                 .unwrap();
             let value = |key: &str| {
-                plan.args()
+                plan.args
                     .windows(2)
                     .find(|p| p[0] == key)
                     .map(|p| p[1].to_str().unwrap())
@@ -578,7 +710,7 @@ mod tests {
                 .build(&media, &[supported.into()])
                 .unwrap();
             let value = |key: &str| {
-                plan.args()
+                plan.args
                     .windows(2)
                     .find(|p| p[0] == key)
                     .map(|p| p[1].to_str().unwrap())

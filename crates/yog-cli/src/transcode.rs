@@ -52,7 +52,7 @@ pub async fn run(
     let plan = request
         .plan(&media, &ffmpeg)
         .await
-        .context("cannot plan strict pixel formats")?;
+        .context("cannot plan transcode")?;
     progress.start(media.format.duration.as_deref());
     ffmpeg
         .execute(

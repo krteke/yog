@@ -26,7 +26,7 @@ impl Fixture {
         fs::write(fixture.0.join("input"), b"input").unwrap();
         fixture.tool(
             "ffprobe",
-            "printf '%s' '{\"streams\":[{\"index\":0,\"codec_type\":\"video\"}],\"format\":{\"duration\":\"1\"}}'",
+            "printf '%s' '{\"streams\":[{\"index\":0,\"codec_type\":\"video\"}],\"format\":{\"format_name\":\"matroska,webm\",\"duration\":\"1\"}}'",
         );
         fixture.tool("ffmpeg", ffmpeg);
         fixture
@@ -114,7 +114,7 @@ esac
 printf encoded > "$arg"
 "#,
     );
-    fixture.tool("ffprobe", r#"printf '%s' '{"streams":[{"index":1,"codec_type":"video","codec_name":"png","disposition":{"attached_pic":1}},{"index":2,"codec_type":"audio"},{"index":3,"codec_type":"video","codec_name":"mjpeg","disposition":{"attached_pic":1}}]}'"#);
+    fixture.tool("ffprobe", r#"printf '%s' '{"streams":[{"index":1,"codec_type":"video","codec_name":"png","disposition":{"attached_pic":1}},{"index":2,"codec_type":"audio"},{"index":3,"codec_type":"video","codec_name":"mjpeg","disposition":{"attached_pic":1}}],"format":{"format_name":"matroska,webm"}}'"#);
     let temporary = fixture.0.join("temporary covers");
     fs::create_dir(&temporary).unwrap();
     for failure in [
@@ -201,7 +201,7 @@ fn verification_is_opt_in_and_warnings_do_not_prevent_publication() {
 printf '%s\n' "$*" >> probe-calls
 for last do :; done
 case "$last" in
-  input) printf '%s' '{"streams":[{"index":8,"codec_type":"audio","codec_name":"aac"}],"format":{"tags":{"title":"original"}}}' ;;
+  input) printf '%s' '{"streams":[{"index":8,"codec_type":"audio","codec_name":"aac"}],"format":{"format_name":"matroska,webm","tags":{"title":"original"}}}' ;;
   *.part)
     test ! -e output.mkv || exit 8
     test "$(cat "$last")" = encoded || exit 9
@@ -258,7 +258,7 @@ case "$*" in *-show_packets*) cat "$prefix-packets.json" ;; *) cat "$prefix.json
         {"index":8,"codec_type":"video","codec_name":"png","pix_fmt":"yuv420p","disposition":{"attached_pic":1}},
         {"index":2,"codec_type":"audio","codec_name":"aac"},
         {"index":5,"codec_type":"video","codec_name":"mjpeg","pix_fmt":"yuv420p","disposition":{"attached_pic":1},"tags":{"filename":"back.jpg","mimetype":"image/jpeg","title":"Keep this"}}
-    ]});
+    ],"format":{"format_name":"matroska,webm"}});
     original["pixel_formats"] = serde_json::from_str::<Value>(include_str!(
         "../../yog-core/src/ffmpeg/test_pixel_formats.json"
     ))
@@ -370,7 +370,7 @@ if test "$last" != input && test '{failure}' = metadata; then
   echo 'broken output probe' >&2
   exit 6
 fi
-printf '%s' '{{"streams":[{{"index":0,"codec_type":"audio"}}]}}'
+printf '%s' '{{"streams":[{{"index":0,"codec_type":"audio"}}],"format":{{"format_name":"matroska,webm"}}}}'
 "#
             ),
         );
@@ -570,7 +570,7 @@ fn cancellation_during_probe_encoding_or_verification_cleans_only_the_part() {
         fs::create_dir(&temporary).unwrap();
         let blocking = "printf '%s' \"$$\" > child-pid; printf waiting >&2; while :; do :; done";
         if phase.starts_with("cover-") {
-            fixture.tool("ffprobe", r#"printf '%s' '{"streams":[{"index":0,"codec_type":"audio"},{"index":1,"codec_type":"video","codec_name":"png","disposition":{"attached_pic":1}}]}'"#);
+            fixture.tool("ffprobe", r#"printf '%s' '{"streams":[{"index":0,"codec_type":"audio"},{"index":1,"codec_type":"video","codec_name":"png","disposition":{"attached_pic":1}}],"format":{"format_name":"matroska,webm"}}'"#);
             let extract = if phase == "cover-extraction" {
                 blocking
             } else {
@@ -587,7 +587,7 @@ fn cancellation_during_probe_encoding_or_verification_cleans_only_the_part() {
             } else {
                 "case \"$*\" in *-show_packets*) true ;; *) false ;; esac"
             };
-            fixture.tool("ffprobe", &format!("if {condition}; then {blocking}; fi\nprintf '%s' '{{\"streams\":[{{\"index\":0,\"codec_type\":\"audio\"}}]}}'"));
+            fixture.tool("ffprobe", &format!("if {condition}; then {blocking}; fi\nprintf '%s' '{{\"streams\":[{{\"index\":0,\"codec_type\":\"audio\"}}],\"format\":{{\"format_name\":\"matroska,webm\"}}}}'"));
         } else {
             fixture.tool(
                 if phase == "encoder-help" {

@@ -10,12 +10,15 @@ use crate::{
     ffmpeg::encoding::{NvencMultipass, NvencPreset, Preset, QsvPreset, RateControl, VideoCodec},
     ffprobe::types::MediaInfo,
 };
-use std::{collections::BTreeMap, ffi::OsString, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    ffi::OsString,
+    path::{Path, PathBuf},
+};
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 pub enum Container {
-    #[default]
     #[cfg_attr(feature = "clap", value(name = "mkv"))]
     Matroska,
     Mp4,
@@ -34,6 +37,36 @@ impl Container {
             Self::Webm => "webm",
             Self::MpegTs => "mpegts",
         }
+    }
+
+    fn from_input(path: &Path, format_name: Option<&str>) -> Option<Self> {
+        let formats = format_name?.split(',');
+        let extension = path
+            .extension()
+            .and_then(|value| value.to_str().map(|s| s.to_lowercase()));
+
+        for format in formats {
+            match format.trim() {
+                "mpegts" => return Some(Self::MpegTs),
+                "matroska" | "webm" => {
+                    return Some(if extension.is_some_and(|value| value == "webm") {
+                        Self::Webm
+                    } else {
+                        Self::Matroska
+                    });
+                }
+                "mov" | "mp4" | "m4a" | "3gp" | "3g2" | "mj2" => {
+                    return Some(if extension.is_some_and(|value| value == "mov") {
+                        Self::Mov
+                    } else {
+                        Self::Mp4
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        None
     }
 }
 
@@ -110,7 +143,7 @@ impl VideoAction {
 pub struct TranscodeRequest {
     pub input: PathBuf,
     pub output: PathBuf,
-    pub container: Container,
+    pub container: Option<Container>,
     pub video: VideoAction,
     pub decoding: DecodingBackend,
     pub overwrite: bool,
@@ -143,37 +176,32 @@ impl TranscodePlan {
 }
 
 impl TranscodeRequest {
-    pub fn new(
-        input: impl Into<PathBuf>,
-        output: impl Into<PathBuf>,
-        container: Container,
-    ) -> Self {
+    pub fn new(input: impl Into<PathBuf>, output: impl Into<PathBuf>) -> Self {
         Self {
             input: input.into(),
             output: output.into(),
-            container,
             ..Self::default()
         }
     }
 
     pub fn mkv(input: impl Into<PathBuf>, output: impl Into<PathBuf>) -> Self {
-        Self::new(input, output, Container::Matroska)
+        Self::new(input, output).with_container(Container::Matroska)
     }
 
     pub fn mp4(input: impl Into<PathBuf>, output: impl Into<PathBuf>) -> Self {
-        Self::new(input, output, Container::Mp4)
+        Self::new(input, output).with_container(Container::Mp4)
     }
 
     pub fn mov(input: impl Into<PathBuf>, output: impl Into<PathBuf>) -> Self {
-        Self::new(input, output, Container::Mov)
+        Self::new(input, output).with_container(Container::Mov)
     }
 
     pub fn webm(input: impl Into<PathBuf>, output: impl Into<PathBuf>) -> Self {
-        Self::new(input, output, Container::Webm)
+        Self::new(input, output).with_container(Container::Webm)
     }
 
     pub fn mpeg_ts(input: impl Into<PathBuf>, output: impl Into<PathBuf>) -> Self {
-        Self::new(input, output, Container::MpegTs)
+        Self::new(input, output).with_container(Container::MpegTs)
     }
 
     pub fn with_input(mut self, input: impl Into<PathBuf>) -> Self {
@@ -187,7 +215,7 @@ impl TranscodeRequest {
     }
 
     pub fn with_container(mut self, container: Container) -> Self {
-        self.container = container;
+        self.container = Some(container);
         self
     }
 
@@ -237,6 +265,13 @@ impl TranscodeRequest {
     }
 
     fn build(&self, media: &MediaInfo, formats: &[String]) -> Result<TranscodePlan, PlanError> {
+        let container = self
+            .container
+            .or_else(|| Container::from_input(&self.input, media.format.format_name.as_deref()))
+            .ok_or_else(|| PlanError::UnsupportedContainer {
+                format: media.format.format_name.clone(),
+            })?;
+
         let mut input_args = Vec::new();
         let mut output_args = Vec::new();
         input_args.add(Arg::Overwrite(self.overwrite));
@@ -256,7 +291,7 @@ impl TranscodeRequest {
         let mut covers = Vec::new();
         let mut mapped_streams = 0;
         for stream in &media.streams {
-            if matches!(self.container, Container::Matroska)
+            if matches!(container, Container::Matroska)
                 && stream.codec_type.as_deref() == Some("video")
                 && !stream.is_regular_video()
             {
@@ -299,7 +334,7 @@ impl TranscodeRequest {
 
         input_args.add(Arg::Input(&self.input));
         input_args.extend(output_args);
-        input_args.add(Arg::Format(self.container.muxer()));
+        input_args.add(Arg::Format(container.muxer()));
         let covers = covers
             .into_iter()
             .enumerate()
@@ -356,6 +391,25 @@ mod tests {
     }
 
     #[test]
+    fn input_container_uses_the_probed_family_and_its_ambiguous_extension() {
+        for (path, format_name, muxer) in [
+            ("video.mkv", "matroska,webm", "matroska"),
+            ("video.WEBM", "matroska,webm", "webm"),
+            ("video.mp4", "mov,mp4,m4a,3gp,3g2,mj2", "mp4"),
+            ("video.MOV", "mov,mp4,m4a,3gp,3g2,mj2", "mov"),
+            ("video.m2ts", "mpegts", "mpegts"),
+        ] {
+            assert_eq!(
+                Container::from_input(Path::new(path), Some(format_name))
+                    .unwrap()
+                    .muxer(),
+                muxer
+            );
+        }
+        assert!(Container::from_input(Path::new("video.avi"), Some("avi")).is_none());
+    }
+
+    #[test]
     fn mapping_preserves_order_and_covers_override_shared_encoding() {
         let mut media: MediaInfo = serde_json::from_str(
             r#"{"streams":[
@@ -371,7 +425,7 @@ mod tests {
         let plan = TranscodeRequest {
             input: PathBuf::from("input.mkv"),
             output: PathBuf::from("-output.mkv"),
-            container: Container::Mp4,
+            container: Some(Container::Mp4),
             overwrite: false,
             decoding: DecodingBackend::default(),
             video: VideoAction::Encode(VideoEncoding::Nvenc {
@@ -481,7 +535,8 @@ mod tests {
             Container::Webm,
             Container::MpegTs,
         ] {
-            let plan = TranscodeRequest::new("input", "output", container)
+            let plan = TranscodeRequest::new("input", "output")
+                .with_container(container)
                 .build(&media, &[])
                 .unwrap();
             assert!(plan.covers.is_empty());

@@ -12,8 +12,8 @@ pub struct Args {
     pub config: Option<PathBuf>,
     #[arg(short, long, global = true, required = false)]
     output: PathBuf,
-    #[arg(short = 'C', long, default_value = "mkv", global = true)]
-    container: Container,
+    #[arg(short = 'C', long, global = true)]
+    container: Option<Container>,
     #[command(flatten)]
     decoding: DecodingArgs,
     #[arg(short = 'O', long, global = true)]
@@ -40,7 +40,7 @@ pub struct ExecutionOptions {
 
 impl Args {
     pub fn into_request(self) -> Result<(TranscodeRequest, ExecutionOptions), clap::Error> {
-        let request = TranscodeRequest::new(self.input, self.output, self.container)
+        let mut request = TranscodeRequest::new(self.input, self.output)
             .with_video(self.video.unwrap_or_default())
             .with_decoding(
                 self.decoding
@@ -48,6 +48,10 @@ impl Args {
                     .map_err(|error: clap::Error| error.format(&mut Self::command()))?,
             )
             .with_overwrite(self.overwrite);
+        if let Some(container) = self.container {
+            request = request.with_container(container);
+        }
+
         Ok((request, self.execution))
     }
 }
@@ -172,7 +176,7 @@ mod tests {
                     multipass: Some(NvencMultipass::QuarterResolution),
                 })
             ));
-            assert!(matches!(request.container, Container::Mp4));
+            assert!(matches!(request.container, Some(Container::Mp4)));
             assert!(request.overwrite);
             assert_eq!(options.timeout, Some(7));
         }
@@ -267,7 +271,7 @@ mod tests {
                 .into_request()
                 .unwrap();
             assert_eq!(request.output, PathBuf::from("output"));
-            assert!(matches!(request.container, Container::Mp4));
+            assert!(matches!(request.container, Some(Container::Mp4)));
             assert!(request.overwrite);
             assert!(
                 matches!(request.decoding, DecodingBackend::Cuda(Some(device)) if device == "0")
@@ -314,7 +318,7 @@ mod tests {
                     .unwrap()
                     .into_request()
                     .unwrap();
-            assert!(matches!(request.container, Container::Matroska));
+            assert!(request.container.is_none());
             assert!(matches!(request.decoding, DecodingBackend::Software));
             assert!(matches!(request.video, VideoAction::Copy));
         }

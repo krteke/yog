@@ -51,6 +51,8 @@ impl fmt::Display for Error {
 pub enum PlanError {
     #[error("encoder format query failed")]
     Query(#[from] Error),
+    #[error("cannot use input format {format:?} as an output container; specify a container")]
+    UnsupportedContainer { format: Option<String> },
     #[error("stream {stream_index}: ffprobe has no descriptor for pixel format {format:?}")]
     MissingPixelFormat {
         stream_index: usize,

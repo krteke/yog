@@ -11,6 +11,7 @@ pub mod execution;
 mod pixel_format;
 pub mod plan;
 pub mod progress;
+pub mod seek;
 pub mod vmaf;
 
 pub struct Ffmpeg {

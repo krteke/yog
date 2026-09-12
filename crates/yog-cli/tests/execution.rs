@@ -390,6 +390,67 @@ printf '%s' '{{"streams":[{{"index":0,"codec_type":"audio"}}],"format":{{"format
 }
 
 #[test]
+fn missing_audio_after_seek_fails_verification_and_keeps_the_previous_output() {
+    use serde_json::{Value, json};
+
+    let fixture = Fixture::new(
+        r#"
+case "$*" in
+    *'-h encoder=libx264'*)
+        printf 'Encoder libx264 [H264]:\n Supported pixel formats: yuv420p\n'
+        exit 0
+        ;;
+    *framehash*)
+        printf '#format: frame checksums\n0, 0, 0, 1, 1, hash\n'
+        case "$*" in *output.mkv.part*) ;; *) printf '1, 0, 0, 1, 1, hash\n' ;; esac
+        exit 0
+        ;;
+esac
+for last do :; done
+printf encoded > "$last"
+"#,
+    );
+    fixture.tool(
+        "ffprobe",
+        r#"
+for last do :; done
+case "$last" in input) cat input.json ;; *) cat output.json ;; esac
+"#,
+    );
+    let mut media = json!({
+        "streams": [
+            {"index":0,"codec_type":"video","codec_name":"h264","pix_fmt":"yuv420p"},
+            {"index":1,"codec_type":"audio","codec_name":"aac"}
+        ],
+        "format":{"format_name":"matroska,webm","duration":"20.000000"}
+    });
+    media["pixel_formats"] = serde_json::from_str::<Value>(include_str!(
+        "../../yog-core/src/ffmpeg/test_pixel_formats.json"
+    ))
+    .unwrap()["pixel_formats"]
+        .clone();
+    fs::write(fixture.0.join("input.json"), media.to_string()).unwrap();
+    fs::write(fixture.0.join("output.json"), media.to_string()).unwrap();
+    fs::write(fixture.0.join("output.mkv"), b"previous").unwrap();
+
+    let result = fixture
+        .command()
+        .args(["--encode-x264", "--verify", "-O"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert_eq!(result.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains(
+            "verification failed: audio stream #1 -> #1 has no decoded frames after seeking to 5.000000s"
+        ),
+        "{stderr}"
+    );
+    assert_eq!(fs::read(fixture.0.join("output.mkv")).unwrap(), b"previous");
+    assert!(!fixture.0.join("output.mkv.part").exists());
+}
+
+#[test]
 fn failures_delete_only_our_part_and_preserve_existing_targets() {
     let fixture = Fixture::new("");
     for body in [

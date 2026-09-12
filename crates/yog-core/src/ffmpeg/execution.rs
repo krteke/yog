@@ -5,7 +5,7 @@ use super::{
     Ffmpeg,
     args::{Arg, ArgsExt},
     attachment::CoverExtraction,
-    plan::TranscodePlan,
+    plan::{AttachmentInput, TranscodePlan},
     progress::{Progress, ProgressParser},
 };
 use crate::{
@@ -24,7 +24,7 @@ pub struct ExecutionResult {
 pub struct BuiltTranscode<'a> {
     command: Command<'a>,
     covers: Vec<CoverExtraction<'a>>,
-    cover_dir: Option<tempfile::TempDir>,
+    attachment_dir_guard: Option<tempfile::TempDir>,
 }
 
 impl Ffmpeg {
@@ -36,13 +36,13 @@ impl Ffmpeg {
             Arg::NoStats,
             Arg::ProgressStdout,
         ]);
-        args.extend_from_slice(&plan.args);
-        let cover_dir = if plan.covers.is_empty() {
+
+        let attachment_dir = if plan.attachments.is_empty() {
             None
         } else {
             Some(
                 tempfile::Builder::new()
-                    .prefix("yog-covers-")
+                    .prefix("yog-attachments-")
                     .tempdir()
                     .map_err(|error| Error {
                         program: self.inner.path.clone(),
@@ -53,34 +53,54 @@ impl Ffmpeg {
                     })?,
             )
         };
+
         let mut covers = Vec::new();
-        if let Some(dir) = &cover_dir {
-            for cover in &plan.covers {
-                let path = dir.path().join(format!("cover-{}", cover.input_index));
-                covers.push(self.build_cover_extraction(&plan.input, cover.input_index, &path));
-                args.add(Arg::Attach(&path));
-                args.extend(
-                    cover
-                        .metadata
-                        .iter()
-                        .map(|(key, value)| Arg::StreamMetadata(cover.output_index, key, value)),
-                );
+        let mut paths = Vec::new();
+        if let Some(dir) = &attachment_dir {
+            for attachment in &plan.attachments {
+                let path = dir
+                    .path()
+                    .join(format!("attachment-{}", attachment.input_index));
+                match attachment.input {
+                    AttachmentInput::AttachmentStream => {
+                        args.add(Arg::DumpAttachment(attachment.input_index, &path));
+                    }
+                    AttachmentInput::CoverFrame => {
+                        covers.push(self.build_cover_extraction(
+                            &plan.input,
+                            attachment.input_index,
+                            &path,
+                        ));
+                    }
+                }
+                paths.push(path);
             }
+        }
+
+        args.extend_from_slice(&plan.args);
+        for (attachment, path) in plan.attachments.iter().zip(&paths) {
+            args.add(Arg::Attach(path));
+            args.extend(
+                attachment
+                    .metadata
+                    .iter()
+                    .map(|(key, value)| Arg::StreamMetadata(attachment.output_index, key, value)),
+            );
         }
         args.add(Arg::Output(&plan.output));
 
         Ok(BuiltTranscode {
             command: self.inner.build(args),
             covers,
-            cover_dir,
+            attachment_dir_guard: attachment_dir,
         })
     }
 }
 
 impl BuiltTranscode<'_> {
     pub fn print(&self) {
-        for cover in &self.covers {
-            cover.print();
+        for extraction in &self.covers {
+            extraction.print();
         }
         self.command.print();
     }
@@ -97,10 +117,11 @@ impl BuiltTranscode<'_> {
         let Self {
             command,
             covers,
-            cover_dir: _cover_dir,
+            attachment_dir_guard: _guard,
         } = self;
-        for cover in covers {
-            cover.run(&mut on_stderr).await?;
+
+        for extraction in covers {
+            extraction.run(&mut on_stderr).await?;
         }
 
         let output = command

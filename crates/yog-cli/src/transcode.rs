@@ -1,6 +1,10 @@
 use crate::{
-    args::ExecutionOptions, diagnostics::Diagnostics, error::RunError, output::Output,
-    progress::Display, verify::Verifier,
+    args::ExecutionOptions,
+    diagnostics::Diagnostics,
+    error::RunError,
+    output::Output,
+    progress::Display,
+    verify::{VerificationOutcome, Verifier},
 };
 use anyhow::Context;
 use rustix::path::Arg;
@@ -69,8 +73,13 @@ pub async fn run(
     drop(progress);
 
     let mut warnings = Vec::new();
-    if options.verify
-        && let Err(error) = probe
+    let verifier = Verifier {
+        probe: &probe,
+        ffmpeg: &ffmpeg,
+    };
+
+    if options.verify {
+        match verifier
             .verify(
                 &request.input,
                 output.part(),
@@ -80,13 +89,26 @@ pub async fn run(
                 |warning| warnings.push(warning),
             )
             .await
-    {
-        if matches!(error.reason, yog_core::error::Failure::Cancelled) {
-            return Err(RunError::Cancelled);
-        }
-        warnings.push(format!("verification incomplete: {error}"));
-        if !error.stderr.is_empty() {
-            warnings.push(error.stderr.to_string_lossy().trim_end().to_owned());
+        {
+            Ok(VerificationOutcome::Complete) => {}
+            Ok(VerificationOutcome::MissingAudioAfterSeek {
+                source_index,
+                destination_index,
+                timestamp,
+            }) => {
+                return Err(RunError::Failed(anyhow::anyhow!(
+                    "verification failed: audio stream #{source_index} -> #{destination_index} has no decoded frames after seeking to {timestamp}s"
+                )));
+            }
+            Err(error) => {
+                if matches!(error.reason, yog_core::error::Failure::Cancelled) {
+                    return Err(RunError::Cancelled);
+                }
+                warnings.push(format!("verification incomplete: {error}"));
+                if !error.stderr.is_empty() {
+                    warnings.push(error.stderr.to_string_lossy().trim_end().to_owned());
+                }
+            }
         }
     }
 

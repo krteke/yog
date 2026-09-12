@@ -419,6 +419,87 @@ exit 17
 }
 
 #[tokio::test]
+async fn native_attachment_is_dumped_and_reattached_by_the_transcode_process() {
+    use yog_core::ffmpeg::plan::VideoAction;
+    use yog_core::ffprobe::types::MediaInfo;
+
+    let tool = Tool::new(
+        r#"
+if [ "$2" = '-h' ]; then
+    printf 'Encoder libx264 [H264]:\n Supported pixel formats: yuv420p\n'
+    exit 0
+fi
+seen_input=0
+seen_delta=0
+attachment=''
+last=''
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -dump_attachment:3)
+            [ "$seen_input" = 0 ] || exit 41
+            attachment=$2
+            printf original-font > "$attachment"
+            shift 2
+            ;;
+        -i)
+            seen_input=1
+            shift 2
+            ;;
+        -map)
+            [ "$2" != '0:3' ] || exit 42
+            shift 2
+            ;;
+        -attach)
+            [ "$seen_input" = 1 ] || exit 43
+            [ "$2" = "$attachment" ] || exit 44
+            [ "$(cat "$2")" = original-font ] || exit 45
+            shift 2
+            ;;
+        -max_interleave_delta)
+            [ "$2" = 0 ] || exit 46
+            seen_delta=1
+            shift 2
+            ;;
+        *)
+            last=$1
+            shift
+            ;;
+    esac
+done
+[ -n "$attachment" ] || exit 47
+[ "$seen_delta" = 1 ] || exit 48
+printf encoded > "$last"
+"#,
+    )
+    .await;
+    let mut media: MediaInfo =
+        serde_json::from_str(include_str!("../src/ffmpeg/test_pixel_formats.json")).unwrap();
+    media.streams = serde_json::from_str(
+        r#"[
+            {"index":0,"codec_type":"video","pix_fmt":"yuv420p"},
+            {"index":1,"codec_type":"audio"},
+            {"index":3,"codec_type":"attachment","tags":{"filename":"font.ttf","mimetype":"font/ttf"}}
+        ]"#,
+    )
+    .unwrap();
+    let ffmpeg = Ffmpeg::new(&tool.path, Some(Duration::from_secs(5)));
+    let output = tool.path.with_extension("output.mkv");
+    let plan = TranscodeRequest::mkv("input.mkv", &output)
+        .with_video(VideoAction::encode_x264(None, None))
+        .plan(&media, &ffmpeg)
+        .await
+        .unwrap();
+    ffmpeg
+        .build(&plan)
+        .unwrap()
+        .run(|_| {}, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(fs::read(&output).unwrap(), b"encoded");
+    fs::remove_file(output).unwrap();
+}
+
+#[tokio::test]
 async fn continuous_progress_does_not_extend_the_process_deadline() {
     let tool = Tool::new("while :; do printf 'frame=1\nprogress=continue\n'; done").await;
     let started = Instant::now();

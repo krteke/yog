@@ -51,6 +51,8 @@ pub(super) enum Arg<'a> {
     NoStdin,
     /// -nostats
     NoStats,
+    /// -v {level}
+    LogLevel(&'a str),
     /// -progress pipe:1
     ProgressStdout,
     /// -h encoder={encoder}
@@ -59,6 +61,10 @@ pub(super) enum Arg<'a> {
     Overwrite(bool),
     /// -i {path}
     Input(&'a Path),
+    /// -ss {timestamp}
+    Seek(&'a str),
+    /// -dump_attachment:{input_index} {path}
+    DumpAttachment(usize, &'a Path),
     /// -hwaccel:{input_index} {method}
     Hwaccel(usize, &'a str),
     /// -hwaccel_device:{input_index} {device}
@@ -85,12 +91,16 @@ pub(super) enum Arg<'a> {
     VideoCodec(&'a str),
     /// -c:{output_index} copy
     CopyStream(usize),
+    /// -t {duration}
+    Duration(&'a str),
     /// -frames:v 1
     OneVideoFrame,
     /// pipe:1
-    ImageStdout,
+    Stdout,
     /// -attach {path}
     Attach(&'a Path),
+    /// -max_interleave_delta {ms}
+    MaxInterleaveDelta(u64),
     /// -metadata:s:{output_index} {key}={value}
     StreamMetadata(usize, &'a str, &'a str),
     /// {option}:v {value}
@@ -127,6 +137,11 @@ impl ArgsExt for Vec<OsString> {
             ),
             Arg::Filter(index, filter) => (format!("-filter:{index}").into(), Some(filter.into())),
             Arg::Input(path) => ("-i".into(), Some(path.as_os_str().to_owned())),
+            Arg::Seek(timestamp) => ("-ss".into(), Some(timestamp.into())),
+            Arg::DumpAttachment(index, path) => (
+                format!("-dump_attachment:{index}").into(),
+                Some(path.as_os_str().to_owned()),
+            ),
             Arg::Output(path) => (path.as_os_str().to_owned(), None),
             Arg::VaapiDevice(path) => ("-vaapi_device".into(), Some(path.as_os_str().to_owned())),
             Arg::Map(index) => ("-map".into(), Some(format!("0:{index}").into())),
@@ -135,9 +150,14 @@ impl ArgsExt for Vec<OsString> {
             Arg::CopyAll => ("-c".into(), Some("copy".into())),
             Arg::VideoCodec(name) => ("-c:v".into(), Some(name.into())),
             Arg::CopyStream(index) => (format!("-c:{index}").into(), Some("copy".into())),
+            Arg::Duration(duration) => ("-t".into(), Some(duration.into())),
             Arg::OneVideoFrame => ("-frames:v".into(), Some("1".into())),
-            Arg::ImageStdout => ("pipe:1".into(), None),
+            Arg::Stdout => ("pipe:1".into(), None),
             Arg::Attach(path) => ("-attach".into(), Some(path.as_os_str().to_owned())),
+            Arg::MaxInterleaveDelta(microseconds) => (
+                "-max_interleave_delta".into(),
+                Some(microseconds.to_string().into()),
+            ),
             Arg::StreamMetadata(index, key, value) => (
                 format!("-metadata:s:{index}").into(),
                 Some(format!("{key}={value}").into()),
@@ -147,6 +167,7 @@ impl ArgsExt for Vec<OsString> {
             Arg::HideBanner => ("-hide_banner".into(), None),
             Arg::NoStdin => ("-nostdin".into(), None),
             Arg::NoStats => ("-nostats".into(), None),
+            Arg::LogLevel(level) => ("-v".into(), Some(level.into())),
             Arg::ProgressStdout => ("-progress".into(), Some("pipe:1".into())),
             Arg::EncoderHelp(encoder) => ("-h".into(), Some(format!("encoder={encoder}").into())),
         };

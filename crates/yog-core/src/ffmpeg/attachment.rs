@@ -32,7 +32,7 @@ impl Ffmpeg {
             Arg::CopyAll,
             Arg::OneVideoFrame,
             Arg::Format("image2pipe"),
-            Arg::ImageStdout,
+            Arg::Stdout,
         ]);
         CoverExtraction {
             command: self.inner.build(args),

@@ -2,27 +2,29 @@ use rustix::path::Arg;
 use std::{collections::BTreeMap, fmt::Debug, path::Path};
 use yog_core::{
     error::Error,
-    ffmpeg::plan::TranscodePlan,
+    ffmpeg::{Ffmpeg, plan::TranscodePlan},
     ffprobe::{
         Ffprobe,
         types::{MediaInfo, MediaStream},
     },
 };
 
-pub trait Verifier {
-    async fn verify(
-        &self,
-        input: &Path,
-        output: &Path,
-        original: &MediaInfo,
-        copy_video: bool,
-        plan: &TranscodePlan,
-        warn: impl FnMut(String),
-    ) -> Result<(), Error>;
+pub enum VerificationOutcome {
+    Complete,
+    MissingAudioAfterSeek {
+        source_index: usize,
+        destination_index: usize,
+        timestamp: String,
+    },
 }
 
-impl Verifier for Ffprobe {
-    async fn verify(
+pub struct Verifier<'a> {
+    pub probe: &'a Ffprobe,
+    pub ffmpeg: &'a Ffmpeg,
+}
+
+impl Verifier<'_> {
+    pub async fn verify(
         &self,
         input: &Path,
         output: &Path,
@@ -30,8 +32,8 @@ impl Verifier for Ffprobe {
         copy_video: bool,
         plan: &TranscodePlan,
         mut warn: impl FnMut(String),
-    ) -> Result<(), Error> {
-        let actual = self.probe(output).await?;
+    ) -> Result<VerificationOutcome, Error> {
+        let actual = self.probe.probe(output).await?;
         if !actual.stderr.is_empty() {
             warn(format!(
                 "output probe: {}",
@@ -39,14 +41,104 @@ impl Verifier for Ffprobe {
             ));
         }
         let pairs = compare_structure(original, &actual.output, copy_video, plan, &mut warn);
+
+        if !copy_video
+            && let (Some(source_duration), Some(destination_duration)) = (
+                original
+                    .format
+                    .duration
+                    .as_deref()
+                    .and_then(|duration| duration.parse::<f64>().ok()),
+                actual
+                    .output
+                    .format
+                    .duration
+                    .as_deref()
+                    .and_then(|duration| duration.parse::<f64>().ok()),
+            )
+            && let (Some(source_video), Some(destination_video)) = (
+                original
+                    .streams
+                    .iter()
+                    .find(|stream| stream.is_regular_video()),
+                actual
+                    .output
+                    .streams
+                    .iter()
+                    .find(|stream| stream.is_regular_video()),
+            )
+            && let (Some(source_audio), Some(destination_audio)) = (
+                original
+                    .streams
+                    .iter()
+                    .find(|stream| stream.codec_type.as_deref() == Some("audio")),
+                actual
+                    .output
+                    .streams
+                    .iter()
+                    .find(|stream| stream.codec_type.as_deref() == Some("audio")),
+            )
+        {
+            let duration = source_duration.min(destination_duration);
+            if duration.is_finite() && duration > 0.0 {
+                for fraction in [0.25, 0.5, 0.75] {
+                    let timestamp = format!("{:.6}", duration * fraction);
+                    let source = self
+                        .ffmpeg
+                        .seek_decode_audio(
+                            input,
+                            source_video.index,
+                            source_audio.index,
+                            &timestamp,
+                        )
+                        .await?;
+                    if !source.stderr.is_empty() {
+                        warn(format!(
+                            "input seek decode: {}",
+                            source.stderr.to_string_lossy().trim()
+                        ));
+                    }
+                    if source.audio_frames == 0 {
+                        continue;
+                    }
+                    let destination = self
+                        .ffmpeg
+                        .seek_decode_audio(
+                            output,
+                            destination_video.index,
+                            destination_audio.index,
+                            &timestamp,
+                        )
+                        .await?;
+                    if !destination.stderr.is_empty() {
+                        warn(format!(
+                            "output seek decode: {}",
+                            destination.stderr.to_string_lossy().trim()
+                        ));
+                    }
+                    if destination.audio_frames == 0 {
+                        return Ok(VerificationOutcome::MissingAudioAfterSeek {
+                            source_index: source_audio.index,
+                            destination_index: destination_audio.index,
+                            timestamp,
+                        });
+                    }
+                }
+            }
+        }
+
         if pairs.is_empty() {
-            return Ok(());
+            return Ok(VerificationOutcome::Complete);
         }
 
         let source_indices: Vec<_> = pairs.iter().map(|(before, _)| before.index).collect();
         let destination_indices: Vec<_> = pairs.iter().map(|(_, after)| after.index).collect();
-        let source = self.packet_fingerprints(input, &source_indices).await?;
+        let source = self
+            .probe
+            .packet_fingerprints(input, &source_indices)
+            .await?;
         let destination = self
+            .probe
             .packet_fingerprints(output, &destination_indices)
             .await?;
 
@@ -74,7 +166,7 @@ impl Verifier for Ffprobe {
                     source.packets, destination.packets
                 ));
             }
-            if plan.cover_metadata(before.index).is_none()
+            if plan.attachment_metadata(before.index).is_none()
                 && source.timing_sha256 != destination.timing_sha256
             {
                 warn(format!(
@@ -83,7 +175,7 @@ impl Verifier for Ffprobe {
             }
         }
 
-        Ok(())
+        Ok(VerificationOutcome::Complete)
     }
 }
 
@@ -168,7 +260,8 @@ fn compare_structure<'a>(
         );
         tags(
             &scope,
-            plan.cover_metadata(before.index).unwrap_or(&before.tags),
+            plan.attachment_metadata(before.index)
+                .unwrap_or(&before.tags),
             &after.tags,
             warn,
         );

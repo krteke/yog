@@ -86,7 +86,9 @@ async fn generated_media_exercises_progress_metadata_frames_and_packets() {
     let plan = request.plan(&media, &ffmpeg).await.unwrap();
     let mut progress = Vec::new();
     ffmpeg
-        .execute(&plan, |record| progress.push(record), |_| {})
+        .build(&plan)
+        .unwrap()
+        .run(|record| progress.push(record), |_| {})
         .await
         .unwrap();
     let last = progress.last().unwrap();
@@ -103,14 +105,19 @@ async fn generated_media_exercises_progress_metadata_frames_and_packets() {
     let before = fs::read(&destination).unwrap();
     // Some FFmpeg builds report exit 0 when -n refuses an existing output.
     // The planner's overwrite contract is that the file stays untouched.
-    let _existing = ffmpeg.execute(&plan, |_| {}, |_| {}).await;
+    let _existing = ffmpeg.build(&plan).unwrap().run(|_| {}, |_| {}).await;
     assert_eq!(fs::read(&destination).unwrap(), before);
     let copied = scratch.0.join("remux.mkv");
     let remux = TranscodeRequest::mkv(destination, &copied)
         .plan(&actual, &ffmpeg)
         .await
         .unwrap();
-    ffmpeg.execute(&remux, |_| {}, |_| {}).await.unwrap();
+    ffmpeg
+        .build(&remux)
+        .unwrap()
+        .run(|_| {}, |_| {})
+        .await
+        .unwrap();
     let copied = probe.probe(&copied).await.unwrap().output;
     assert_eq!(copied.streams[0].codec_name, actual.streams[0].codec_name);
     assert_eq!(copied.streams[1].codec_name, actual.streams[1].codec_name);
@@ -264,7 +271,12 @@ async fn shared_video_encoding_keeps_reordered_cover_and_audio_as_copy() {
         .plan(&media, &ffmpeg)
         .await
         .unwrap();
-    ffmpeg.execute(&plan, |_| {}, |_| {}).await.unwrap();
+    ffmpeg
+        .build(&plan)
+        .unwrap()
+        .run(|_| {}, |_| {})
+        .await
+        .unwrap();
     let actual = probe.probe(&output).await.unwrap().output;
     assert_eq!(actual.streams.len(), 4);
     assert_eq!(

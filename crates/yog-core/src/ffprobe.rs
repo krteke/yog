@@ -262,10 +262,12 @@ impl Ffprobe {
         args.extend([Arg::ErrorsOnly, Arg::Json, Arg::ShowError]);
         args.extend(options);
         args.add(Arg::Input(input));
-        let mut output = self
-            .inner
+
+        let command = self.inner.build(args);
+        command.print();
+
+        let mut output = command
             .run(
-                &args,
                 |stdout| async move {
                     let reader = BufReader::new(SyncIoBridge::new(stdout));
                     match tokio::task::spawn_blocking(move || decode(reader)).await {

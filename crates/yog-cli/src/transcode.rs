@@ -30,7 +30,6 @@ pub async fn run(
         )));
     }
 
-    let progress = Display::new(options.verbose);
     let timeout = options.timeout.map(Duration::from_secs);
     let target = request.output.clone();
     let output = Output::prepare(&target, request.overwrite)
@@ -53,20 +52,25 @@ pub async fn run(
         .plan(&media, &ffmpeg)
         .await
         .context("cannot plan transcode")?;
+    let command = ffmpeg
+        .build(&plan)
+        .context("cannot build transcode command")?;
+    command.print();
+
+    let progress = Display::new(options.verbose);
     progress.start(media.format.duration.as_deref());
-    ffmpeg
-        .execute(
-            &plan,
+    command
+        .run(
             |record| progress.update(record),
             |bytes| diagnostics.ffmpeg(bytes),
         )
         .await
         .context("transcode failed")?;
+    drop(progress);
 
     let mut warnings = Vec::new();
-    if options.verify {
-        progress.verifying();
-        if let Err(error) = probe
+    if options.verify
+        && let Err(error) = probe
             .verify(
                 &request.input,
                 output.part(),
@@ -76,26 +80,23 @@ pub async fn run(
                 |warning| warnings.push(warning),
             )
             .await
-        {
-            if matches!(error.reason, yog_core::error::Failure::Cancelled) {
-                return Err(RunError::Cancelled);
-            }
-            warnings.push(format!("verification incomplete: {error}"));
-            if !error.stderr.is_empty() {
-                warnings.push(error.stderr.to_string_lossy().trim_end().to_owned());
-            }
+    {
+        if matches!(error.reason, yog_core::error::Failure::Cancelled) {
+            return Err(RunError::Cancelled);
+        }
+        warnings.push(format!("verification incomplete: {error}"));
+        if !error.stderr.is_empty() {
+            warnings.push(error.stderr.to_string_lossy().trim_end().to_owned());
         }
     }
+
     if cancelled.is_cancelled() {
         return Err(RunError::Cancelled);
     }
 
-    progress.publishing();
     let published = output
         .publish()
         .with_context(|| format!("cannot publish output {}", target.display()));
-
-    drop(progress);
 
     for warning in warnings {
         diagnostics.write(format!("warning: verify: {warning}\n").as_bytes());

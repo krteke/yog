@@ -46,7 +46,9 @@ let plan = TranscodeRequest::mkv(input, "output.mkv")
         Some(RateControl::Quality(23)), Some(Preset::Medium),
     ))
     .plan(&media, &ffmpeg).await?;
-ffmpeg.execute(&plan, |_| {}, |_| {}).await?;
+let command = ffmpeg.build(&plan)?;
+command.print();
+command.run(|_| {}, |_| {}).await?;
 # Ok(())
 # }
 ```

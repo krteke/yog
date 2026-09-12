@@ -256,9 +256,12 @@ async fn ffmpeg_drains_both_pipes_and_end_record_does_not_hide_failure() {
     let mut count = 0;
     let mut finished = false;
     let mut diagnostics = Vec::new();
-    let error = Ffmpeg::new(&tool.path, Some(Duration::from_secs(5)))
-        .execute(
-            &tool.plan().await,
+    let ffmpeg = Ffmpeg::new(&tool.path, Some(Duration::from_secs(5)));
+    let plan = tool.plan().await;
+    let error = ffmpeg
+        .build(&plan)
+        .unwrap()
+        .run(
             |progress| {
                 count += 1;
                 finished = progress.finished;
@@ -284,10 +287,13 @@ async fn ffmpeg_callbacks_can_cancel_while_child_is_running() {
         )
         .await;
         let cancelled = CancellationToken::new();
-        let error = Ffmpeg::new(&tool.path, Some(Duration::from_secs(5)))
-            .with_cancellation(cancelled.clone())
-            .execute(
-                &tool.plan().await,
+        let ffmpeg = Ffmpeg::new(&tool.path, Some(Duration::from_secs(5)))
+            .with_cancellation(cancelled.clone());
+        let plan = tool.plan().await;
+        let error = ffmpeg
+            .build(&plan)
+            .unwrap()
+            .run(
                 |_| {
                     if !cancel_from_stderr {
                         cancelled.cancel();
@@ -314,10 +320,13 @@ async fn ffmpeg_callback_panics_reap_before_propagation() {
             Tool::new("printf 'diagnostic' >&2; printf 'progress=continue\n'; while :; do :; done")
                 .await;
         let started = Instant::now();
+        let ffmpeg = Ffmpeg::new(&tool.path, Some(Duration::from_secs(5)));
+        let plan = tool.plan().await;
         let result = AssertUnwindSafe(async {
-            Ffmpeg::new(&tool.path, Some(Duration::from_secs(5)))
-                .execute(
-                    &tool.plan().await,
+            ffmpeg
+                .build(&plan)
+                .unwrap()
+                .run(
                     |_| {
                         assert!(panic_from_stderr, "progress callback panic");
                     },
@@ -337,18 +346,22 @@ async fn ffmpeg_callback_panics_reap_before_propagation() {
 #[tokio::test]
 async fn ffmpeg_exit_without_progress_is_valid_but_silence_still_times_out() {
     let tool = Tool::new("exit 0").await;
-    Ffmpeg::new(&tool.path, Some(Duration::from_secs(5)))
-        .execute(
-            &tool.plan().await,
-            |_| panic!("unexpected progress"),
-            |_| {},
-        )
+    let ffmpeg = Ffmpeg::new(&tool.path, Some(Duration::from_secs(5)));
+    let plan = tool.plan().await;
+    ffmpeg
+        .build(&plan)
+        .unwrap()
+        .run(|_| panic!("unexpected progress"), |_| {})
         .await
         .unwrap();
     drop(tool);
     let tool = Tool::new("printf 'waiting' >&2; while :; do :; done").await;
-    let error = Ffmpeg::new(&tool.path, Some(Duration::from_millis(100)))
-        .execute(&tool.plan().await, |_| {}, |_| {})
+    let ffmpeg = Ffmpeg::new(&tool.path, Some(Duration::from_millis(100)));
+    let plan = tool.plan().await;
+    let error = ffmpeg
+        .build(&plan)
+        .unwrap()
+        .run(|_| {}, |_| {})
         .await
         .unwrap_err();
     assert!(matches!(error.reason, Failure::TimedOut));
@@ -394,7 +407,12 @@ exit 17
         .plan(&media, &ffmpeg)
         .await
         .unwrap();
-    let error = ffmpeg.execute(&plan, |_| {}, |_| {}).await.unwrap_err();
+    let error = ffmpeg
+        .build(&plan)
+        .unwrap()
+        .run(|_| {}, |_| {})
+        .await
+        .unwrap_err();
     assert!(matches!(error.reason, Failure::Exit));
     assert_eq!(error.status.unwrap().code(), Some(17));
     assert_eq!(error.stderr, b"device initialization failed");
@@ -405,8 +423,12 @@ async fn continuous_progress_does_not_extend_the_process_deadline() {
     let tool = Tool::new("while :; do printf 'frame=1\nprogress=continue\n'; done").await;
     let started = Instant::now();
     let mut records = 0;
-    let error = Ffmpeg::new(&tool.path, Some(Duration::from_millis(100)))
-        .execute(&tool.plan().await, |_| records += 1, |_| {})
+    let ffmpeg = Ffmpeg::new(&tool.path, Some(Duration::from_millis(100)));
+    let plan = tool.plan().await;
+    let error = ffmpeg
+        .build(&plan)
+        .unwrap()
+        .run(|_| records += 1, |_| {})
         .await
         .unwrap_err();
     assert!(records > 0);

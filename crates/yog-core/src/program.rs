@@ -3,7 +3,7 @@ use crate::process::Output;
 
 use futures_util::FutureExt;
 use std::{
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     future::{Future, pending},
     panic::{AssertUnwindSafe, resume_unwind},
     path::PathBuf,
@@ -12,7 +12,7 @@ use std::{
 };
 use tokio::{
     io::AsyncReadExt,
-    process::{ChildStdout, Command},
+    process::{ChildStdout, Command as TokioCommand},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -24,38 +24,62 @@ pub struct Program {
 }
 
 impl Program {
-    pub async fn run<T, I, O, D, F, S>(
-        &self,
-        args: I,
-        decode: D,
-        mut on_stderr: S,
-    ) -> Result<Output<T>, Error>
+    pub fn build<I, O>(&self, args: I) -> Command<'_>
     where
         I: IntoIterator<Item = O>,
         O: AsRef<OsStr>,
+    {
+        Command {
+            program: self,
+            args: args
+                .into_iter()
+                .map(|arg| arg.as_ref().to_owned())
+                .collect(),
+        }
+    }
+}
+
+pub struct Command<'a> {
+    program: &'a Program,
+    args: Vec<OsString>,
+}
+
+impl Command<'_> {
+    pub fn print(&self) {
+        let mut line = self.program.path.as_os_str().to_owned();
+        for arg in &self.args {
+            line.push(" ");
+            line.push(arg);
+        }
+        eprintln!("{}", line.to_string_lossy());
+    }
+
+    pub async fn run<T, D, F, S>(self, decode: D, mut on_stderr: S) -> Result<Output<T>, Error>
+    where
         D: FnOnce(ChildStdout) -> F,
         F: Future<Output = Result<T, Failure>>,
         S: FnMut(&[u8]),
     {
         let mut failure = Error {
-            program: self.path.clone(),
+            program: self.program.path.clone(),
             reason: Failure::Cancelled,
             status: None,
             stderr: Vec::new(),
             secondary_io: Vec::new(),
         };
-        if self.cancellation.is_cancelled() {
+        if self.program.cancellation.is_cancelled() {
             return Err(failure);
         }
-        let mut child = Command::new(&self.path)
-            .args(args)
+
+        let mut child = TokioCommand::new(&self.program.path)
+            .args(&self.args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .map_err(|error| Error {
-                program: self.path.clone(),
+                program: self.program.path.clone(),
                 reason: Failure::Io(error),
                 status: None,
                 stderr: Vec::new(),
@@ -63,7 +87,7 @@ impl Program {
             })?;
         let stdout = child.stdout.take().expect("stdout configured as piped");
         let mut stderr = child.stderr.take().expect("stderr configured as piped");
-        let timer = self.timeout.map(tokio::time::sleep);
+        let timer = self.program.timeout.map(tokio::time::sleep);
         let deadline = async {
             match timer {
                 Some(timer) => timer.await,
@@ -95,7 +119,7 @@ impl Program {
 
             while failure.status.is_none() || !stdout_done || !stderr_done {
                 tokio::select! {
-                    _ = self.cancellation.cancelled() => {
+                    _ = self.program.cancellation.cancelled() => {
                         reason = Some(Failure::Cancelled);
                         break;
                     }

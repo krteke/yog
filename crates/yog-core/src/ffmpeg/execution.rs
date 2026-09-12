@@ -4,10 +4,14 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use super::{
     Ffmpeg,
     args::{Arg, ArgsExt},
+    attachment::CoverExtraction,
     plan::TranscodePlan,
     progress::{Progress, ProgressParser},
 };
-use crate::error::{Error, Failure};
+use crate::{
+    error::{Error, Failure},
+    program::Command,
+};
 
 /// Diagnostics retained after successful execution. Failures carry the same
 /// diagnostics and exit status in [`Error`].
@@ -17,19 +21,14 @@ pub struct ExecutionResult {
     pub stderr: Vec<u8>,
 }
 
+pub struct BuiltTranscode<'a> {
+    command: Command<'a>,
+    covers: Vec<CoverExtraction<'a>>,
+    cover_dir: Option<tempfile::TempDir>,
+}
+
 impl Ffmpeg {
-    /// Execute the complete plan, including Matroska cover extraction/attachment.
-    /// Cover files belong to a TempDir held until the child has been reaped.
-    /// The configured timeout applies separately to each FFmpeg subprocess.
-    /// Callbacks run in this async task and must return promptly. To cancel and
-    /// wait for cleanup, cancel the configured token and await this method.
-    /// Dropping the future requests a kill but cannot await process cleanup.
-    pub async fn execute(
-        &self,
-        plan: &TranscodePlan,
-        mut on_progress: impl FnMut(Progress) + Send,
-        mut on_stderr: impl FnMut(&[u8]) + Send,
-    ) -> Result<ExecutionResult, Error> {
+    pub fn build<'a>(&'a self, plan: &TranscodePlan) -> Result<BuiltTranscode<'a>, Error> {
         let mut args = Vec::new();
         args.extend([
             Arg::HideBanner,
@@ -54,11 +53,11 @@ impl Ffmpeg {
                     })?,
             )
         };
+        let mut covers = Vec::new();
         if let Some(dir) = &cover_dir {
             for cover in &plan.covers {
                 let path = dir.path().join(format!("cover-{}", cover.input_index));
-                self.extract_cover(&plan.input, cover.input_index, &path, &mut on_stderr)
-                    .await?;
+                covers.push(self.build_cover_extraction(&plan.input, cover.input_index, &path));
                 args.add(Arg::Attach(&path));
                 args.extend(
                     cover
@@ -69,10 +68,43 @@ impl Ffmpeg {
             }
         }
         args.add(Arg::Output(&plan.output));
-        let output = self
-            .inner
+
+        Ok(BuiltTranscode {
+            command: self.inner.build(args),
+            covers,
+            cover_dir,
+        })
+    }
+}
+
+impl BuiltTranscode<'_> {
+    pub fn print(&self) {
+        for cover in &self.covers {
+            cover.print();
+        }
+        self.command.print();
+    }
+
+    /// The configured timeout applies separately to each FFmpeg subprocess.
+    /// Callbacks run in this async task and must return promptly. To cancel and
+    /// wait for cleanup, cancel the configured token and await this method.
+    /// Dropping the future requests a kill but cannot await process cleanup.
+    pub async fn run(
+        self,
+        mut on_progress: impl FnMut(Progress) + Send,
+        mut on_stderr: impl FnMut(&[u8]) + Send,
+    ) -> Result<ExecutionResult, Error> {
+        let Self {
+            command,
+            covers,
+            cover_dir: _cover_dir,
+        } = self;
+        for cover in covers {
+            cover.run(&mut on_stderr).await?;
+        }
+
+        let output = command
             .run(
-                args,
                 |stdout| async move {
                     let mut parser = ProgressParser::new();
                     let mut lines = BufReader::new(stdout).lines();

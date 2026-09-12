@@ -34,10 +34,10 @@ impl Ffmpeg {
     pub async fn encoder_help(&self, encoder: &str) -> Result<EncoderHelp, Error> {
         let mut args: Vec<OsString> = Vec::new();
         args.extend([Arg::HideBanner, Arg::EncoderHelp(encoder)]);
-        let output = self
-            .inner
+        let command = self.inner.build(args);
+        command.print();
+        let output = command
             .run(
-                &args,
                 |mut reader| async move {
                     let mut text = String::new();
                     reader

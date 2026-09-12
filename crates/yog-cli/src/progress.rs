@@ -15,7 +15,7 @@ impl Display {
             ProgressBar::new_spinner()
         };
         bar.set_style(ProgressStyle::with_template("{spinner} {msg} [{elapsed_precise}]").unwrap());
-        bar.set_message("probing input file");
+
         if !bar.is_hidden() {
             bar.enable_steady_tick(Duration::from_millis(
                 config::get().progress_tick_interval_ms,
@@ -67,17 +67,6 @@ impl Display {
         }
         self.bar.set_message(message);
     }
-
-    pub fn publishing(&self) {
-        self.bar.set_message("publishing");
-    }
-
-    pub fn verifying(&self) {
-        self.bar.set_style(
-            ProgressStyle::with_template("{spinner} {msg} [{elapsed_precise}]").unwrap(),
-        );
-        self.bar.set_message("verifying output");
-    }
 }
 
 impl Drop for Display {
@@ -91,7 +80,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn missing_or_invalid_duration_stays_indeterminate_and_end_is_not_success() {
+    fn missing_or_invalid_duration_stays_indeterminate() {
         for duration in [
             None,
             Some("N/A"),
@@ -109,8 +98,6 @@ mod tests {
                 finished: true,
                 ..Progress::default()
             });
-            assert!(!display.bar.is_finished());
-            display.publishing();
             assert!(!display.bar.is_finished());
         }
     }

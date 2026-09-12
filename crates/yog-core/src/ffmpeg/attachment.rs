@@ -1,17 +1,27 @@
-use std::{ffi::OsString, path::Path};
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+};
 use tokio::io::AsyncWriteExt;
 
 use super::{Ffmpeg, args::Arg};
-use crate::error::{Error, Failure};
+use crate::{
+    error::{Error, Failure},
+    program::Command,
+};
+
+pub(super) struct CoverExtraction<'a> {
+    command: Command<'a>,
+    path: PathBuf,
+}
 
 impl Ffmpeg {
-    pub(super) async fn extract_cover(
-        &self,
+    pub(super) fn build_cover_extraction<'a>(
+        &'a self,
         input: &Path,
         stream_index: usize,
         path: &Path,
-        on_stderr: impl FnMut(&[u8]) + Send,
-    ) -> Result<(), Error> {
+    ) -> CoverExtraction<'a> {
         let mut args: Vec<OsString> = Vec::new();
         args.extend([
             Arg::HideBanner,
@@ -24,10 +34,23 @@ impl Ffmpeg {
             Arg::Format("image2pipe"),
             Arg::ImageStdout,
         ]);
+        CoverExtraction {
+            command: self.inner.build(args),
+            path: path.to_owned(),
+        }
+    }
+}
+
+impl CoverExtraction<'_> {
+    pub(super) fn print(&self) {
+        self.command.print();
+    }
+
+    pub(super) async fn run(self, on_stderr: impl FnMut(&[u8]) + Send) -> Result<(), Error> {
+        let path = self.path;
         let output = self
-            .inner
+            .command
             .run(
-                args,
                 |mut stdout| async move {
                     let mut file = tokio::fs::File::create(path).await.map_err(Failure::Io)?;
                     let size = tokio::io::copy(&mut stdout, &mut file)

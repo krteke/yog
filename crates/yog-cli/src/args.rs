@@ -372,6 +372,40 @@ mod tests {
     }
 
     #[test]
+    fn every_output_container_has_a_cli_value() {
+        for (value, expected) in [
+            ("mkv", Container::Matroska),
+            ("mp4", Container::Mp4),
+            ("mov", Container::Mov),
+            ("m4a", Container::M4a),
+            ("3gp", Container::ThreeGp),
+            ("3g2", Container::ThreeG2),
+            ("f4v", Container::F4v),
+            ("ismv", Container::Ismv),
+            ("psp", Container::Psp),
+            ("webm", Container::Webm),
+            ("ts", Container::MpegTs),
+            ("m2ts", Container::M2ts),
+            ("avi", Container::Avi),
+            ("flv", Container::Flv),
+            ("asf", Container::Asf),
+            ("wmv", Container::Wmv),
+            ("mpg", Container::MpegPs),
+            ("mpeg", Container::MpegPs),
+            ("vob", Container::Vob),
+            ("ogg", Container::Ogg),
+            ("ogv", Container::Ogv),
+        ] {
+            let (request, _) =
+                Args::try_parse_from(["yog", "input", "-o", "output", "-C", value, "--copy"])
+                    .unwrap()
+                    .into_request()
+                    .unwrap();
+            assert_eq!(request.container, Some(expected), "{value}");
+        }
+    }
+
+    #[test]
     fn help_displays_only_the_selected_modes_flags_without_requiring_files() {
         let help = Args::try_parse_from(["yog", "--encode-nvenc", "--help"]).unwrap_err();
         assert_eq!(help.kind(), ErrorKind::DisplayHelp);

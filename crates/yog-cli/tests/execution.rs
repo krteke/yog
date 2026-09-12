@@ -23,7 +23,7 @@ impl Fixture {
         ));
         fs::create_dir(&root).unwrap();
         let fixture = Self(root);
-        fs::write(fixture.0.join("input"), b"input").unwrap();
+        fs::write(fixture.0.join("input.mkv"), b"input").unwrap();
         fixture.tool(
             "ffprobe",
             "printf '%s' '{\"streams\":[{\"index\":0,\"codec_type\":\"video\"}],\"format\":{\"format_name\":\"matroska,webm\",\"duration\":\"1\"}}'",
@@ -44,7 +44,7 @@ impl Fixture {
             .current_dir(&self.0)
             .env("XDG_CONFIG_HOME", &self.0)
             .args([
-                "input",
+                "input.mkv",
                 "-o",
                 "output.mkv",
                 "--ffprobe",
@@ -116,7 +116,6 @@ sleep 0.05
 rmdir running
 printf encoded > "$argument""#,
     );
-    fs::remove_file(fixture.0.join("input")).unwrap();
     fs::create_dir_all(fixture.0.join("input/nested")).unwrap();
     fs::write(fixture.0.join("input/first"), b"first").unwrap();
     fs::write(fixture.0.join("input/nested/audio"), b"audio").unwrap();
@@ -151,16 +150,101 @@ printf '{"streams":%s,"format":{"format_name":"%s","duration":"1"}}' "$streams" 
         b"encoded"
     );
     assert_eq!(
-        fs::read(fixture.0.join("output/nested/movie.m2ts")).unwrap(),
+        fs::read(fixture.0.join("output/nested/movie.ts")).unwrap(),
         b"encoded"
     );
     assert!(!fixture.0.join("output/nested/audio").exists());
     assert!(!fixture.0.join("output/nested/notes.md").exists());
     assert!(!fixture.0.join("output/first.ts.part").exists());
-    assert!(!fixture.0.join("output/nested/movie.m2ts.part").exists());
+    assert!(!fixture.0.join("output/nested/movie.ts.part").exists());
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(stderr.contains("warning: skipping input/nested/notes.md because ffprobe failed"));
     assert!(stderr.contains("NOT-MEDIA"));
+}
+
+#[test]
+fn recursive_mode_preserves_implicit_suffixes_and_uses_their_exact_muxers() {
+    let fixture = Fixture::new(
+        r#"previous=''
+muxer=''
+for argument do
+    if test "$previous" = -f; then muxer=$argument; fi
+    previous=$argument
+done
+printf '%s %s\n' "$muxer" "$argument" >> commands
+printf encoded > "$argument""#,
+    );
+    fs::create_dir(fixture.0.join("input")).unwrap();
+    for extension in [
+        "mkv", "webm", "mp4", "mov", "m4a", "3gp", "3g2", "f4v", "ismv", "psp", "ts", "m2ts",
+        "avi", "flv", "asf", "wmv", "mpg", "mpeg", "vob", "ogg", "ogv",
+    ] {
+        fs::write(fixture.0.join(format!("input/video.{extension}")), b"video").unwrap();
+    }
+    fixture.tool(
+        "ffprobe",
+        r#"for last do :; done
+case "$last" in
+    *.mkv|*.webm) format=matroska,webm ;;
+    *.ts|*.m2ts) format=mpegts ;;
+    *.avi) format=avi ;;
+    *.flv) format=flv ;;
+    *.asf|*.wmv) format=asf ;;
+    *.mpg|*.mpeg|*.vob) format=mpeg ;;
+    *.ogg|*.ogv) format=ogg ;;
+    *) format=mov,mp4,m4a,3gp,3g2,mj2 ;;
+esac
+printf '{"streams":[{"index":0,"codec_type":"video"}],"format":{"format_name":"%s","duration":"1"}}' "$format""#,
+    );
+
+    let result = fixture
+        .recursive_command("output")
+        .arg("--copy")
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{:?}", result.stderr);
+
+    for extension in [
+        "mkv", "webm", "mp4", "mov", "m4a", "3gp", "3g2", "f4v", "ismv", "psp", "ts", "m2ts",
+        "avi", "flv", "asf", "wmv", "mpg", "mpeg", "vob", "ogg", "ogv",
+    ] {
+        assert_eq!(
+            fs::read(fixture.0.join(format!("output/video.{extension}"))).unwrap(),
+            b"encoded",
+            "{extension}"
+        );
+    }
+    let commands = fs::read_to_string(fixture.0.join("commands")).unwrap();
+    for (muxer, extension) in [
+        ("matroska", "mkv"),
+        ("webm", "webm"),
+        ("mp4", "mp4"),
+        ("mov", "mov"),
+        ("ipod", "m4a"),
+        ("3gp", "3gp"),
+        ("3g2", "3g2"),
+        ("f4v", "f4v"),
+        ("ismv", "ismv"),
+        ("psp", "psp"),
+        ("mpegts", "ts"),
+        ("mpegts", "m2ts"),
+        ("avi", "avi"),
+        ("flv", "flv"),
+        ("asf", "asf"),
+        ("asf", "wmv"),
+        ("mpeg", "mpg"),
+        ("mpeg", "mpeg"),
+        ("vob", "vob"),
+        ("ogg", "ogg"),
+        ("ogv", "ogv"),
+    ] {
+        assert!(
+            commands
+                .lines()
+                .any(|line| line == format!("{muxer} output/video.{extension}.part")),
+            "missing {muxer} mapping for {extension}:\n{commands}"
+        );
+    }
 }
 
 #[test]
@@ -170,12 +254,11 @@ fn recursive_mode_uses_core_container_resolution_before_starting_ffmpeg() {
 for last do :; done
 printf encoded > "$last""#,
     );
-    fs::remove_file(fixture.0.join("input")).unwrap();
     fs::create_dir(fixture.0.join("input")).unwrap();
-    fs::write(fixture.0.join("input/clip.avi"), b"video").unwrap();
+    fs::write(fixture.0.join("input/clip.nut"), b"video").unwrap();
     fixture.tool(
         "ffprobe",
-        r#"printf '%s' '{"streams":[{"index":0,"codec_type":"video"}],"format":{"format_name":"avi","duration":"1"}}'"#,
+        r#"printf '%s' '{"streams":[{"index":0,"codec_type":"video"}],"format":{"format_name":"nut","duration":"1"}}'"#,
     );
 
     let result = fixture
@@ -186,7 +269,7 @@ printf encoded > "$last""#,
     assert!(!result.status.success());
     assert!(
         String::from_utf8_lossy(&result.stderr)
-            .contains("cannot use input format Some(\"avi\") as an output container")
+            .contains("cannot use input format Some(\"nut\") as an output container")
     );
     assert!(!fixture.0.join("ffmpeg-started").exists());
 
@@ -205,7 +288,6 @@ printf encoded > "$last""#,
 #[test]
 fn recursive_mode_rejects_output_collisions_before_starting_ffmpeg() {
     let fixture = Fixture::new("touch ffmpeg-started");
-    fs::remove_file(fixture.0.join("input")).unwrap();
     fs::create_dir(fixture.0.join("input")).unwrap();
     fs::write(fixture.0.join("input/same.mkv"), b"first").unwrap();
     fs::write(fixture.0.join("input/same.avi"), b"second").unwrap();
@@ -345,7 +427,7 @@ fn verification_is_opt_in_and_warnings_do_not_prevent_publication() {
 printf '%s\n' "$*" >> probe-calls
 for last do :; done
 case "$last" in
-  input) printf '%s' '{"streams":[{"index":8,"codec_type":"audio","codec_name":"aac"}],"format":{"format_name":"matroska,webm","tags":{"title":"original"}}}' ;;
+  input.mkv) printf '%s' '{"streams":[{"index":8,"codec_type":"audio","codec_name":"aac"}],"format":{"format_name":"matroska,webm","tags":{"title":"original"}}}' ;;
   *.part)
     test ! -e output.mkv || exit 8
     test "$(cat "$last")" = encoded || exit 9
@@ -394,7 +476,7 @@ printf encoded > "$last"
         "ffprobe",
         r#"
 for last do :; done
-case "$last" in input) prefix=input ;; *) prefix=output ;; esac
+case "$last" in input.mkv) prefix=input ;; *) prefix=output ;; esac
 case "$*" in *-show_packets*) cat "$prefix-packets.json" ;; *) cat "$prefix.json" ;; esac
 "#,
     );
@@ -510,7 +592,7 @@ fn verification_probe_and_packet_failures_warn_instead_of_deleting_the_output() 
                 r#"
 for last do :; done
 case "$*" in *-show_packets*) echo 'broken packet probe' >&2; exit 7 ;; esac
-if test "$last" != input && test '{failure}' = metadata; then
+if test "$last" != input.mkv && test '{failure}' = metadata; then
   echo 'broken output probe' >&2
   exit 6
 fi
@@ -558,7 +640,7 @@ printf encoded > "$last"
         "ffprobe",
         r#"
 for last do :; done
-case "$last" in input) cat input.json ;; *) cat output.json ;; esac
+case "$last" in input.mkv) cat input.json ;; *) cat output.json ;; esac
 "#,
     );
     let mut media = json!({
@@ -721,7 +803,7 @@ while :; do :; done"#,
             .current_dir(&fixture.0)
             .env("XDG_CONFIG_HOME", &fixture.0)
             .args([
-                "input",
+                "input.mkv",
                 "-o",
                 "output.mkv",
                 "--ffprobe",
@@ -788,7 +870,7 @@ fn cancellation_during_probe_encoding_or_verification_cleans_only_the_part() {
         } else if phase.starts_with("verify") {
             fixture.tool("ffmpeg", "for last do :; done; printf encoded > \"$last\"");
             let condition = if phase == "verify" {
-                "for last do :; done; test \"$last\" != input"
+                "for last do :; done; test \"$last\" != input.mkv"
             } else {
                 "case \"$*\" in *-show_packets*) true ;; *) false ;; esac"
             };

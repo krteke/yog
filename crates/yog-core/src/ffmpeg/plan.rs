@@ -16,8 +16,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const M2TS_EXTENSIONS: [&str; 3] = ["m2ts", "m2t", "mts"];
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 pub enum Container {
@@ -25,9 +23,32 @@ pub enum Container {
     Matroska,
     Mp4,
     Mov,
+    #[cfg_attr(feature = "clap", value(name = "m4a"))]
+    M4a,
+    #[cfg_attr(feature = "clap", value(name = "3gp"))]
+    ThreeGp,
+    #[cfg_attr(feature = "clap", value(name = "3g2"))]
+    ThreeG2,
+    #[cfg_attr(feature = "clap", value(name = "f4v"))]
+    F4v,
+    #[cfg_attr(feature = "clap", value(name = "ismv"))]
+    Ismv,
+    #[cfg_attr(feature = "clap", value(name = "psp"))]
+    Psp,
     Webm,
     #[cfg_attr(feature = "clap", value(name = "ts"))]
     MpegTs,
+    #[cfg_attr(feature = "clap", value(name = "m2ts"))]
+    M2ts,
+    Avi,
+    Flv,
+    Asf,
+    Wmv,
+    #[cfg_attr(feature = "clap", value(name = "mpg", alias = "mpeg"))]
+    MpegPs,
+    Vob,
+    Ogg,
+    Ogv,
 }
 
 impl Container {
@@ -36,36 +57,92 @@ impl Container {
             Self::Matroska => "matroska",
             Self::Mp4 => "mp4",
             Self::Mov => "mov",
+            Self::M4a => "ipod",
+            Self::ThreeGp => "3gp",
+            Self::ThreeG2 => "3g2",
+            Self::F4v => "f4v",
+            Self::Ismv => "ismv",
+            Self::Psp => "psp",
             Self::Webm => "webm",
-            Self::MpegTs => "mpegts",
+            Self::MpegTs | Self::M2ts => "mpegts",
+            Self::Avi => "avi",
+            Self::Flv => "flv",
+            Self::Asf | Self::Wmv => "asf",
+            Self::MpegPs => "mpeg",
+            Self::Vob => "vob",
+            Self::Ogg => "ogg",
+            Self::Ogv => "ogv",
         }
     }
 
     pub fn from_input(path: &Path, format_name: Option<&str>) -> Option<Self> {
-        let formats = format_name?.split(',');
+        let format_name = format_name?;
         let extension = path
             .extension()
-            .and_then(|value| value.to_str().map(|s| s.to_lowercase()));
+            .and_then(|value| value.to_str())
+            .map(str::to_ascii_lowercase);
+        let has_format = |expected| {
+            format_name
+                .split(',')
+                .any(|format| format.trim() == expected)
+        };
 
-        for format in formats {
-            match format.trim() {
-                "mpegts" => return Some(Self::MpegTs),
-                "matroska" | "webm" => {
-                    return Some(if extension.is_some_and(|value| value == "webm") {
-                        Self::Webm
-                    } else {
-                        Self::Matroska
-                    });
-                }
-                "mov" | "mp4" | "m4a" | "3gp" | "3g2" | "mj2" => {
-                    return Some(if extension.is_some_and(|value| value == "mov") {
-                        Self::Mov
-                    } else {
-                        Self::Mp4
-                    });
-                }
-                _ => {}
-            }
+        if has_format("mpegts") {
+            return match extension.as_deref() {
+                Some("ts") => Some(Self::MpegTs),
+                Some("m2t" | "m2ts" | "mts") => Some(Self::M2ts),
+                _ => Some(Self::MpegTs),
+            };
+        }
+        if has_format("matroska") || has_format("webm") {
+            return match extension.as_deref() {
+                Some("mkv" | "mk3d" | "mka" | "mks") => Some(Self::Matroska),
+                Some("webm") => Some(Self::Webm),
+                _ => Some(Self::Matroska),
+            };
+        }
+        if ["mov", "mp4", "m4a", "3gp", "3g2", "mj2"]
+            .into_iter()
+            .any(has_format)
+        {
+            return match extension.as_deref() {
+                Some("mp4") => Some(Self::Mp4),
+                Some("mov") => Some(Self::Mov),
+                Some("m4a" | "m4b" | "m4v") => Some(Self::M4a),
+                Some("3gp") => Some(Self::ThreeGp),
+                Some("3g2") => Some(Self::ThreeG2),
+                Some("f4v") => Some(Self::F4v),
+                Some("ismv" | "isma") => Some(Self::Ismv),
+                Some("psp") => Some(Self::Psp),
+                _ => Some(Self::Mp4),
+            };
+        }
+        if has_format("avi") {
+            return Some(Self::Avi);
+        }
+        if has_format("flv") {
+            return Some(Self::Flv);
+        }
+        if has_format("asf") {
+            return Some(if extension.as_deref() == Some("wmv") {
+                Self::Wmv
+            } else {
+                Self::Asf
+            });
+        }
+        if has_format("mpeg") {
+            return Some(if extension.as_deref() == Some("vob") {
+                Self::Vob
+            } else {
+                Self::MpegPs
+            });
+        }
+        if has_format("ogg") {
+            return Some(if extension.as_deref() == Some("ogv") {
+                Self::Ogv
+            } else {
+                Self::Ogg
+            });
         }
 
         None
@@ -205,12 +282,72 @@ impl TranscodeRequest {
         Self::new(input, output).with_container(Container::Mov)
     }
 
+    pub fn m4a(input: impl Into<PathBuf>, output: impl Into<PathBuf>) -> Self {
+        Self::new(input, output).with_container(Container::M4a)
+    }
+
+    pub fn three_gp(input: impl Into<PathBuf>, output: impl Into<PathBuf>) -> Self {
+        Self::new(input, output).with_container(Container::ThreeGp)
+    }
+
+    pub fn three_g2(input: impl Into<PathBuf>, output: impl Into<PathBuf>) -> Self {
+        Self::new(input, output).with_container(Container::ThreeG2)
+    }
+
+    pub fn f4v(input: impl Into<PathBuf>, output: impl Into<PathBuf>) -> Self {
+        Self::new(input, output).with_container(Container::F4v)
+    }
+
+    pub fn ismv(input: impl Into<PathBuf>, output: impl Into<PathBuf>) -> Self {
+        Self::new(input, output).with_container(Container::Ismv)
+    }
+
+    pub fn psp(input: impl Into<PathBuf>, output: impl Into<PathBuf>) -> Self {
+        Self::new(input, output).with_container(Container::Psp)
+    }
+
     pub fn webm(input: impl Into<PathBuf>, output: impl Into<PathBuf>) -> Self {
         Self::new(input, output).with_container(Container::Webm)
     }
 
     pub fn mpeg_ts(input: impl Into<PathBuf>, output: impl Into<PathBuf>) -> Self {
         Self::new(input, output).with_container(Container::MpegTs)
+    }
+
+    pub fn m2ts(input: impl Into<PathBuf>, output: impl Into<PathBuf>) -> Self {
+        Self::new(input, output).with_container(Container::M2ts)
+    }
+
+    pub fn avi(input: impl Into<PathBuf>, output: impl Into<PathBuf>) -> Self {
+        Self::new(input, output).with_container(Container::Avi)
+    }
+
+    pub fn flv(input: impl Into<PathBuf>, output: impl Into<PathBuf>) -> Self {
+        Self::new(input, output).with_container(Container::Flv)
+    }
+
+    pub fn asf(input: impl Into<PathBuf>, output: impl Into<PathBuf>) -> Self {
+        Self::new(input, output).with_container(Container::Asf)
+    }
+
+    pub fn wmv(input: impl Into<PathBuf>, output: impl Into<PathBuf>) -> Self {
+        Self::new(input, output).with_container(Container::Wmv)
+    }
+
+    pub fn mpeg_ps(input: impl Into<PathBuf>, output: impl Into<PathBuf>) -> Self {
+        Self::new(input, output).with_container(Container::MpegPs)
+    }
+
+    pub fn vob(input: impl Into<PathBuf>, output: impl Into<PathBuf>) -> Self {
+        Self::new(input, output).with_container(Container::Vob)
+    }
+
+    pub fn ogg(input: impl Into<PathBuf>, output: impl Into<PathBuf>) -> Self {
+        Self::new(input, output).with_container(Container::Ogg)
+    }
+
+    pub fn ogv(input: impl Into<PathBuf>, output: impl Into<PathBuf>) -> Self {
+        Self::new(input, output).with_container(Container::Ogv)
     }
 
     pub fn with_input(mut self, input: impl Into<PathBuf>) -> Self {
@@ -389,19 +526,7 @@ impl TranscodeRequest {
         if matches!(container, Container::Matroska) && encoding.is_some() && copied_timed_stream {
             output_args.add(Arg::MaxInterleaveDelta(0));
         }
-        if matches!(container, Container::MpegTs)
-            && Container::from_input(&self.input, media.format.format_name.as_deref())
-                == Some(Container::MpegTs)
-            && self
-                .input
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .is_some_and(|extension| {
-                    M2TS_EXTENSIONS
-                        .iter()
-                        .any(|known| extension.eq_ignore_ascii_case(known))
-                })
-        {
+        if matches!(container, Container::M2ts) {
             output_args.add(Arg::M2tsMode);
         }
 
@@ -442,37 +567,76 @@ mod tests {
     }
 
     #[test]
-    fn input_container_uses_the_probed_family_and_its_ambiguous_extension() {
-        for (path, format_name, muxer) in [
-            ("video.mkv", "matroska,webm", "matroska"),
-            ("video.WEBM", "matroska,webm", "webm"),
-            ("video.mp4", "mov,mp4,m4a,3gp,3g2,mj2", "mp4"),
-            ("video.MOV", "mov,mp4,m4a,3gp,3g2,mj2", "mov"),
-            ("video.m2ts", "mpegts", "mpegts"),
+    fn input_container_uses_exact_extensions_and_family_fallbacks() {
+        const MOV_FAMILY: &str = "mov,mp4,m4a,3gp,3g2,mj2";
+        for (extension, format_name, container, muxer) in [
+            ("mkv", "matroska,webm", Container::Matroska, "matroska"),
+            ("WEBM", "matroska,webm", Container::Webm, "webm"),
+            ("mp4", MOV_FAMILY, Container::Mp4, "mp4"),
+            ("MOV", MOV_FAMILY, Container::Mov, "mov"),
+            ("m4a", MOV_FAMILY, Container::M4a, "ipod"),
+            ("m4b", MOV_FAMILY, Container::M4a, "ipod"),
+            ("m4v", MOV_FAMILY, Container::M4a, "ipod"),
+            ("3gp", MOV_FAMILY, Container::ThreeGp, "3gp"),
+            ("3g2", MOV_FAMILY, Container::ThreeG2, "3g2"),
+            ("f4v", MOV_FAMILY, Container::F4v, "f4v"),
+            ("ISMV", MOV_FAMILY, Container::Ismv, "ismv"),
+            ("isma", MOV_FAMILY, Container::Ismv, "ismv"),
+            ("psp", MOV_FAMILY, Container::Psp, "psp"),
+            ("ts", "mpegts", Container::MpegTs, "mpegts"),
+            ("m2t", "mpegts", Container::M2ts, "mpegts"),
+            ("m2ts", "mpegts", Container::M2ts, "mpegts"),
+            ("mts", "mpegts", Container::M2ts, "mpegts"),
+            ("avi", "avi", Container::Avi, "avi"),
+            ("flv", "flv", Container::Flv, "flv"),
+            ("asf", "asf", Container::Asf, "asf"),
+            ("wmv", "asf", Container::Wmv, "asf"),
+            ("mpg", "mpeg", Container::MpegPs, "mpeg"),
+            ("mpeg", "mpeg", Container::MpegPs, "mpeg"),
+            ("vob", "mpeg", Container::Vob, "vob"),
+            ("ogg", "ogg", Container::Ogg, "ogg"),
+            ("ogv", "ogg", Container::Ogv, "ogv"),
+        ] {
+            let path = format!("video.{extension}");
+            let actual = Container::from_input(Path::new(&path), Some(format_name)).unwrap();
+            assert_eq!(actual, container, "{path}");
+            assert_eq!(actual.muxer(), muxer, "{path}");
+        }
+        for (path, format_name, container) in [
+            ("video.mj2", MOV_FAMILY, Container::Mp4),
+            ("video", MOV_FAMILY, Container::Mp4),
+            ("video.bin", "mpegts", Container::MpegTs),
+            ("video.bin", "matroska,webm", Container::Matroska),
+            ("video.bin", "asf", Container::Asf),
+            ("video.bin", "mpeg", Container::MpegPs),
+            ("video.bin", "ogg", Container::Ogg),
+            ("video.bin", "avi", Container::Avi),
         ] {
             assert_eq!(
-                Container::from_input(Path::new(path), Some(format_name))
-                    .unwrap()
-                    .muxer(),
-                muxer
+                Container::from_input(Path::new(path), Some(format_name)),
+                Some(container),
+                "{path} {format_name}"
             );
         }
-        assert!(Container::from_input(Path::new("video.avi"), Some("avi")).is_none());
+        assert!(Container::from_input(Path::new("video.nut"), Some("nut")).is_none());
+        assert!(Container::from_input(Path::new("video.avi"), None).is_none());
 
         let media: MediaInfo =
             serde_json::from_str(r#"{"format":{"format_name":"mpegts"}}"#).unwrap();
-        for (input, m2ts) in [
-            ("video.m2ts", true),
-            ("video.MTS", true),
-            ("video.ts", false),
+        for (input, explicit, m2ts) in [
+            ("video.m2ts", None, true),
+            ("video.MTS", None, true),
+            ("video.ts", None, false),
+            ("video.m2ts", Some(Container::MpegTs), false),
+            ("video.ts", Some(Container::M2ts), true),
         ] {
-            let plan = TranscodeRequest::new(input, "output")
-                .build(&media, &[])
-                .unwrap();
+            let mut request = TranscodeRequest::new(input, "output");
+            request.container = explicit;
+            let plan = request.build(&media, &[]).unwrap();
             assert_eq!(
                 plan.args.iter().any(|arg| arg == "-mpegts_m2ts_mode"),
                 m2ts,
-                "{input}"
+                "{input} {explicit:?}"
             );
         }
     }
@@ -644,8 +808,23 @@ mod tests {
         for container in [
             Container::Mp4,
             Container::Mov,
+            Container::M4a,
+            Container::ThreeGp,
+            Container::ThreeG2,
+            Container::F4v,
+            Container::Ismv,
+            Container::Psp,
             Container::Webm,
             Container::MpegTs,
+            Container::M2ts,
+            Container::Avi,
+            Container::Flv,
+            Container::Asf,
+            Container::Wmv,
+            Container::MpegPs,
+            Container::Vob,
+            Container::Ogg,
+            Container::Ogv,
         ] {
             let plan = TranscodeRequest::new("input", "output")
                 .with_container(container)

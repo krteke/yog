@@ -4,10 +4,7 @@ use clap::ValueEnum;
 use rustix::path::Arg;
 use std::collections::HashSet;
 use walkdir::WalkDir;
-use yog_core::{
-    ffmpeg::plan::{Container, TranscodeRequest},
-    ffprobe::types::MediaInfo,
-};
+use yog_core::{ffmpeg::plan::TranscodeRequest, ffprobe::types::MediaInfo};
 
 pub async fn discover(
     template: TranscodeRequest,
@@ -79,11 +76,8 @@ pub async fn discover(
                 )
             })
             .map_err(RunError::from)?;
-        let input_container =
-            Container::from_input(&request.input, media.format.format_name.as_deref());
-
         let mut output = template.output.join(relative);
-        if request.container.is_some() && input_container != Some(output_container) {
+        if request.container.is_some() {
             let value = output_container
                 .to_possible_value()
                 .expect("Container variants must have clap values");

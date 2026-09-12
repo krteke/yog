@@ -8,6 +8,8 @@ use crate::decoding::DecodingArgs;
 #[command(version, about)]
 pub struct Args {
     input: PathBuf,
+    #[arg(short, long, global = true)]
+    pub recursive: bool,
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
     #[arg(short, long, global = true, required = false)]

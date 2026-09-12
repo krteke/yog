@@ -16,7 +16,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Debug, Clone, Copy)]
+const M2TS_EXTENSIONS: [&str; 3] = ["m2ts", "m2t", "mts"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 pub enum Container {
     #[cfg_attr(feature = "clap", value(name = "mkv"))]
@@ -39,7 +41,7 @@ impl Container {
         }
     }
 
-    fn from_input(path: &Path, format_name: Option<&str>) -> Option<Self> {
+    pub fn from_input(path: &Path, format_name: Option<&str>) -> Option<Self> {
         let formats = format_name?.split(',');
         let extension = path
             .extension()
@@ -139,7 +141,7 @@ impl VideoAction {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct TranscodeRequest {
     pub input: PathBuf,
     pub output: PathBuf,
@@ -262,6 +264,14 @@ impl TranscodeRequest {
         self.build(media, &formats)
     }
 
+    pub fn output_container(&self, media: &MediaInfo) -> Result<Container, PlanError> {
+        self.container
+            .or_else(|| Container::from_input(&self.input, media.format.format_name.as_deref()))
+            .ok_or_else(|| PlanError::UnsupportedContainer {
+                format: media.format.format_name.clone(),
+            })
+    }
+
     fn active_encoding(&self, media: &MediaInfo) -> Option<&VideoEncoding> {
         match &self.video {
             VideoAction::Encode(encoding) if media.streams.iter().any(|s| s.is_regular_video()) => {
@@ -272,12 +282,7 @@ impl TranscodeRequest {
     }
 
     fn build(&self, media: &MediaInfo, formats: &[String]) -> Result<TranscodePlan, PlanError> {
-        let container = self
-            .container
-            .or_else(|| Container::from_input(&self.input, media.format.format_name.as_deref()))
-            .ok_or_else(|| PlanError::UnsupportedContainer {
-                format: media.format.format_name.clone(),
-            })?;
+        let container = self.output_container(media)?;
 
         let mut input_args = Vec::new();
         let mut output_args = Vec::new();
@@ -384,6 +389,21 @@ impl TranscodeRequest {
         if matches!(container, Container::Matroska) && encoding.is_some() && copied_timed_stream {
             output_args.add(Arg::MaxInterleaveDelta(0));
         }
+        if matches!(container, Container::MpegTs)
+            && Container::from_input(&self.input, media.format.format_name.as_deref())
+                == Some(Container::MpegTs)
+            && self
+                .input
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| {
+                    M2TS_EXTENSIONS
+                        .iter()
+                        .any(|known| extension.eq_ignore_ascii_case(known))
+                })
+        {
+            output_args.add(Arg::M2tsMode);
+        }
 
         input_args.add(Arg::Input(&self.input));
         input_args.extend(output_args);
@@ -438,6 +458,23 @@ mod tests {
             );
         }
         assert!(Container::from_input(Path::new("video.avi"), Some("avi")).is_none());
+
+        let media: MediaInfo =
+            serde_json::from_str(r#"{"format":{"format_name":"mpegts"}}"#).unwrap();
+        for (input, m2ts) in [
+            ("video.m2ts", true),
+            ("video.MTS", true),
+            ("video.ts", false),
+        ] {
+            let plan = TranscodeRequest::new(input, "output")
+                .build(&media, &[])
+                .unwrap();
+            assert_eq!(
+                plan.args.iter().any(|arg| arg == "-mpegts_m2ts_mode"),
+                m2ts,
+                "{input}"
+            );
+        }
     }
 
     #[test]

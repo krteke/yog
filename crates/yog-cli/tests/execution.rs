@@ -56,6 +56,24 @@ impl Fixture {
             ]);
         command
     }
+
+    fn recursive_command(&self, output: &str) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_yog"));
+        command
+            .current_dir(&self.0)
+            .env("XDG_CONFIG_HOME", &self.0)
+            .args([
+                "input",
+                "-o",
+                output,
+                "--recursive",
+                "--ffprobe",
+                "./ffprobe",
+                "--ffmpeg",
+                "./ffmpeg",
+            ]);
+        command
+    }
 }
 
 impl Drop for Fixture {
@@ -81,6 +99,132 @@ printf 'frame=1\nout_time_us=1000000\nprogress=end\n'"#,
     assert_eq!(fs::read_dir(&fixture.0).unwrap().count(), 4);
     assert!(String::from_utf8_lossy(&result.stderr).contains("complete:"));
     assert!(!result.stderr.contains(&0x1b));
+}
+
+#[test]
+fn recursive_mode_processes_video_files_serially_and_preserves_the_directory_tree() {
+    let fixture = Fixture::new(
+        r#"previous=''
+source=''
+for argument do
+    if test "$previous" = -i; then source=$argument; fi
+    previous=$argument
+done
+mkdir running || exit 20
+printf '%s\n' "$source" >> order
+sleep 0.05
+rmdir running
+printf encoded > "$argument""#,
+    );
+    fs::remove_file(fixture.0.join("input")).unwrap();
+    fs::create_dir_all(fixture.0.join("input/nested")).unwrap();
+    fs::write(fixture.0.join("input/first"), b"first").unwrap();
+    fs::write(fixture.0.join("input/nested/audio"), b"audio").unwrap();
+    fs::write(fixture.0.join("input/nested/movie.m2ts"), b"movie").unwrap();
+    fs::write(fixture.0.join("input/nested/notes.md"), b"notes").unwrap();
+    fixture.tool(
+        "ffprobe",
+        r#"for last do :; done
+printf '%s\n' "$last" >> probe-order
+case "$last" in
+    input/nested/notes.md) printf NOT-MEDIA >&2; exit 1 ;;
+    input/nested/audio) streams='[{"index":0,"codec_type":"audio"}]'; format=matroska,webm ;;
+    input/nested/movie.m2ts) streams='[{"index":0,"codec_type":"video"}]'; format=mpegts ;;
+    *) streams='[{"index":0,"codec_type":"video"}]'; format=matroska,webm ;;
+esac
+printf '{"streams":%s,"format":{"format_name":"%s","duration":"1"}}' "$streams" "$format""#,
+    );
+
+    let result = fixture
+        .recursive_command("output")
+        .args(["-C", "ts", "--copy"])
+        .output()
+        .unwrap();
+
+    assert!(result.status.success(), "{:?}", result.stderr);
+    assert_eq!(
+        fs::read_to_string(fixture.0.join("order")).unwrap(),
+        "input/first\ninput/nested/movie.m2ts\n"
+    );
+    assert_eq!(
+        fs::read(fixture.0.join("output/first.ts")).unwrap(),
+        b"encoded"
+    );
+    assert_eq!(
+        fs::read(fixture.0.join("output/nested/movie.m2ts")).unwrap(),
+        b"encoded"
+    );
+    assert!(!fixture.0.join("output/nested/audio").exists());
+    assert!(!fixture.0.join("output/nested/notes.md").exists());
+    assert!(!fixture.0.join("output/first.ts.part").exists());
+    assert!(!fixture.0.join("output/nested/movie.m2ts.part").exists());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("warning: skipping input/nested/notes.md because ffprobe failed"));
+    assert!(stderr.contains("NOT-MEDIA"));
+}
+
+#[test]
+fn recursive_mode_uses_core_container_resolution_before_starting_ffmpeg() {
+    let fixture = Fixture::new(
+        r#"touch ffmpeg-started
+for last do :; done
+printf encoded > "$last""#,
+    );
+    fs::remove_file(fixture.0.join("input")).unwrap();
+    fs::create_dir(fixture.0.join("input")).unwrap();
+    fs::write(fixture.0.join("input/clip.avi"), b"video").unwrap();
+    fixture.tool(
+        "ffprobe",
+        r#"printf '%s' '{"streams":[{"index":0,"codec_type":"video"}],"format":{"format_name":"avi","duration":"1"}}'"#,
+    );
+
+    let result = fixture
+        .recursive_command("unsupported")
+        .arg("--copy")
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stderr)
+            .contains("cannot use input format Some(\"avi\") as an output container")
+    );
+    assert!(!fixture.0.join("ffmpeg-started").exists());
+
+    let result = fixture
+        .recursive_command("converted")
+        .args(["-C", "mkv", "--copy"])
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{:?}", result.stderr);
+    assert_eq!(
+        fs::read(fixture.0.join("converted/clip.mkv")).unwrap(),
+        b"encoded"
+    );
+}
+
+#[test]
+fn recursive_mode_rejects_output_collisions_before_starting_ffmpeg() {
+    let fixture = Fixture::new("touch ffmpeg-started");
+    fs::remove_file(fixture.0.join("input")).unwrap();
+    fs::create_dir(fixture.0.join("input")).unwrap();
+    fs::write(fixture.0.join("input/same.mkv"), b"first").unwrap();
+    fs::write(fixture.0.join("input/same.avi"), b"second").unwrap();
+    fixture.tool(
+        "ffprobe",
+        r#"for last do :; done
+case "$last" in *.mkv) format=matroska,webm ;; *) format=avi ;; esac
+printf '{"streams":[{"index":0,"codec_type":"video"}],"format":{"format_name":"%s"}}' "$format""#,
+    );
+
+    let result = fixture
+        .recursive_command("output")
+        .args(["-C", "webm", "-O", "--copy"])
+        .output()
+        .unwrap();
+
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("output/same.webm"));
+    assert!(!fixture.0.join("ffmpeg-started").exists());
 }
 
 #[test]

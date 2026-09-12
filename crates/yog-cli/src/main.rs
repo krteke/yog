@@ -5,6 +5,7 @@ mod diagnostics;
 mod error;
 mod output;
 mod progress;
+mod recursive;
 mod terminal;
 mod transcode;
 mod verify;
@@ -21,6 +22,7 @@ use crate::error::RunError;
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     let args = Args::parse();
+    let recursive = args.recursive;
     if let Err(error) = config::init(args.config.as_deref()) {
         eprintln!("{error:#}");
         return ExitCode::FAILURE;
@@ -38,8 +40,7 @@ async fn main() -> ExitCode {
 
     let cancelled = CancellationToken::new();
     let diagnostics = diagnostics::Diagnostics::new(options.verbose, cancelled.clone());
-    let target = request.output.clone();
-
+    let transcoder = transcode::Transcoder::new(&options, cancelled.clone());
     let mut signal_task = None;
     let result = match signal(SignalKind::interrupt()).context("cannot register Ctrl+C handler") {
         Ok(mut interrupts) => {
@@ -48,16 +49,24 @@ async fn main() -> ExitCode {
                 interrupts.recv().await;
                 token.cancel();
             }));
-            transcode::run(request, options, cancelled, &diagnostics).await
+            async {
+                if recursive {
+                    let tasks = recursive::discover(request, &transcoder, &diagnostics).await?;
+                    for (request, media) in tasks {
+                        transcoder.run_probed(request, media, &diagnostics).await?;
+                    }
+                } else {
+                    transcoder.run(request, &diagnostics).await?;
+                }
+                Ok(())
+            }
+            .await
         }
         Err(error) => Err(RunError::from(error)),
     };
 
     let exit = match result {
-        Ok(()) => {
-            diagnostics.write(format!("complete: {}\n", target.display()).as_bytes());
-            ExitCode::SUCCESS
-        }
+        Ok(()) => ExitCode::SUCCESS,
         Err(RunError::Cancelled) => {
             diagnostics.write("cancelled\n".as_bytes());
             ExitCode::from(130)

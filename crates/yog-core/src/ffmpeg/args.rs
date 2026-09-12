@@ -101,6 +101,8 @@ pub(super) enum Arg<'a> {
     Attach(&'a Path),
     /// -max_interleave_delta {ms}
     MaxInterleaveDelta(u64),
+    /// -mpegts_m2ts_mode 1
+    M2tsMode,
     /// -metadata:s:{output_index} {key}={value}
     StreamMetadata(usize, &'a str, &'a str),
     /// {option}:v {value}
@@ -158,6 +160,7 @@ impl ArgsExt for Vec<OsString> {
                 "-max_interleave_delta".into(),
                 Some(microseconds.to_string().into()),
             ),
+            Arg::M2tsMode => ("-mpegts_m2ts_mode".into(), Some("1".into())),
             Arg::StreamMetadata(index, key, value) => (
                 format!("-metadata:s:{index}").into(),
                 Some(format!("{key}={value}").into()),

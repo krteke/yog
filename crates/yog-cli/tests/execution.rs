@@ -133,7 +133,7 @@ if test "$packets" = true; then
 fi
 case "$last" in
     input.mkv)
-        printf '%s' '{"streams":[{"index":0,"codec_type":"video","pix_fmt":"yuv420p"},{"index":1,"codec_type":"video","codec_name":"png","disposition":{"attached_pic":1}},{"index":2,"codec_type":"attachment","extradata_size":7}],"format":{"format_name":"matroska,webm","duration":"4"},"pixel_formats":[{"name":"yuv420p","nb_components":3,"log2_chroma_w":1,"log2_chroma_h":1,"flags":{"rgb":0,"alpha":0,"palette":0,"hwaccel":0},"components":[{"bit_depth":8},{"bit_depth":8},{"bit_depth":8}]}]}'
+        printf '%s' '{"streams":[{"index":0,"codec_type":"video","width":320,"height":180,"pix_fmt":"yuv420p"},{"index":1,"codec_type":"video","codec_name":"png","disposition":{"attached_pic":1}},{"index":2,"codec_type":"attachment","extradata_size":7}],"format":{"format_name":"matroska,webm","duration":"4"},"pixel_formats":[{"name":"yuv420p","nb_components":3,"log2_chroma_w":1,"log2_chroma_h":1,"flags":{"rgb":0,"alpha":0,"palette":0,"hwaccel":0},"components":[{"bit_depth":8},{"bit_depth":8},{"bit_depth":8}]}]}'
         ;;
     *)
         if test "$(wc -c < "$last")" = 20; then
@@ -179,9 +179,10 @@ esac"#,
             .count(),
         2
     );
+    assert!(commands.contains("crop=w=320:h=180:x=0:y=0:exact=1"));
     assert_eq!(stderr.lines().count(), 1, "{stderr}");
-    assert!(stderr.contains("speed 2.000x | time 2.0s"), "{stderr}");
-    assert!(stderr.contains("(1440.0% of input)"), "{stderr}");
+    assert!(stderr.contains("speed 2.667x | time 1.5s"), "{stderr}");
+    assert!(stderr.contains("(840.0% of input)"), "{stderr}");
     assert!(stderr.contains(" | VMAF 96.500"));
     assert!(!stderr.contains("sample range"));
     assert!(!stderr.contains("executing command:"));
@@ -891,6 +892,28 @@ fn probe_and_ffmpeg_diagnostics_are_emitted_once_in_both_output_modes() {
         assert!(error.contains("probe failed"));
         assert!(!fixture.0.join("output.mkv.part").exists());
     }
+
+    fixture.tool(
+        "ffprobe",
+        r#"printf '%s' '{"streams":[{"index":0,"codec_type":"video","width":320,"height":180,"pix_fmt":"yuv420p"}],"format":{"format_name":"matroska,webm","duration":"1"},"pixel_formats":[{"name":"yuv420p","nb_components":3,"log2_chroma_w":1,"log2_chroma_h":1,"flags":{"rgb":0,"alpha":0,"palette":0,"hwaccel":0},"components":[{"bit_depth":8},{"bit_depth":8},{"bit_depth":8}]}]}'"#,
+    );
+    fixture.tool(
+        "ffmpeg",
+        "printf '%s' \"$*\" > ffmpeg-args; printf 'PREDICTION-DIAGNOSTIC\\n' >&2; exit 22",
+    );
+    let result = fixture
+        .command()
+        .args(["--predict", "--encode-vaapi", "av1", "--quality", "28"])
+        .output()
+        .unwrap();
+    let error = String::from_utf8_lossy(&result.stderr);
+    assert_eq!(result.status.code(), Some(1));
+    assert_eq!(error.matches("PREDICTION-DIAGNOSTIC").count(), 1, "{error}");
+    assert_eq!(error.matches("process failed").count(), 1, "{error}");
+    assert!(error.contains("prediction failed"));
+    let args = fs::read_to_string(fixture.0.join("ffmpeg-args")).unwrap();
+    assert!(args.contains("-global_quality:v 28"), "{args}");
+    assert!(!args.contains("-qp:v"), "{args}");
 }
 
 // Always reap a failed test's CLI process instead of leaving it in the background.

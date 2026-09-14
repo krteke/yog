@@ -146,7 +146,6 @@ struct SizeSample {
 struct MeasuredSample {
     prediction: PredictionSample,
     size: SizeSample,
-    speed_media_seconds: f64,
 }
 
 impl Ffmpeg {
@@ -167,6 +166,14 @@ impl Ffmpeg {
             .iter()
             .find(|stream| stream.is_regular_video())
             .ok_or(PredictionError::NoVideo)?;
+        if !matches!(
+            (source_stream.width, source_stream.height),
+            (Some(width), Some(height)) if width > 0 && height > 0
+        ) {
+            return Err(PredictionError::MissingVideoDimensions {
+                stream_index: source_stream.index,
+            });
+        }
 
         let duration = media.format.try_duration()?.as_secs_f64();
         let video_span = video_span(media, source_stream, duration)?;
@@ -224,9 +231,10 @@ impl Ffmpeg {
             let encode_seconds = started.elapsed().as_secs_f64();
 
             let sample_media = probe.probe_sample(&output).await?.output;
-            let sample_duration = sample_media.format.try_duration()?.as_secs_f64();
-            let (speed, speed_media_seconds) =
-                reported_speed.unwrap_or((sample_duration / encode_seconds, sample_duration));
+            let speed = reported_speed
+                .map_or(window.duration / encode_seconds, |(speed, seconds)| {
+                    window.duration * speed / seconds
+                });
             let SampleLayout {
                 video_stream_index,
                 untimed_streams,
@@ -256,7 +264,7 @@ impl Ffmpeg {
             let quality = self
                 .score_sample(
                     &request.input,
-                    source_stream.index,
+                    source_stream,
                     &output,
                     video_stream_index,
                     &start,
@@ -266,7 +274,7 @@ impl Ffmpeg {
             samples.push(MeasuredSample {
                 prediction: PredictionSample {
                     start_seconds: window.start,
-                    duration_seconds: sample_duration,
+                    duration_seconds: window.duration,
                     encode_seconds,
                     speed,
                     timed_payload_bytes: packet_bytes.timed,
@@ -276,7 +284,6 @@ impl Ffmpeg {
                     scored_frames: quality.scored_frames,
                 },
                 size,
-                speed_media_seconds,
             });
         }
 
@@ -292,18 +299,23 @@ impl Ffmpeg {
     async fn score_sample(
         &self,
         source: &Path,
-        source_stream_index: usize,
+        source_stream: &MediaStream,
         candidate: &Path,
         candidate_stream_index: usize,
         start: &str,
         on_stderr: impl FnMut(&[u8]),
     ) -> Result<SampleQuality, PredictionError> {
+        let source_width = source_stream.width.expect("source dimensions validated");
+        let source_height = source_stream.height.expect("source dimensions validated");
         let metrics_path = candidate.with_extension("vmaf.json");
         let filter = format!(
-            "[0:{}]setpts=PTS-STARTPTS[dist];[1:{}]setpts=PTS-STARTPTS[ref];\
+            "[0:{}]crop=w={}:h={}:x=0:y=0:exact=1,setpts=PTS-STARTPTS[dist];\
+             [1:{}]setpts=PTS-STARTPTS[ref];\
              [dist][ref]libvmaf=feature=name=psnr|name=float_ssim:log_fmt=json:log_path={}:shortest=1[out]",
             candidate_stream_index,
-            source_stream_index,
+            source_width,
+            source_height,
+            source_stream.index,
             escape_filter_path(&metrics_path)
         );
         let mut args: Vec<OsString> = Vec::new();
@@ -475,7 +487,7 @@ fn summarize(
         aggregate_speed(
             samples
                 .iter()
-                .map(|sample| (sample.speed_media_seconds, sample.prediction.speed)),
+                .map(|sample| (sample.prediction.duration_seconds, sample.prediction.speed)),
         ),
     );
     let transcode_seconds = Estimate {
@@ -624,7 +636,6 @@ mod tests {
 
     fn measured_sample(
         prediction: PredictionSample,
-        speed_media_seconds: f64,
         scalable_bytes: u64,
         fixed_bytes: u64,
     ) -> MeasuredSample {
@@ -634,7 +645,6 @@ mod tests {
                 scalable_bytes,
                 fixed_bytes,
             },
-            speed_media_seconds,
         }
     }
 
@@ -738,7 +748,6 @@ mod tests {
                     psnr_y_db: Some(40.0),
                     scored_frames: 1,
                 },
-                2.0,
                 120,
                 50,
             ),
@@ -754,7 +763,6 @@ mod tests {
                     psnr_y_db: None,
                     scored_frames: 3,
                 },
-                2.0,
                 540,
                 0,
             ),
@@ -764,10 +772,10 @@ mod tests {
 
         assert_eq!(prediction.source_bytes, 1_000);
         assert_eq!(prediction.sampled_seconds, 4.0);
-        assert_eq!(prediction.speed.value, 1.6);
+        assert_eq!(prediction.speed.value, 16.0 / 7.0);
         assert_eq!(prediction.speed.low, 1.0);
         assert_eq!(prediction.speed.high, 4.0);
-        assert_eq!(prediction.transcode_seconds.value, 6.25);
+        assert_eq!(prediction.transcode_seconds.value, 4.375);
         assert_eq!(prediction.transcode_seconds.low, 2.5);
         assert_eq!(prediction.transcode_seconds.high, 10.0);
         assert_eq!(prediction.output_bytes.value, 1_725);

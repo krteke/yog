@@ -79,6 +79,8 @@ pub enum PredictionError {
     RequiresEncoding,
     #[error("input has no regular video stream")]
     NoVideo,
+    #[error("video stream #{stream_index} has no valid display dimensions")]
+    MissingVideoDimensions { stream_index: usize },
     #[error("encoded sample has no regular video stream")]
     NoSampleVideo,
     #[error("video stream #{stream_index} does not overlap the input timeline")]
@@ -101,7 +103,7 @@ pub enum PredictionError {
     ProbeValue(#[from] ProbeValueError),
     #[error(transparent)]
     Plan(#[from] PlanError),
-    #[error(transparent)]
+    #[error("command execution failed")]
     Command(#[from] Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),

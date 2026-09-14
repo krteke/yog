@@ -248,6 +248,13 @@ impl VideoEncoding {
                         VideoOption::Cq
                     }
                     Self::Qsv { .. } => VideoOption::GlobalQuality,
+                    Self::Vaapi {
+                        codec: VideoCodec::Av1,
+                        ..
+                    } => {
+                        append(VideoOption::RateControlMode, "CQP".into());
+                        VideoOption::GlobalQuality
+                    }
                     Self::Vaapi { .. } => {
                         append(VideoOption::RateControlMode, "CQP".into());
                         VideoOption::Qp
@@ -361,6 +368,14 @@ mod tests {
                     device: "/dev/dri/renderD128".into(),
                 },
                 vec!["-rc_mode:v", "CQP", "-qp:v", "30"],
+            ),
+            (
+                VideoEncoding::Vaapi {
+                    codec: VideoCodec::Av1,
+                    rate: quality,
+                    device: "/dev/dri/renderD128".into(),
+                },
+                vec!["-rc_mode:v", "CQP", "-global_quality:v", "30"],
             ),
             (
                 VideoEncoding::Nvenc {

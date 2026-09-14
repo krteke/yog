@@ -116,7 +116,7 @@ mod tests {
                 vec![
                     ("-c:v", "av1_vaapi"),
                     ("-vaapi_device", "/dev/dri/custom"),
-                    ("-qp:v", "28"),
+                    ("-global_quality:v", "28"),
                 ],
             ),
         ] {

@@ -976,12 +976,13 @@ mod tests {
                     .count(),
                 devices
             );
-            for option in ["-c:v", "-rc_mode:v", "-qp:v"] {
+            for option in ["-c:v", "-rc_mode:v", "-global_quality:v"] {
                 assert_eq!(
                     plan.args.iter().filter(|arg| *arg == option).count(),
                     devices
                 );
             }
+            assert!(!plan.args.iter().any(|arg| arg == "-qp:v"));
         }
     }
     #[test]

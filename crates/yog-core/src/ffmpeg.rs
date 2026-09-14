@@ -10,6 +10,7 @@ pub mod encoding;
 pub mod execution;
 mod pixel_format;
 pub mod plan;
+pub mod prediction;
 pub mod progress;
 pub mod seek;
 pub mod vmaf;

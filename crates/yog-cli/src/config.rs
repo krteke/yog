@@ -1,21 +1,69 @@
 use anyhow::{Context, Result};
-use serde::Deserialize;
-use std::{fs, io, path::Path, sync::OnceLock};
+use serde::{Deserialize, Deserializer, de};
+use std::{
+    fs, io,
+    num::{NonZeroU64, NonZeroUsize},
+    path::Path,
+    sync::OnceLock,
+    time::Duration,
+};
+use yog_core::ffmpeg::prediction::PredictionOptions;
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    pub progress_tick_interval_ms: u64,
-    pub diagnostics_retry_interval_ms: u64,
+    pub progress_tick_interval_ms: NonZeroU64,
+    pub diagnostics_retry_interval_ms: NonZeroU64,
+    pub prediction: Prediction,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy)]
+#[serde(default, deny_unknown_fields)]
+pub struct Prediction {
+    pub samples: NonZeroUsize,
+    #[serde(deserialize_with = "deserialize_duration")]
+    pub sample_sec: Duration,
+}
+
+impl From<Prediction> for PredictionOptions {
+    fn from(value: Prediction) -> Self {
+        PredictionOptions {
+            samples: value.samples,
+            sample_duration: value.sample_sec,
+        }
+    }
+}
+
+fn deserialize_duration<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let seconds = f64::deserialize(deserializer)?;
+
+    if seconds <= 0.0 {
+        return Err(de::Error::custom("seconds must be greater than 0"));
+    }
+
+    Duration::try_from_secs_f64(seconds).map_err(de::Error::custom)
+}
+
+impl Default for Prediction {
+    fn default() -> Self {
+        Self {
+            samples: NonZeroUsize::new(5).unwrap(),
+            sample_sec: Duration::from_secs_f64(2.0),
+        }
+    }
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            progress_tick_interval_ms: 100,
-            diagnostics_retry_interval_ms: 10,
+            progress_tick_interval_ms: NonZeroU64::new(100).unwrap(),
+            diagnostics_retry_interval_ms: NonZeroU64::new(10).unwrap(),
+            prediction: Prediction::default(),
         }
     }
 }
@@ -37,7 +85,10 @@ impl Config {
             result => result.with_context(|| format!("cannot read config {}", config.display()))?,
         };
 
-        toml::from_str(&content).with_context(|| format!("invalid config {}", config.display()))
+        let config: Self = toml::from_str(&content)
+            .with_context(|| format!("invalid config {}", config.display()))?;
+
+        Ok(config)
     }
 }
 
@@ -59,12 +110,14 @@ mod tests {
 
     #[test]
     fn partial_config_keeps_defaults_and_preserves_explicit_zero_ticks() {
-        let config: Config = toml::from_str("progress_tick_interval_ms = 0").unwrap();
-        assert_eq!(config.progress_tick_interval_ms, 0);
-        assert_eq!(config.diagnostics_retry_interval_ms, 10);
+        let config: Config = toml::from_str("progress_tick_interval_ms = 1").unwrap();
+        assert_eq!(config.progress_tick_interval_ms.get(), 1);
+        assert_eq!(config.diagnostics_retry_interval_ms.get(), 10);
+        assert_eq!(config.prediction.samples.get(), 5);
+        assert_eq!(config.prediction.sample_sec, Duration::from_secs_f64(2.0));
 
         let config: Config = toml::from_str("diagnostics_retry_interval_ms = 25").unwrap();
-        assert_eq!(config.progress_tick_interval_ms, 100);
-        assert_eq!(config.diagnostics_retry_interval_ms, 25);
+        assert_eq!(config.progress_tick_interval_ms.get(), 100);
+        assert_eq!(config.diagnostics_retry_interval_ms.get(), 25);
     }
 }

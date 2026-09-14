@@ -34,7 +34,6 @@ impl Ffmpeg {
             Arg::Stdout,
         ]);
         let command = self.inner.build(args);
-        command.print();
 
         let output = command
             .run(

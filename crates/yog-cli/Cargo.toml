@@ -15,6 +15,7 @@ serde = { workspace = true, features = ["derive"] }
 toml.workspace = true
 dirs.workspace = true
 walkdir.workspace = true
+env_logger.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

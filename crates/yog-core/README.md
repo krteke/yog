@@ -16,7 +16,7 @@ for stream in &media.output.streams {
 let packet_bytes = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
 let count = packet_bytes.clone();
 let result = probe.packets(input, None, "%+5", move |packet| {
-    if let Some(size) = packet.size.as_deref().and_then(|size| size.parse::<u64>().ok()) {
+    if let Ok(size) = packet.try_size() {
         count.fetch_add(size, std::sync::atomic::Ordering::Relaxed);
     }
 }).await?;
@@ -47,7 +47,6 @@ let plan = TranscodeRequest::mkv(input, "output.mkv")
     ))
     .plan(&media, &ffmpeg).await?;
 let command = ffmpeg.build(&plan)?;
-command.print();
 command.run(|_| {}, |_| {}).await?;
 # Ok(())
 # }

@@ -98,13 +98,6 @@ impl Ffmpeg {
 }
 
 impl BuiltTranscode<'_> {
-    pub fn print(&self) {
-        for extraction in &self.covers {
-            extraction.print();
-        }
-        self.command.print();
-    }
-
     /// The configured timeout applies separately to each FFmpeg subprocess.
     /// Callbacks run in this async task and must return promptly. To cancel and
     /// wait for cleanup, cancel the configured token and await this method.

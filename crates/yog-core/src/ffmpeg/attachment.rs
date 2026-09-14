@@ -42,10 +42,6 @@ impl Ffmpeg {
 }
 
 impl CoverExtraction<'_> {
-    pub(super) fn print(&self) {
-        self.command.print();
-    }
-
     pub(super) async fn run(self, on_stderr: impl FnMut(&[u8]) + Send) -> Result<(), Error> {
         let path = self.path;
         let output = self

@@ -44,17 +44,8 @@ impl Verifier<'_> {
 
         if !copy_video
             && let (Some(source_duration), Some(destination_duration)) = (
-                original
-                    .format
-                    .duration
-                    .as_deref()
-                    .and_then(|duration| duration.parse::<f64>().ok()),
-                actual
-                    .output
-                    .format
-                    .duration
-                    .as_deref()
-                    .and_then(|duration| duration.parse::<f64>().ok()),
+                original.format.try_duration().ok(),
+                actual.output.format.try_duration().ok(),
             )
             && let (Some(source_video), Some(destination_video)) = (
                 original
@@ -79,50 +70,43 @@ impl Verifier<'_> {
                     .find(|stream| stream.codec_type.as_deref() == Some("audio")),
             )
         {
-            let duration = source_duration.min(destination_duration);
-            if duration.is_finite() && duration > 0.0 {
-                for fraction in [0.25, 0.5, 0.75] {
-                    let timestamp = format!("{:.6}", duration * fraction);
-                    let source = self
-                        .ffmpeg
-                        .seek_decode_audio(
-                            input,
-                            source_video.index,
-                            source_audio.index,
-                            &timestamp,
-                        )
-                        .await?;
-                    if !source.stderr.is_empty() {
-                        warn(format!(
-                            "input seek decode: {}",
-                            source.stderr.to_string_lossy().trim()
-                        ));
-                    }
-                    if source.audio_frames == 0 {
-                        continue;
-                    }
-                    let destination = self
-                        .ffmpeg
-                        .seek_decode_audio(
-                            output,
-                            destination_video.index,
-                            destination_audio.index,
-                            &timestamp,
-                        )
-                        .await?;
-                    if !destination.stderr.is_empty() {
-                        warn(format!(
-                            "output seek decode: {}",
-                            destination.stderr.to_string_lossy().trim()
-                        ));
-                    }
-                    if destination.audio_frames == 0 {
-                        return Ok(VerificationOutcome::MissingAudioAfterSeek {
-                            source_index: source_audio.index,
-                            destination_index: destination_audio.index,
-                            timestamp,
-                        });
-                    }
+            let duration = source_duration.min(destination_duration).as_secs_f64();
+            for fraction in [0.25, 0.5, 0.75] {
+                let timestamp = format!("{:.6}", duration * fraction);
+                let source = self
+                    .ffmpeg
+                    .seek_decode_audio(input, source_video.index, source_audio.index, &timestamp)
+                    .await?;
+                if !source.stderr.is_empty() {
+                    warn(format!(
+                        "input seek decode: {}",
+                        source.stderr.to_string_lossy().trim()
+                    ));
+                }
+                if source.audio_frames == 0 {
+                    continue;
+                }
+                let destination = self
+                    .ffmpeg
+                    .seek_decode_audio(
+                        output,
+                        destination_video.index,
+                        destination_audio.index,
+                        &timestamp,
+                    )
+                    .await?;
+                if !destination.stderr.is_empty() {
+                    warn(format!(
+                        "output seek decode: {}",
+                        destination.stderr.to_string_lossy().trim()
+                    ));
+                }
+                if destination.audio_frames == 0 {
+                    return Ok(VerificationOutcome::MissingAudioAfterSeek {
+                        source_index: source_audio.index,
+                        destination_index: destination_audio.index,
+                        timestamp,
+                    });
                 }
             }
         }

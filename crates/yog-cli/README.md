@@ -9,12 +9,8 @@ cargo run -p yog-cli -- input.mkv --encode-vaapi hevc -o output.mkv --device /de
 cargo run -p yog-cli -- --help
 cargo run -p yog-cli -- --encode-nvenc --help
 cargo run -p yog-cli -- input.mkv -o output.mkv --encode-x264 --verify
+cargo run -p yog-cli -- input.mkv -o output.mkv --predict --encode-x264 --quality 23
 cargo run -p yog-cli -- input.mp4 -o output.mp4 -C mp4 -v --copy
 ```
 
-config.toml
-
-```toml
-progress_tick_interval_ms = 100
-diagnostics_retry_interval_ms = 10
-```
+[config.toml](./config.example.toml)

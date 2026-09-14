@@ -23,6 +23,7 @@ use crate::error::RunError;
 async fn main() -> ExitCode {
     let args = Args::parse();
     let recursive = args.recursive;
+    let predict = args.predict;
     if let Err(error) = config::init(args.config.as_deref()) {
         eprintln!("{error:#}");
         return ExitCode::FAILURE;
@@ -53,8 +54,16 @@ async fn main() -> ExitCode {
                 if recursive {
                     let tasks = recursive::discover(request, &transcoder, &diagnostics).await?;
                     for (request, media) in tasks {
-                        transcoder.run_probed(request, media, &diagnostics).await?;
+                        if predict {
+                            transcoder
+                                .predict_probed(request, media, &diagnostics)
+                                .await?;
+                        } else {
+                            transcoder.run_probed(request, media, &diagnostics).await?;
+                        }
                     }
+                } else if predict {
+                    transcoder.predict(request, &diagnostics).await?;
                 } else {
                     transcoder.run(request, &diagnostics).await?;
                 }

@@ -4,6 +4,7 @@ use crate::process::Output;
 use futures_util::FutureExt;
 use std::{
     ffi::{OsStr, OsString},
+    fmt,
     future::{Future, pending},
     panic::{AssertUnwindSafe, resume_unwind},
     path::PathBuf,
@@ -44,16 +45,17 @@ pub struct Command<'a> {
     args: Vec<OsString>,
 }
 
-impl Command<'_> {
-    pub fn print(&self) {
-        let mut line = self.program.path.as_os_str().to_owned();
+impl fmt::Display for Command<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", self.program.path.to_string_lossy())?;
         for arg in &self.args {
-            line.push(" ");
-            line.push(arg);
+            write!(formatter, " {}", arg.to_string_lossy())?;
         }
-        eprintln!("{}", line.to_string_lossy());
+        Ok(())
     }
+}
 
+impl Command<'_> {
     pub async fn run<T, D, F, S>(self, decode: D, mut on_stderr: S) -> Result<Output<T>, Error>
     where
         D: FnOnce(ChildStdout) -> F,
@@ -71,6 +73,7 @@ impl Command<'_> {
             return Err(failure);
         }
 
+        log::debug!("executing command: {self}");
         let mut child = TokioCommand::new(&self.program.path)
             .args(&self.args)
             .stdin(Stdio::null())

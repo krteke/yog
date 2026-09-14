@@ -10,6 +10,8 @@ pub struct Args {
     input: PathBuf,
     #[arg(short, long, global = true)]
     pub recursive: bool,
+    #[arg(long, global = true, conflicts_with = "verify")]
+    pub predict: bool,
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
     #[arg(short, long, global = true, required = false)]
@@ -128,6 +130,10 @@ mod tests {
                 ErrorKind::UnknownArgument,
             ),
             (vec!["--encode", "nvenc"], ErrorKind::UnknownArgument),
+            (
+                vec!["--predict", "--verify", "--encode-x264"],
+                ErrorKind::ArgumentConflict,
+            ),
         ] {
             let error = Args::try_parse_from(
                 ["yog", "input", "-o", "output"]

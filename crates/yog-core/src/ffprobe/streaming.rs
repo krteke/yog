@@ -1,6 +1,5 @@
-use crate::ffprobe::types::MediaStream;
+use crate::{error::ProbeError, ffprobe::types::MediaStream};
 
-use super::types::ProbeError;
 use serde::de::{DeserializeOwned, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use std::{fmt, io::Read, marker::PhantomData};
 

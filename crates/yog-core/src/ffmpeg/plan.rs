@@ -228,15 +228,16 @@ pub struct TranscodeRequest {
     pub overwrite: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TranscodePlan {
     pub(super) input: PathBuf,
     pub(super) output: PathBuf,
     pub(super) args: Vec<OsString>,
     pub(super) attachments: Vec<PlannedAttachment>,
+    input_position: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct PlannedAttachment {
     pub input_index: usize,
     pub output_index: usize,
@@ -258,6 +259,49 @@ impl TranscodePlan {
             .iter()
             .find(|attachment| attachment.input_index == input_index)
             .map(|attachment| &attachment.metadata)
+    }
+
+    pub(super) fn sample(
+        &self,
+        start: &str,
+        duration: &str,
+        output: PathBuf,
+        include_covers: bool,
+    ) -> Self {
+        let mut plan = self.clone();
+        let mut seek = Vec::with_capacity(2);
+        seek.add(Arg::Seek(start));
+
+        plan.args
+            .splice(plan.input_position..plan.input_position, seek);
+        plan.args.add(Arg::Duration(duration));
+
+        for flag in ["-map_metadata", "-map_chapters"] {
+            let position = plan
+                .args
+                .iter()
+                .position(|argument| argument == flag)
+                .expect("transcode plan contains metadata mapping");
+            plan.args[position + 1] = "-1".into();
+        }
+
+        plan.output = output;
+
+        let first_attachment_output = plan
+            .attachments
+            .first()
+            .map(|attachment| attachment.output_index);
+
+        plan.attachments
+            .retain(|attachment| include_covers && attachment.input == AttachmentInput::CoverFrame);
+
+        if let Some(first_attachment_output) = first_attachment_output {
+            for (ordinal, attachment) in plan.attachments.iter_mut().enumerate() {
+                attachment.output_index = first_attachment_output + ordinal;
+            }
+        }
+
+        plan
     }
 }
 
@@ -530,6 +574,7 @@ impl TranscodeRequest {
             output_args.add(Arg::M2tsMode);
         }
 
+        let input_position = input_args.len();
         input_args.add(Arg::Input(&self.input));
         input_args.extend(output_args);
         input_args.add(Arg::Format(container.muxer()));
@@ -551,6 +596,7 @@ impl TranscodeRequest {
             output: self.output.clone(),
             args: input_args,
             attachments,
+            input_position,
         })
     }
 }
@@ -786,6 +832,35 @@ mod tests {
         );
         assert_eq!(pairs("-pix_fmt:2"), ["+yuv444p12le"]);
         assert_eq!(pairs("-max_interleave_delta"), ["0"]);
+
+        let sample = plan.sample("12.5", "2", "sample".into(), true);
+        let input = sample.args.iter().position(|arg| arg == "-i").unwrap();
+        assert_eq!(&sample.args[input - 2..input], ["-ss", "12.5"]);
+        assert_eq!(&sample.args[sample.args.len() - 2..], ["-t", "2"]);
+        for flag in ["-map_metadata", "-map_chapters"] {
+            let position = sample.args.iter().position(|arg| arg == flag).unwrap();
+            assert_eq!(sample.args[position + 1], "-1");
+        }
+        assert_eq!(
+            sample
+                .attachments
+                .iter()
+                .map(|attachment| (
+                    attachment.input_index,
+                    attachment.output_index,
+                    attachment.input
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (8, 3, AttachmentInput::CoverFrame),
+                (12, 4, AttachmentInput::CoverFrame)
+            ]
+        );
+        assert!(
+            plan.sample("12.5", "2", "sample".into(), false)
+                .attachments
+                .is_empty()
+        );
 
         let mut video_and_attachment: MediaInfo = serde_json::from_str(
             r#"{"streams":[

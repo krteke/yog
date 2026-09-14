@@ -43,6 +43,7 @@ impl Fixture {
         command
             .current_dir(&self.0)
             .env("XDG_CONFIG_HOME", &self.0)
+            .env_remove("RUST_LOG")
             .args([
                 "input.mkv",
                 "-o",
@@ -80,6 +81,122 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         fs::remove_dir_all(&self.0).unwrap();
     }
+}
+
+#[test]
+fn prediction_samples_the_real_plan_without_preparing_the_requested_output() {
+    let fixture = Fixture::new(
+        r#"printf '%s\n' "$*" >> ffmpeg-commands
+filter=''
+cover=false
+image=false
+for argument do
+    case "$argument" in
+        encoder=libx264)
+            printf '%s\n' 'Encoder libx264 [test]' '    Supported pixel formats: yuv420p'
+            exit 0
+            ;;
+        *libvmaf=*) filter=$argument ;;
+        -attach) cover=true ;;
+        image2pipe) image=true ;;
+    esac
+done
+if test -n "$filter"; then
+    metrics=${filter#*log_path=\'}
+    metrics=${metrics%%\':shortest=*}
+    printf '%s' '{"frames":[{"frameNum":0,"metrics":{"vmaf":96.5,"float_ssim":0.99,"psnr_y":42.0}}]}' > "$metrics"
+    exit 0
+fi
+if test "$image" = true; then
+    printf cover
+    exit 0
+fi
+for last do :; done
+if test "$cover" = true; then
+    printf 12345678901234567890 > "$last"
+    printf 'out_time_us=1000000\nspeed=1x\nprogress=end\n'
+else
+    printf 123456789012345 > "$last"
+    printf 'out_time_us=2000000\nspeed=4x\nprogress=end\n'
+fi"#,
+    );
+    fixture.tool(
+        "ffprobe",
+        r#"packets=false
+for argument do
+    test "$argument" = -show_packets && packets=true
+done
+for last do :; done
+if test "$packets" = true; then
+    printf '%s' '{"packets":[{"stream_index":0,"size":"10"}]}'
+    exit 0
+fi
+case "$last" in
+    input.mkv)
+        printf '%s' '{"streams":[{"index":0,"codec_type":"video","pix_fmt":"yuv420p"},{"index":1,"codec_type":"video","codec_name":"png","disposition":{"attached_pic":1}},{"index":2,"codec_type":"attachment","extradata_size":7}],"format":{"format_name":"matroska,webm","duration":"4"},"pixel_formats":[{"name":"yuv420p","nb_components":3,"log2_chroma_w":1,"log2_chroma_h":1,"flags":{"rgb":0,"alpha":0,"palette":0,"hwaccel":0},"components":[{"bit_depth":8},{"bit_depth":8},{"bit_depth":8}]}]}'
+        ;;
+    *)
+        if test "$(wc -c < "$last")" = 20; then
+            printf '%s' '{"streams":[{"index":0,"codec_type":"video"},{"index":1,"codec_type":"attachment","extradata_size":5}],"format":{"duration":"1"}}'
+        else
+            printf '%s' '{"streams":[{"index":0,"codec_type":"video"}],"format":{"duration":"1"}}'
+        fi
+        ;;
+esac"#,
+    );
+
+    let result = fixture
+        .command()
+        .args(["--predict", "--encode-x264"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(result.status.success(), "{stderr}");
+    assert!(!fixture.0.join("output.mkv").exists());
+    assert!(!fixture.0.join("output.mkv.part").exists());
+    let commands = fs::read_to_string(fixture.0.join("ffmpeg-commands")).unwrap();
+    assert!(commands.contains("-ss 0.000000000"));
+    assert!(commands.contains("-ss 2.000000000"));
+    assert!(commands.contains("-t 2.000000000"));
+    assert_eq!(
+        commands
+            .lines()
+            .filter(|command| command.contains("-f image2pipe"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        commands
+            .lines()
+            .filter(|command| command.contains("-attach"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        commands
+            .lines()
+            .filter(|command| command.contains("-progress pipe:1"))
+            .count(),
+        2
+    );
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert!(stderr.contains("speed 2.000x | time 2.0s"), "{stderr}");
+    assert!(stderr.contains("(1440.0% of input)"), "{stderr}");
+    assert!(stderr.contains(" | VMAF 96.500"));
+    assert!(!stderr.contains("sample range"));
+    assert!(!stderr.contains("executing command:"));
+
+    let verbose = fixture
+        .command()
+        .args(["--predict", "--encode-x264", "--verbose"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&verbose.stderr);
+    assert!(verbose.status.success(), "{stderr}");
+    assert!(stderr.contains("executing command:"));
+    assert!(stderr.contains("sample range"));
+    assert!(stderr.contains("sample #1:"));
+    assert!(stderr.contains("sample #2:"));
 }
 
 #[test]

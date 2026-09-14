@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
+
+use crate::error::ProbeValueError;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MediaInfo {
@@ -90,12 +92,6 @@ pub struct Chapter {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ProbeError {
-    pub code: i64,
-    pub string: String,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Frame {
     pub stream_index: Option<usize>,
     pub media_type: Option<String>,
@@ -124,10 +120,83 @@ pub struct Packet {
     pub flags: Option<String>,
 }
 
+impl MediaFormat {
+    pub fn try_duration(&self) -> Result<Duration, ProbeValueError> {
+        let value = self.duration.as_deref().ok_or(ProbeValueError::Missing {
+            field: "format duration",
+        })?;
+        parse_duration(value, "format duration")
+    }
+
+    pub fn try_start_time(&self) -> Result<Option<f64>, ProbeValueError> {
+        parse_optional_seconds(self.start_time.as_deref(), "format start time")
+    }
+}
+
+impl Packet {
+    pub fn try_size(&self) -> Result<u64, ProbeValueError> {
+        let value = self.size.as_deref().ok_or(ProbeValueError::Missing {
+            field: "packet size",
+        })?;
+        value.parse().map_err(|_| ProbeValueError::Invalid {
+            field: "packet size",
+            value: value.to_owned(),
+        })
+    }
+}
+
 impl MediaStream {
+    pub fn try_duration(&self) -> Result<Option<Duration>, ProbeValueError> {
+        let Some(value) = optional_probe_value(self.duration.as_deref()) else {
+            return Ok(None);
+        };
+        parse_duration(value, "stream duration").map(Some)
+    }
+
+    pub fn try_start_time(&self) -> Result<Option<f64>, ProbeValueError> {
+        parse_optional_seconds(self.start_time.as_deref(), "stream start time")
+    }
+
     pub fn is_regular_video(&self) -> bool {
         self.codec_type.as_deref() == Some("video")
             && self.disposition.get("attached_pic").copied().unwrap_or(0) == 0
+    }
+}
+
+fn parse_duration(value: &str, field: &'static str) -> Result<Duration, ProbeValueError> {
+    let duration = Duration::try_from_secs_f64(parse_seconds(value, field)?)
+        .map_err(|_| invalid_value(field, value))?;
+    if duration.is_zero() {
+        return Err(invalid_value(field, value));
+    }
+    Ok(duration)
+}
+
+fn parse_optional_seconds(
+    value: Option<&str>,
+    field: &'static str,
+) -> Result<Option<f64>, ProbeValueError> {
+    optional_probe_value(value)
+        .map(|value| parse_seconds(value, field))
+        .transpose()
+}
+
+fn optional_probe_value(value: Option<&str>) -> Option<&str> {
+    value.filter(|value| *value != "N/A")
+}
+
+fn parse_seconds(value: &str, field: &'static str) -> Result<f64, ProbeValueError> {
+    value
+        .parse::<f64>()
+        .ok()
+        .filter(|seconds| seconds.is_finite())
+        .ok_or_else(|| invalid_value(field, value))
+}
+
+fn invalid_value(field: &'static str, value: &str) -> ProbeValueError {
+    ProbeValueError::Invalid {
+        field,
+        value: value.to_owned(),
     }
 }
 
@@ -170,11 +239,43 @@ mod tests {
         .unwrap();
         assert_eq!(media.streams[0].duration.as_deref(), Some("N/A"));
         assert_eq!(media.streams[0].avg_frame_rate.as_deref(), Some("0/0"));
+        assert_eq!(media.streams[0].try_duration().unwrap(), None);
         assert_eq!(
             media.streams[0].side_data_list[0].extra["red_x"],
             "34000/50000"
         );
         assert!(media.format.duration.is_none());
         assert!(serde_json::from_str::<MediaInfo>(r#"{"streams":[{}]}"#).is_err());
+    }
+
+    #[test]
+    fn media_times_are_parsed_once_at_the_probe_boundary() {
+        let mut media: MediaInfo = serde_json::from_str(
+            r#"{
+                "format":{"start_time":"10.5","duration":"100"},
+                "streams":[{"index":3,"start_time":"20.25","duration":"30.5"}]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(media.format.try_start_time().unwrap(), Some(10.5));
+        assert_eq!(
+            media.format.try_duration().unwrap(),
+            Duration::from_secs(100)
+        );
+        assert_eq!(media.streams[0].try_start_time().unwrap(), Some(20.25));
+        assert_eq!(
+            media.streams[0].try_duration().unwrap(),
+            Some(Duration::from_secs_f64(30.5))
+        );
+
+        media.streams[0].duration = Some("inf".to_owned());
+        assert!(matches!(
+            media.streams[0].try_duration(),
+            Err(ProbeValueError::Invalid {
+                field: "stream duration",
+                ..
+            })
+        ));
     }
 }

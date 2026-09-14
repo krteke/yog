@@ -19,6 +19,7 @@ tokio = { workspace = true, features = [
 tokio-util = { workspace = true, features = ["io-util", "rt"] }
 futures-util = { workspace = true, features = ["std"] }
 tempfile.workspace = true
+log.workspace = true
 
 clap = { workspace = true, features = ["derive"], optional = true }
 

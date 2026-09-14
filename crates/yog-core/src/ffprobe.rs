@@ -6,7 +6,7 @@ mod streaming;
 pub mod types;
 
 use crate::{
-    error::{Error, Failure},
+    error::{Error, Failure, ProbeError},
     program::Program,
 };
 use args::{Arg, ArgsExt, Entries};
@@ -18,7 +18,7 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
-use types::{Chapter, Frame, MediaFormat, MediaInfo, MediaStream, Packet, ProbeError};
+use types::{Chapter, Frame, MediaFormat, MediaInfo, MediaStream, Packet};
 
 #[derive(Debug)]
 pub struct ProbeResult<T> {
@@ -90,7 +90,7 @@ impl Ffprobe {
     }
 
     pub async fn probe(&self, input: &Path) -> Result<ProbeResult<MediaInfo>, Error> {
-        self.query(
+        self.probe_media(
             input,
             [
                 Arg::ShowFormat,
@@ -101,20 +101,18 @@ impl Ffprobe {
             ]
             .into_iter()
             .chain(self.data_hashes.then_some(Arg::DataHash)),
-            move |reader| {
-                let response: MediaResponse =
-                    serde_json::from_reader(reader).map_err(Failure::Json)?;
-                Ok((
-                    MediaInfo {
-                        streams: response.streams,
-                        chapters: response.chapters,
-                        programs: response.programs,
-                        format: response.format,
-                        pixel_formats: response.pixel_formats,
-                    },
-                    response.error,
-                ))
-            },
+        )
+        .await
+    }
+
+    pub(crate) async fn probe_sample(&self, input: &Path) -> Result<ProbeResult<MediaInfo>, Error> {
+        self.probe_media(
+            input,
+            [
+                Arg::ShowFormat,
+                Arg::ShowStreams,
+                Arg::ShowEntries(Entries::PredictionSample),
+            ],
         )
         .await
     }
@@ -230,17 +228,84 @@ impl Ffprobe {
         read_intervals: &str,
         mut consume: impl FnMut(Packet) + Send + 'static,
     ) -> Result<ProbeResult<()>, Error> {
+        self.fold_packet_records(
+            input,
+            stream_index,
+            read_intervals,
+            Entries::Packet,
+            (),
+            move |(), packet| consume(packet),
+        )
+        .await
+    }
+
+    pub(crate) async fn fold_packet_sizes<T>(
+        &self,
+        input: &Path,
+        stream_index: Option<usize>,
+        read_intervals: &str,
+        state: T,
+        fold: impl FnMut(&mut T, Packet) + Send + 'static,
+    ) -> Result<ProbeResult<T>, Error>
+    where
+        T: Send + 'static,
+    {
+        self.fold_packet_records(
+            input,
+            stream_index,
+            read_intervals,
+            Entries::PacketSize,
+            state,
+            fold,
+        )
+        .await
+    }
+
+    async fn fold_packet_records<T>(
+        &self,
+        input: &Path,
+        stream_index: Option<usize>,
+        read_intervals: &str,
+        entries: Entries,
+        mut state: T,
+        mut fold: impl FnMut(&mut T, Packet) + Send + 'static,
+    ) -> Result<ProbeResult<T>, Error>
+    where
+        T: Send + 'static,
+    {
         let args = [
             Arg::ReadIntervals(read_intervals),
             Arg::ShowPackets,
-            Arg::ShowEntries(Entries::Packet),
+            Arg::ShowEntries(entries),
         ]
         .into_iter()
         .chain(stream_index.map(Arg::SelectStream));
         self.query(input, args, move |reader| {
             let error =
-                streaming::records(reader, "packets", &mut consume).map_err(Failure::Json)?;
-            Ok(((), error))
+                streaming::records(reader, "packets", &mut |packet| fold(&mut state, packet))
+                    .map_err(Failure::Json)?;
+            Ok((state, error))
+        })
+        .await
+    }
+
+    async fn probe_media<'a>(
+        &self,
+        input: &Path,
+        options: impl IntoIterator<Item = Arg<'a>>,
+    ) -> Result<ProbeResult<MediaInfo>, Error> {
+        self.query(input, options, move |reader| {
+            let response: MediaResponse = serde_json::from_reader(reader).map_err(Failure::Json)?;
+            Ok((
+                MediaInfo {
+                    streams: response.streams,
+                    chapters: response.chapters,
+                    programs: response.programs,
+                    format: response.format,
+                    pixel_formats: response.pixel_formats,
+                },
+                response.error,
+            ))
         })
         .await
     }
@@ -264,7 +329,6 @@ impl Ffprobe {
         args.add(Arg::Input(input));
 
         let command = self.inner.build(args);
-        command.print();
 
         let mut output = command
             .run(

@@ -1,5 +1,6 @@
 use crate::{
     args::ExecutionOptions,
+    config,
     diagnostics::Diagnostics,
     error::RunError,
     output::Output,
@@ -82,6 +83,50 @@ impl Transcoder {
         self.execute(request, media, output, diagnostics).await
     }
 
+    pub async fn predict(
+        &self,
+        request: TranscodeRequest,
+        diagnostics: &Diagnostics,
+    ) -> Result<(), RunError> {
+        if self.ffmpeg.cancellation().is_cancelled() {
+            return Err(RunError::Cancelled);
+        }
+        if !request.input.exists() {
+            return Err(RunError::Failed(anyhow::anyhow!(
+                "input file does not exist"
+            )));
+        }
+        let media = self.probe(&request.input).await?;
+        self.predict_probed(request, media, diagnostics).await
+    }
+
+    pub async fn predict_probed(
+        &self,
+        request: TranscodeRequest,
+        media: MediaInfo,
+        diagnostics: &Diagnostics,
+    ) -> Result<(), RunError> {
+        if self.ffmpeg.cancellation().is_cancelled() {
+            return Err(RunError::Cancelled);
+        }
+        let config = config::get();
+        let options = config.prediction.into();
+        let progress = Display::predicting(self.verbose);
+
+        let result = self
+            .ffmpeg
+            .predict(&self.probe, &request, &media, options, |bytes| {
+                diagnostics.ffmpeg(bytes)
+            })
+            .await
+            .context("prediction failed")?;
+
+        drop(progress);
+        diagnostics.predict(&request.input, &result);
+
+        Ok(())
+    }
+
     async fn execute(
         &self,
         mut request: TranscodeRequest,
@@ -101,10 +146,9 @@ impl Transcoder {
             .ffmpeg
             .build(&plan)
             .context("cannot build transcode command")?;
-        command.print();
 
         let progress = Display::new(self.verbose);
-        progress.start(media.format.duration.as_deref());
+        progress.start(media.format.try_duration().ok());
         command
             .run(
                 |record| progress.update(record),

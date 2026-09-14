@@ -1,7 +1,6 @@
+use serde::{Deserialize, Serialize};
 use std::{fmt, io, path::PathBuf, process::ExitStatus};
 use thiserror::Error;
-
-use crate::ffprobe::types::ProbeError;
 
 #[derive(Debug)]
 pub enum Failure {
@@ -58,4 +57,54 @@ pub enum PlanError {
         stream_index: usize,
         format: Option<String>,
     },
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ProbeValueError {
+    #[error("ffprobe did not return {field}")]
+    Missing { field: &'static str },
+    #[error("ffprobe returned invalid {field} {value:?}")]
+    Invalid { field: &'static str, value: String },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProbeError {
+    pub code: i64,
+    pub string: String,
+}
+
+#[derive(Debug, Error)]
+pub enum PredictionError {
+    #[error("prediction requires video encoding; stream copy has no useful encoding score")]
+    RequiresEncoding,
+    #[error("input has no regular video stream")]
+    NoVideo,
+    #[error("encoded sample has no regular video stream")]
+    NoSampleVideo,
+    #[error("video stream #{stream_index} does not overlap the input timeline")]
+    InvalidVideoSpan { stream_index: usize },
+    #[error("attachment stream #{stream_index} has no size")]
+    MissingAttachmentSize { stream_index: usize },
+    #[error("sample #{sample} produced no timed media packets")]
+    NoTimedPackets { sample: usize },
+    #[error("byte count overflowed")]
+    ByteCountOverflow,
+    #[error("sample #{sample} packet payload exceeds its file size")]
+    PacketPayloadExceedsFile { sample: usize },
+    #[error("libvmaf compared no frames")]
+    NoScoredFrames,
+    #[error("libvmaf returned no VMAF score")]
+    NoVmafScore,
+    #[error("predicted output size is outside the supported range")]
+    OutputSizeOverflow,
+    #[error(transparent)]
+    ProbeValue(#[from] ProbeValueError),
+    #[error(transparent)]
+    Plan(#[from] PlanError),
+    #[error(transparent)]
+    Command(#[from] Error),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
 }

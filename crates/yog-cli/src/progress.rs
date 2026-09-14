@@ -9,25 +9,31 @@ pub struct Display {
 
 impl Display {
     pub fn new(verbose: bool) -> Self {
+        Self::with_template(verbose, "{spinner} {msg} [{elapsed_precise}]")
+    }
+
+    pub fn predicting(verbose: bool) -> Self {
+        Self::with_template(verbose, "{spinner} Predicting...")
+    }
+
+    fn with_template(verbose: bool, template: &str) -> Self {
         let bar = if verbose {
             ProgressBar::hidden()
         } else {
             ProgressBar::new_spinner()
         };
-        bar.set_style(ProgressStyle::with_template("{spinner} {msg} [{elapsed_precise}]").unwrap());
+        bar.set_style(ProgressStyle::with_template(template).unwrap());
 
         if !bar.is_hidden() {
             bar.enable_steady_tick(Duration::from_millis(
-                config::get().progress_tick_interval_ms,
+                config::get().progress_tick_interval_ms.get(),
             ));
         }
         Self { bar }
     }
 
-    pub fn start(&self, duration: Option<&str>) {
+    pub fn start(&self, duration: Option<Duration>) {
         let duration = duration
-            .and_then(|value| value.parse::<f64>().ok())
-            .and_then(|value| Duration::try_from_secs_f64(value).ok())
             .and_then(|value| u64::try_from(value.as_micros()).ok())
             .filter(|value| *value > 0);
         if let Some(duration) = duration {
@@ -80,32 +86,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn missing_or_invalid_duration_stays_indeterminate() {
-        for duration in [
-            None,
-            Some("N/A"),
-            Some("NaN"),
-            Some("inf"),
-            Some("-1"),
-            Some("0"),
-            Some("1e30"),
-        ] {
-            let display = Display::new(true);
-            display.start(duration);
-            assert_eq!(display.bar.length(), None, "{duration:?}");
-            display.update(Progress {
-                out_time_us: Some(500_000),
-                finished: true,
-                ..Progress::default()
-            });
-            assert!(!display.bar.is_finished());
-        }
-    }
-
-    #[test]
     fn time_based_progress_clamps_signed_times_and_overruns_without_finishing() {
         let display = Display::new(true);
-        display.start(Some("1.5"));
+        display.start(Some(Duration::from_millis(1500)));
         assert_eq!(display.bar.length(), Some(1_500_000));
         for (time, expected) in [(-250_000, 0), (750_000, 750_000), (2_000_000, 1_500_000)] {
             display.update(Progress {

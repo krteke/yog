@@ -35,7 +35,9 @@ pub(super) enum Arg<'a> {
 pub(super) enum Entries {
     Frame,
     Packet,
+    PacketSize,
     PacketHash,
+    PredictionSample,
 }
 
 impl From<Entries> for OsString {
@@ -43,7 +45,9 @@ impl From<Entries> for OsString {
         match entries {
             Entries::Frame => "frame=stream_index,media_type,pts_time,best_effort_timestamp_time,duration_time,pix_fmt,color_range,color_space,color_transfer,color_primaries,chroma_location,interlaced_frame,top_field_first:frame_side_data",
             Entries::Packet => "packet=stream_index,pts_time,dts_time,duration_time,size,flags",
+            Entries::PacketSize => "packet=stream_index,size",
             Entries::PacketHash => "packet=stream_index,data_hash,pts_time,duration_time",
+            Entries::PredictionSample => "format=duration:format_tags=:stream=index,codec_type,extradata_size:stream_disposition=attached_pic:stream_tags=:stream_side_data=",
         }.into()
     }
 }

@@ -75,12 +75,16 @@ pub(super) enum Arg<'a> {
     PixelFormat(usize, &'a str),
     /// -filter:{output_index} {filter}
     Filter(usize, &'a str),
+    /// -filter_complex {filter}
+    FilterComplex(&'a str),
     /// {path}
     Output(&'a Path),
     /// -vaapi_device
     VaapiDevice(&'a Path),
     /// -map 0:{index}
     Map(usize),
+    /// -map {label}
+    MapLabel(&'a str),
     /// -map_metadata 0
     MapMetadata,
     /// -map_chapters 0
@@ -138,6 +142,7 @@ impl ArgsExt for Vec<OsString> {
                 Some(format!("+{format}").into()),
             ),
             Arg::Filter(index, filter) => (format!("-filter:{index}").into(), Some(filter.into())),
+            Arg::FilterComplex(filter) => ("-filter_complex".into(), Some(filter.into())),
             Arg::Input(path) => ("-i".into(), Some(path.as_os_str().to_owned())),
             Arg::Seek(timestamp) => ("-ss".into(), Some(timestamp.into())),
             Arg::DumpAttachment(index, path) => (
@@ -147,6 +152,7 @@ impl ArgsExt for Vec<OsString> {
             Arg::Output(path) => (path.as_os_str().to_owned(), None),
             Arg::VaapiDevice(path) => ("-vaapi_device".into(), Some(path.as_os_str().to_owned())),
             Arg::Map(index) => ("-map".into(), Some(format!("0:{index}").into())),
+            Arg::MapLabel(label) => ("-map".into(), Some(label.into())),
             Arg::MapMetadata => ("-map_metadata".into(), Some("0".into())),
             Arg::MapChapters => ("-map_chapters".into(), Some("0".into())),
             Arg::CopyAll => ("-c".into(), Some("copy".into())),

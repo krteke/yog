@@ -35,7 +35,6 @@ impl Ffmpeg {
         let mut args: Vec<OsString> = Vec::new();
         args.extend([Arg::HideBanner, Arg::EncoderHelp(encoder)]);
         let command = self.inner.build(args);
-        command.print();
         let output = command
             .run(
                 |mut reader| async move {

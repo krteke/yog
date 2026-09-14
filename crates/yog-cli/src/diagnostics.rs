@@ -12,7 +12,10 @@ use std::{
 
 use tokio::task::{JoinHandle, spawn_blocking};
 use tokio_util::sync::CancellationToken;
-use yog_core::ffmpeg::prediction::Prediction;
+use yog_core::ffmpeg::{
+    prediction::Prediction,
+    vmaf::{VmafOptions, VmafScore},
+};
 
 use crate::config;
 
@@ -197,26 +200,55 @@ impl Diagnostics {
         self.write(report.as_bytes());
     }
 
+    pub fn vmaf(&self, output: &Path, score: VmafScore, options: VmafOptions) {
+        let mode = options
+            .n_subsample
+            .map(|value| format!("n_subsample={value}"))
+            .unwrap_or_else(|| "full".to_owned());
+        self.write(
+            format!(
+                "vmaf: {} | score {:.3} | {mode}\n",
+                output.display(),
+                score.value,
+            )
+            .as_bytes(),
+        );
+    }
+
+    pub fn vmaf_warning(&self, error: &anyhow::Error, stderr_streamed: bool) {
+        self.write(format!("warning: vmaf: {error:#}\n").as_bytes());
+        if let Some(error) = Self::program_error(error) {
+            self.write_program_stderr(error, stderr_streamed);
+        }
+    }
+
     pub fn error(&self, error: &anyhow::Error) {
         self.write(format!("{error:#}\n").as_bytes());
 
-        let Some(err) = error
-            .chain()
-            .find_map(|cause| cause.downcast_ref::<yog_core::error::Error>())
-        else {
+        let Some(error) = Self::program_error(error) else {
             return;
         };
 
-        if !err.stderr.is_empty() {
-            if !self.streamed.load(Ordering::Relaxed) {
-                self.write(&err.stderr);
+        self.write_program_stderr(error, self.streamed.load(Ordering::Relaxed));
+        if matches!(error.reason, yog_core::error::Failure::TimedOut) {
+            self.stopping.cancel();
+        }
+    }
+
+    fn program_error(error: &anyhow::Error) -> Option<&yog_core::error::Error> {
+        error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<yog_core::error::Error>())
+    }
+
+    fn write_program_stderr(&self, error: &yog_core::error::Error, stderr_streamed: bool) {
+        if !error.stderr.is_empty() {
+            if !stderr_streamed {
+                self.write(&error.stderr);
             }
-            if !err.stderr.ends_with(b"\n") {
+            if !error.stderr.ends_with(b"\n") {
                 self.write(b"\n");
             }
-        }
-        if matches!(err.reason, yog_core::error::Failure::TimedOut) {
-            self.stopping.cancel();
         }
     }
 

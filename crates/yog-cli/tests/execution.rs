@@ -5,10 +5,15 @@ use std::{
     os::unix::{fs::PermissionsExt, process::CommandExt},
     path::PathBuf,
     process::{Child, Command, Stdio},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
+
+static PROCESS_CONTROL_TEST: Mutex<()> = Mutex::new(());
 
 // These are isolated test fixtures, not the application's output workflow.
 struct Fixture(PathBuf);
@@ -198,6 +203,117 @@ esac"#,
     assert!(stderr.contains("sample range"));
     assert!(stderr.contains("sample #1:"));
     assert!(stderr.contains("sample #2:"));
+}
+
+#[test]
+fn published_transcode_calculates_full_or_subsampled_vmaf() {
+    for (vmaf_args, expected_mode) in [
+        (vec!["--vmaf"], "full"),
+        (vec!["--vmaf=7"], "n_subsample=7"),
+    ] {
+        let fixture = Fixture::new(
+            r#"printf '%s\n' "$*" >> ffmpeg-commands
+filter=''
+for argument do
+    case "$argument" in *libvmaf=*) filter=$argument ;; esac
+done
+if test -n "$filter"; then
+    test -f output.mkv || exit 20
+    test ! -e output.mkv.part || exit 21
+    metrics=${filter#*log_path=\'}
+    metrics=${metrics%%\':shortest=*}
+    printf '%s' '{"pooled_metrics":{"vmaf":{"mean":95.25}}}' > "$metrics"
+    exit 0
+fi
+for last do :; done
+printf encoded > "$last""#,
+        );
+        fixture.tool(
+            "ffprobe",
+            r#"for last do :; done
+case "$last" in
+    input.mkv)
+        printf '%s' '{"streams":[{"index":2,"codec_type":"video","width":320,"height":180}],"format":{"format_name":"matroska,webm","duration":"1"}}'
+        ;;
+    output.mkv|*/output.mkv)
+        printf '%s' '{"streams":[{"index":4,"codec_type":"video"}],"format":{"duration":"1"}}'
+        ;;
+    *) exit 22 ;;
+esac"#,
+        );
+
+        let result = fixture
+            .command()
+            .args(vmaf_args)
+            .arg("--copy")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(result.status.success(), "{stderr}");
+        assert_eq!(fs::read(fixture.0.join("output.mkv")).unwrap(), b"encoded");
+        assert!(!fixture.0.join("output.mkv.part").exists());
+        assert!(
+            stderr.contains(&format!(
+                "vmaf: output.mkv | score 95.250 | {expected_mode}"
+            )),
+            "{stderr}"
+        );
+        assert!(stderr.find("complete:").unwrap() < stderr.find("vmaf:").unwrap());
+
+        let commands = fs::read_to_string(fixture.0.join("ffmpeg-commands")).unwrap();
+        let vmaf = commands
+            .lines()
+            .find(|command| command.contains("libvmaf="))
+            .unwrap();
+        assert!(vmaf.contains("[0:4]crop=w=320:h=180"), "{vmaf}");
+        assert!(vmaf.contains("[1:2]setpts=PTS-STARTPTS"), "{vmaf}");
+        if expected_mode == "full" {
+            assert!(!vmaf.contains("n_subsample="), "{vmaf}");
+        } else {
+            assert!(vmaf.contains(":n_subsample=7"), "{vmaf}");
+        }
+    }
+}
+
+#[test]
+fn requested_vmaf_failure_does_not_fail_or_roll_back_the_transcode() {
+    let fixture = Fixture::new(
+        r#"case "$*" in
+    *libvmaf=*) printf 'cannot score' >&2; exit 12 ;;
+esac
+for last do :; done
+printf encoded > "$last""#,
+    );
+    fixture.tool(
+        "ffprobe",
+        r#"for last do :; done
+case "$last" in
+    input.mkv)
+        printf '%s' '{"streams":[{"index":0,"codec_type":"video","width":320,"height":180}],"format":{"format_name":"matroska,webm","duration":"1"}}'
+        ;;
+    *) printf '%s' '{"streams":[{"index":0,"codec_type":"video"}],"format":{"duration":"1"}}' ;;
+esac"#,
+    );
+
+    fs::write(fixture.0.join("output.mkv"), b"previous").unwrap();
+    for verbose in [false, true] {
+        let mut command = fixture.command();
+        command.args(["--vmaf", "--copy", "-O"]);
+        if verbose {
+            command.arg("--verbose");
+        }
+        let result = command.output().unwrap();
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(result.status.success(), "{stderr}");
+        assert!(stderr.contains("complete: output.mkv"), "{stderr}");
+        assert!(
+            stderr.contains("warning: vmaf: VMAF calculation failed"),
+            "{stderr}"
+        );
+        assert_eq!(stderr.matches("cannot score").count(), 1, "{stderr}");
+        assert_eq!(fs::read(fixture.0.join("output.mkv")).unwrap(), b"encoded");
+        assert!(!fixture.0.join("output.mkv.part").exists());
+    }
 }
 
 #[test]
@@ -930,6 +1046,9 @@ impl Drop for Running {
 
 #[test]
 fn timeout_reaps_child_and_cleans_part_even_when_stderr_is_not_consumed() {
+    let _serial = PROCESS_CONTROL_TEST
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let fixture = Fixture::new(
         r#"printf '%s' "$$" > child-pid
 for last do :; done
@@ -982,7 +1101,10 @@ while :; do :; done"#,
 }
 
 #[test]
-fn cancellation_during_probe_encoding_or_verification_cleans_only_the_part() {
+fn cancellation_keeps_the_output_state_owned_by_each_completed_phase() {
+    let _serial = PROCESS_CONTROL_TEST
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     for phase in [
         "ffprobe",
         "ffmpeg",
@@ -991,6 +1113,7 @@ fn cancellation_during_probe_encoding_or_verification_cleans_only_the_part() {
         "cover-encoding",
         "verify",
         "verify-packets",
+        "vmaf",
     ] {
         let fixture = Fixture::new("");
         let temporary = fixture.0.join("temporary covers");
@@ -1015,6 +1138,21 @@ fn cancellation_during_probe_encoding_or_verification_cleans_only_the_part() {
                 "case \"$*\" in *-show_packets*) true ;; *) false ;; esac"
             };
             fixture.tool("ffprobe", &format!("if {condition}; then {blocking}; fi\nprintf '%s' '{{\"streams\":[{{\"index\":0,\"codec_type\":\"audio\"}}],\"format\":{{\"format_name\":\"matroska,webm\"}}}}'"));
+        } else if phase == "vmaf" {
+            fixture.tool(
+                "ffmpeg",
+                &format!(
+                    "case \"$*\" in *libvmaf=*) {blocking} ;; esac\nfor last do :; done\nprintf encoded > \"$last\""
+                ),
+            );
+            fixture.tool(
+                "ffprobe",
+                r#"for last do :; done
+case "$last" in
+    input.mkv) printf '%s' '{"streams":[{"index":0,"codec_type":"video","width":320,"height":180}],"format":{"format_name":"matroska,webm","duration":"1"}}' ;;
+    *) printf '%s' '{"streams":[{"index":0,"codec_type":"video"}],"format":{"duration":"1"}}' ;;
+esac"#,
+            );
         } else {
             fixture.tool(
                 if phase == "encoder-help" {
@@ -1026,19 +1164,22 @@ fn cancellation_during_probe_encoding_or_verification_cleans_only_the_part() {
             );
         }
         fs::write(fixture.0.join("output.mkv"), b"original").unwrap();
+        let mut command = fixture.command();
+        command.env("TMPDIR", &temporary).arg("-O");
+        if phase == "vmaf" {
+            command.args(["--vmaf", "--copy"]);
+        } else {
+            command.args([
+                "--verify",
+                if phase == "encoder-help" {
+                    "--encode-x264"
+                } else {
+                    "--copy"
+                },
+            ]);
+        }
         let mut child = Running(
-            fixture
-                .command()
-                .env("TMPDIR", &temporary)
-                .args([
-                    "-O",
-                    "--verify",
-                    if phase == "encoder-help" {
-                        "--encode-x264"
-                    } else {
-                        "--copy"
-                    },
-                ])
+            command
                 .process_group(0)
                 .stderr(Stdio::piped())
                 .spawn()
@@ -1076,7 +1217,16 @@ fn cancellation_during_probe_encoding_or_verification_cleans_only_the_part() {
             "{phase}: leaked cover directory"
         );
         assert!(!fixture.0.join("output.mkv.part").exists());
-        assert_eq!(fs::read(fixture.0.join("output.mkv")).unwrap(), b"original");
+        let expected: &[u8] = if phase == "vmaf" {
+            b"encoded"
+        } else {
+            b"original"
+        };
+        assert_eq!(
+            fs::read(fixture.0.join("output.mkv")).unwrap(),
+            expected,
+            "{phase}"
+        );
         let pid = fs::read_to_string(fixture.0.join("child-pid")).unwrap();
         assert!(!PathBuf::from(format!("/proc/{pid}")).exists());
     }
@@ -1084,6 +1234,9 @@ fn cancellation_during_probe_encoding_or_verification_cleans_only_the_part() {
 
 #[test]
 fn ctrl_c_can_interrupt_log_drain_after_the_output_is_committed() {
+    let _serial = PROCESS_CONTROL_TEST
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let fixture = Fixture::new(
         r#"for last do :; done
 printf encoded > "$last"

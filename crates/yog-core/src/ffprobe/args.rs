@@ -37,7 +37,7 @@ pub(super) enum Entries {
     Packet,
     PacketSize,
     PacketHash,
-    PredictionSample,
+    StreamLayout,
 }
 
 impl From<Entries> for OsString {
@@ -47,7 +47,7 @@ impl From<Entries> for OsString {
             Entries::Packet => "packet=stream_index,pts_time,dts_time,duration_time,size,flags",
             Entries::PacketSize => "packet=stream_index,size",
             Entries::PacketHash => "packet=stream_index,data_hash,pts_time,duration_time",
-            Entries::PredictionSample => "format=duration:format_tags=:stream=index,codec_type,extradata_size:stream_disposition=attached_pic:stream_tags=:stream_side_data=",
+            Entries::StreamLayout => "format=duration:format_tags=:stream=index,codec_type,extradata_size:stream_disposition=attached_pic:stream_tags=:stream_side_data=",
         }.into()
     }
 }

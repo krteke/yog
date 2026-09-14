@@ -1,8 +1,6 @@
 use std::{
     collections::HashSet,
-    ffi::OsString,
     fs,
-    io::BufReader,
     num::NonZeroUsize,
     path::Path,
     time::{Duration, Instant},
@@ -10,12 +8,11 @@ use std::{
 
 use super::{
     Ffmpeg,
-    args::Arg,
     plan::{AttachmentInput, TranscodeRequest, VideoAction},
-    vmaf::VmafLog,
+    vmaf::VmafSampleInput,
 };
 use crate::{
-    error::{Failure, PredictionError, ProbeValueError},
+    error::{PredictionError, ProbeValueError},
     ffprobe::{
         Ffprobe,
         types::{MediaInfo, MediaStream},
@@ -122,14 +119,6 @@ impl SampleLayout {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct SampleQuality {
-    vmaf: f64,
-    ssim: Option<f64>,
-    psnr_y_db: Option<f64>,
-    scored_frames: usize,
-}
-
 #[derive(Debug, Clone, Copy, Default)]
 struct PacketBytes {
     timed: u64,
@@ -230,7 +219,7 @@ impl Ffmpeg {
                 .await?;
             let encode_seconds = started.elapsed().as_secs_f64();
 
-            let sample_media = probe.probe_sample(&output).await?.output;
+            let sample_media = probe.probe_stream_layout(&output).await?.output;
             let speed = reported_speed
                 .map_or(window.duration / encode_seconds, |(speed, seconds)| {
                     window.duration * speed / seconds
@@ -262,12 +251,18 @@ impl Ffmpeg {
             };
 
             let quality = self
-                .score_sample(
-                    &request.input,
-                    source_stream,
-                    &output,
-                    video_stream_index,
-                    &start,
+                .vmaf_sample(
+                    VmafSampleInput {
+                        reference: &request.input,
+                        reference_stream_index: source_stream.index,
+                        reference_dimensions: (
+                            source_stream.width.expect("source dimensions validated"),
+                            source_stream.height.expect("source dimensions validated"),
+                        ),
+                        distorted: &output,
+                        distorted_stream_index: video_stream_index,
+                        reference_start: &start,
+                    },
                     &mut on_stderr,
                 )
                 .await?;
@@ -294,61 +289,6 @@ impl Ffmpeg {
             fixed_attachment_bytes,
             samples,
         )
-    }
-
-    async fn score_sample(
-        &self,
-        source: &Path,
-        source_stream: &MediaStream,
-        candidate: &Path,
-        candidate_stream_index: usize,
-        start: &str,
-        on_stderr: impl FnMut(&[u8]),
-    ) -> Result<SampleQuality, PredictionError> {
-        let source_width = source_stream.width.expect("source dimensions validated");
-        let source_height = source_stream.height.expect("source dimensions validated");
-        let metrics_path = candidate.with_extension("vmaf.json");
-        let filter = format!(
-            "[0:{}]crop=w={}:h={}:x=0:y=0:exact=1,setpts=PTS-STARTPTS[dist];\
-             [1:{}]setpts=PTS-STARTPTS[ref];\
-             [dist][ref]libvmaf=feature=name=psnr|name=float_ssim:log_fmt=json:log_path={}:shortest=1[out]",
-            candidate_stream_index,
-            source_width,
-            source_height,
-            source_stream.index,
-            escape_filter_path(&metrics_path)
-        );
-        let mut args: Vec<OsString> = Vec::new();
-        args.extend([
-            Arg::HideBanner,
-            Arg::NoStdin,
-            Arg::LogLevel("error"),
-            Arg::Input(candidate),
-            Arg::Seek(start),
-            Arg::Input(source),
-            Arg::FilterComplex(&filter),
-            Arg::MapLabel("[out]"),
-            Arg::Format("null"),
-            Arg::Stdout,
-        ]);
-        let command = self.inner.build(args);
-        let output = command.run(|_| async { Ok(()) }, on_stderr).await?;
-        if !output.status.success() {
-            return Err(output.failure(Failure::Exit).into());
-        }
-
-        let log: VmafLog = serde_json::from_reader(BufReader::new(fs::File::open(metrics_path)?))?;
-        if log.frames.is_empty() {
-            return Err(PredictionError::NoScoredFrames);
-        }
-        let vmaf =
-            metric_sample(&log, |metrics| metrics.vmaf).ok_or(PredictionError::NoVmafScore)?;
-        Ok(SampleQuality {
-            vmaf,
-            ssim: metric_sample(&log, |metrics| metrics.float_ssim),
-            psnr_y_db: metric_sample(&log, |metrics| metrics.psnr_y),
-            scored_frames: log.frames.len(),
-        })
     }
 }
 
@@ -458,17 +398,6 @@ async fn packet_bytes(
         Some(PacketSumError::Overflow) => Err(PredictionError::ByteCountOverflow),
         None => Ok(state.bytes),
     }
-}
-
-fn metric_sample(log: &VmafLog, get: impl Fn(&super::vmaf::Metrics) -> Option<f64>) -> Option<f64> {
-    if log.frames.is_empty() {
-        return None;
-    }
-    let sum = log
-        .frames
-        .iter()
-        .try_fold(0.0, |sum, frame| Some(sum + get(&frame.metrics)?))?;
-    Some(sum / log.frames.len() as f64)
 }
 
 fn summarize(
@@ -614,12 +543,6 @@ fn predicted_bytes(
         return Err(PredictionError::OutputSizeOverflow);
     }
     Ok(value.round() as u64)
-}
-
-fn escape_filter_path(path: &Path) -> String {
-    let normalized = path.to_string_lossy().replace('\\', "/");
-    let escaped = normalized.replace('\'', r"'\''").replace(':', r"\:");
-    format!("'{escaped}'")
 }
 
 #[cfg(test)]
@@ -789,21 +712,6 @@ mod tests {
         assert!(prediction.quality.psnr_y_db.is_none());
         assert_eq!(prediction.quality.source_stream_index, 7);
         assert_eq!(prediction.samples.len(), 2);
-    }
-
-    #[test]
-    fn optional_metric_is_omitted_when_any_scored_frame_lacks_it() {
-        let log: VmafLog = serde_json::from_str(
-            r#"{"frames":[
-                {"frameNum":0,"metrics":{"vmaf":80.0,"float_ssim":0.8}},
-                {"frameNum":1,"metrics":{"vmaf":100.0}}
-            ]}"#,
-        )
-        .unwrap();
-
-        let vmaf = metric_sample(&log, |metrics| metrics.vmaf).unwrap();
-        assert_eq!(vmaf, 90.0);
-        assert!(metric_sample(&log, |metrics| metrics.float_ssim).is_none());
     }
 
     #[test]

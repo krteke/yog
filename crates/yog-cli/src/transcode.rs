@@ -15,6 +15,7 @@ use yog_core::{
     ffmpeg::{
         Ffmpeg,
         plan::{TranscodeRequest, VideoAction},
+        vmaf::VmafOptions,
     },
     ffprobe::Ffprobe,
     ffprobe::types::MediaInfo,
@@ -24,6 +25,7 @@ pub struct Transcoder {
     probe: Ffprobe,
     ffmpeg: Ffmpeg,
     verify: bool,
+    vmaf: Option<VmafOptions>,
     verbose: bool,
 }
 
@@ -36,6 +38,7 @@ impl Transcoder {
                 .with_data_hashes(options.verify),
             ffmpeg: Ffmpeg::new(&options.ffmpeg, timeout).with_cancellation(cancelled),
             verify: options.verify,
+            vmaf: options.vmaf.map(Into::into),
             verbose: options.verbose,
         }
     }
@@ -198,19 +201,46 @@ impl Transcoder {
             }
         }
 
+        for warning in warnings {
+            diagnostics.write(format!("warning: verify: {warning}\n").as_bytes());
+        }
+
         if self.ffmpeg.cancellation().is_cancelled() {
             return Err(RunError::Cancelled);
         }
 
-        let published = output
+        output
             .publish()
-            .with_context(|| format!("cannot publish output {}", target.display()));
-
-        for warning in warnings {
-            diagnostics.write(format!("warning: verify: {warning}\n").as_bytes());
-        }
-        published?;
+            .with_context(|| format!("cannot publish output {}", target.display()))?;
         diagnostics.write(format!("complete: {}\n", target.display()).as_bytes());
+
+        if let Some(options) = self.vmaf {
+            let progress = Display::calculating_vmaf(self.verbose);
+            let mut stderr_streamed = false;
+            let result = self
+                .ffmpeg
+                .vmaf(
+                    &self.probe,
+                    &request.input,
+                    &media,
+                    &target,
+                    options,
+                    |bytes| {
+                        stderr_streamed |= self.verbose && !bytes.is_empty();
+                        diagnostics.ffmpeg(bytes);
+                    },
+                )
+                .await
+                .context("VMAF calculation failed");
+            drop(progress);
+            match result {
+                Ok(score) => diagnostics.vmaf(&target, score, options),
+                Err(error) => match RunError::from(error) {
+                    RunError::Cancelled => return Err(RunError::Cancelled),
+                    RunError::Failed(error) => diagnostics.vmaf_warning(&error, stderr_streamed),
+                },
+            }
+        }
 
         Ok(())
     }

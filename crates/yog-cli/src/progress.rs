@@ -16,6 +16,10 @@ impl Display {
         Self::with_template(verbose, "{spinner} Predicting...")
     }
 
+    pub fn calculating_vmaf(verbose: bool) -> Self {
+        Self::with_template(verbose, "{spinner} Calculating VMAF...")
+    }
+
     fn with_template(verbose: bool, template: &str) -> Self {
         let bar = if verbose {
             ProgressBar::hidden()

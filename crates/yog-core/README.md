@@ -40,7 +40,8 @@ use yog_core::{
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 let input = Path::new("input.mkv");
 let ffmpeg = Ffmpeg::new("ffmpeg", Some(Duration::from_secs(3600)));
-let media = Ffprobe::new("ffprobe", Some(Duration::from_secs(30))).probe(input).await?.output;
+let probe = Ffprobe::new("ffprobe", Some(Duration::from_secs(30)));
+let media = probe.probe(input).await?.output;
 let plan = TranscodeRequest::mkv(input, "output.mkv")
     .with_video(VideoAction::encode_x264(
         Some(RateControl::Quality(23)), Some(Preset::Medium),
@@ -48,6 +49,18 @@ let plan = TranscodeRequest::mkv(input, "output.mkv")
     .plan(&media, &ffmpeg).await?;
 let command = ffmpeg.build(&plan)?;
 command.run(|_| {}, |_| {}).await?;
+
+let score = ffmpeg
+    .vmaf(
+        &probe,
+        input,
+        &media,
+        Path::new("output.mkv"),
+        yog_core::ffmpeg::vmaf::VmafOptions::default(),
+        |_| {},
+    )
+    .await?;
+println!("VMAF: {:.3}", score.value);
 # Ok(())
 # }
 ```

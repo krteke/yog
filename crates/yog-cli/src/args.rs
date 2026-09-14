@@ -1,6 +1,9 @@
 use clap::{CommandFactory, Parser};
-use std::path::PathBuf;
-use yog_core::ffmpeg::plan::{Container, TranscodeRequest, VideoAction};
+use std::{num::NonZeroU32, path::PathBuf, str::FromStr};
+use yog_core::ffmpeg::{
+    plan::{Container, TranscodeRequest, VideoAction},
+    vmaf::VmafOptions,
+};
 
 use crate::decoding::DecodingArgs;
 
@@ -40,6 +43,47 @@ pub struct ExecutionOptions {
     pub verbose: bool,
     #[arg(short, long, global = true)]
     pub verify: bool,
+    #[arg(
+        long,
+        global = true,
+        value_name = "full|N_SUBSAMPLE",
+        num_args = 0..=1,
+        default_missing_value = "full",
+        require_equals = true,
+        conflicts_with = "predict"
+    )]
+    pub vmaf: Option<VmafMode>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VmafMode {
+    Full,
+    Subsample(NonZeroU32),
+}
+
+impl FromStr for VmafMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.eq_ignore_ascii_case("full") {
+            return Ok(Self::Full);
+        }
+        value
+            .parse::<NonZeroU32>()
+            .map(Self::Subsample)
+            .map_err(|_| "expected 'full' or an integer greater than 0".to_owned())
+    }
+}
+
+impl From<VmafMode> for VmafOptions {
+    fn from(value: VmafMode) -> Self {
+        Self {
+            n_subsample: match value {
+                VmafMode::Full => None,
+                VmafMode::Subsample(value) => Some(value),
+            },
+        }
+    }
 }
 
 impl Args {
@@ -143,6 +187,42 @@ mod tests {
             .unwrap_err();
             assert_eq!(error.kind(), kind, "{flags:?}: {error}");
         }
+    }
+
+    #[test]
+    fn vmaf_selects_full_or_a_positive_subsample_interval() {
+        for (flags, expected) in [
+            (vec!["--vmaf", "--copy"], VmafMode::Full),
+            (vec!["--vmaf=full", "--copy"], VmafMode::Full),
+            (
+                vec!["--vmaf=7", "--copy"],
+                VmafMode::Subsample(NonZeroU32::new(7).unwrap()),
+            ),
+        ] {
+            let (_, options) =
+                Args::try_parse_from(["yog", "input", "-o", "output"].into_iter().chain(flags))
+                    .unwrap()
+                    .into_request()
+                    .unwrap();
+            assert_eq!(options.vmaf, Some(expected));
+        }
+
+        for flags in [
+            vec!["--vmaf=0", "--copy"],
+            vec!["--predict", "--vmaf", "--encode-x264"],
+        ] {
+            assert!(
+                Args::try_parse_from(["yog", "input", "-o", "output"].into_iter().chain(flags),)
+                    .is_err()
+            );
+        }
+
+        let (_, options) =
+            Args::try_parse_from(["yog", "--vmaf", "input", "-o", "output", "--copy"])
+                .unwrap()
+                .into_request()
+                .unwrap();
+        assert_eq!(options.vmaf, Some(VmafMode::Full));
     }
 
     #[test]

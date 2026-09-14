@@ -93,16 +93,32 @@ pub enum PredictionError {
     ByteCountOverflow,
     #[error("sample #{sample} packet payload exceeds its file size")]
     PacketPayloadExceedsFile { sample: usize },
-    #[error("libvmaf compared no frames")]
-    NoScoredFrames,
-    #[error("libvmaf returned no VMAF score")]
-    NoVmafScore,
     #[error("predicted output size is outside the supported range")]
     OutputSizeOverflow,
     #[error(transparent)]
     ProbeValue(#[from] ProbeValueError),
     #[error(transparent)]
     Plan(#[from] PlanError),
+    #[error("command execution failed")]
+    Command(#[from] Error),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Vmaf(#[from] VmafError),
+}
+
+#[derive(Debug, Error)]
+pub enum VmafError {
+    #[error("reference has no regular video stream")]
+    NoReferenceVideo,
+    #[error("distorted video has no regular video stream")]
+    NoDistortedVideo,
+    #[error("reference video stream #{stream_index} has no valid display dimensions")]
+    MissingReferenceDimensions { stream_index: usize },
+    #[error("libvmaf compared no frames")]
+    NoScoredFrames,
+    #[error("libvmaf returned no VMAF score")]
+    NoVmafScore,
     #[error("command execution failed")]
     Command(#[from] Error),
     #[error(transparent)]

@@ -105,13 +105,16 @@ impl Ffprobe {
         .await
     }
 
-    pub(crate) async fn probe_sample(&self, input: &Path) -> Result<ProbeResult<MediaInfo>, Error> {
+    pub(crate) async fn probe_stream_layout(
+        &self,
+        input: &Path,
+    ) -> Result<ProbeResult<MediaInfo>, Error> {
         self.probe_media(
             input,
             [
                 Arg::ShowFormat,
                 Arg::ShowStreams,
-                Arg::ShowEntries(Entries::PredictionSample),
+                Arg::ShowEntries(Entries::StreamLayout),
             ],
         )
         .await

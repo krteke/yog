@@ -362,3 +362,50 @@ fn actual_libvmaf_json_decodes_typed_frame_metrics() {
     assert!(log.frames[0].metrics.float_ssim.unwrap() > 0.99);
     assert!(log.frames[0].metrics.psnr_y.unwrap() > 40.0);
 }
+
+#[tokio::test]
+#[ignore = "requires installed ffmpeg, ffprobe, and libvmaf"]
+async fn actual_vmaf_api_reads_the_pooled_subsampled_score() {
+    use std::num::NonZeroU32;
+    use yog_core::ffmpeg::vmaf::VmafOptions;
+
+    let scratch = Scratch::new();
+    let reference = scratch.0.join("reference.mkv");
+    let generated = Command::new("ffmpeg")
+        .args([
+            "-v",
+            "error",
+            "-nostdin",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=192x108:rate=5:duration=1",
+            "-c:v",
+            "ffv1",
+        ])
+        .arg(&reference)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+
+    let probe = Ffprobe::new("ffprobe", Some(TIMEOUT));
+    let media = probe.probe(&reference).await.unwrap().output;
+    let score = Ffmpeg::new("ffmpeg", Some(TIMEOUT))
+        .vmaf(
+            &probe,
+            &reference,
+            &media,
+            &reference,
+            VmafOptions {
+                n_subsample: NonZeroU32::new(2),
+            },
+            |_| {},
+        )
+        .await
+        .unwrap();
+    assert!(score.value > 90.0, "{}", score.value);
+}

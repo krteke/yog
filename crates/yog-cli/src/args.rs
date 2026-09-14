@@ -10,7 +10,7 @@ use crate::decoding::DecodingArgs;
 #[derive(Debug, Parser)]
 #[command(version, about)]
 pub struct Args {
-    input: PathBuf,
+    pub input: PathBuf,
     #[arg(short, long, global = true)]
     pub recursive: bool,
     #[arg(long, global = true, conflicts_with = "verify")]
@@ -18,17 +18,17 @@ pub struct Args {
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
     #[arg(short, long, global = true, required = false)]
-    output: PathBuf,
+    pub output: PathBuf,
     #[arg(short = 'C', long, global = true)]
-    container: Option<Container>,
+    pub container: Option<Container>,
     #[command(flatten)]
-    decoding: DecodingArgs,
+    pub decoding: DecodingArgs,
     #[arg(short = 'O', long, global = true)]
-    overwrite: bool,
+    pub overwrite: bool,
     #[command(flatten)]
-    execution: ExecutionOptions,
+    pub execution: ExecutionOptions,
     #[command(subcommand)]
-    video: Option<VideoAction>,
+    pub video: Option<VideoAction>,
 }
 
 #[derive(Debug, clap::Args)]

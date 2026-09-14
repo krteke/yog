@@ -1,5 +1,5 @@
 use super::args::{Arg, ArgsExt, VideoOption};
-use std::{ffi::OsString, num::NonZeroU64, path::PathBuf};
+use std::{ffi::OsString, num::NonZeroU64, ops::RangeInclusive, path::PathBuf};
 
 #[cfg(feature = "clap")]
 mod cli;
@@ -199,7 +199,7 @@ impl Default for VideoEncoding {
 }
 
 impl VideoEncoding {
-    pub(super) fn name(&self) -> &'static str {
+    pub fn name(&self) -> &'static str {
         match self {
             Self::X264 { .. } => "libx264",
             Self::X265 { .. } => "libx265",
@@ -224,8 +224,33 @@ impl VideoEncoding {
         }
     }
 
-    pub(super) fn append_options(&self, args: &mut Vec<OsString>) {
-        let rate = match self {
+    pub fn quality_range(&self) -> RangeInclusive<u8> {
+        match &self {
+            Self::X264 { .. } | Self::X265 { .. } => 0..=51,
+            Self::SvtAv1 { .. } | Self::AomAv1 { .. } => 0..=63,
+            Self::Rav1e { .. } => 0..=255,
+            Self::Nvenc { codec, .. } => match codec {
+                VideoCodec::H264 | VideoCodec::Hevc => 0..=51,
+                VideoCodec::Av1 => 0..=63,
+            },
+            Self::Qsv { .. } => 1..=51,
+            Self::Vaapi {
+                codec: VideoCodec::H264,
+                ..
+            }
+            | Self::Vaapi {
+                codec: VideoCodec::Hevc,
+                ..
+            } => 0..=52,
+            Self::Vaapi {
+                codec: VideoCodec::Av1,
+                ..
+            } => 0..=255,
+        }
+    }
+
+    pub fn rate(&self) -> Option<RateControl> {
+        match self {
             Self::X264 { rate, .. }
             | Self::X265 { rate, .. }
             | Self::SvtAv1 { rate, .. }
@@ -234,7 +259,11 @@ impl VideoEncoding {
             | Self::Nvenc { rate, .. }
             | Self::Qsv { rate, .. }
             | Self::Vaapi { rate, .. } => *rate,
-        };
+        }
+    }
+
+    pub(super) fn append_options(&self, args: &mut Vec<OsString>) {
+        let rate = self.rate();
         let mut append = |option, value: OsString| args.add(Arg::Video { option, value });
         match rate {
             Some(RateControl::Bitrate(bitrate)) => {

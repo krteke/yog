@@ -8,6 +8,7 @@ mod progress;
 mod recursive;
 mod terminal;
 mod transcode;
+mod validate;
 mod verify;
 
 use anyhow::Context;
@@ -17,11 +18,18 @@ use std::process::ExitCode;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::sync::CancellationToken;
 
-use crate::error::RunError;
+use crate::{error::RunError, validate::Validate};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
-    let args = Args::parse();
+    let args = match Args::parse().validate() {
+        Ok(args) => args,
+        Err(error) => {
+            eprintln!("{error:#}");
+            return ExitCode::FAILURE;
+        }
+    };
+
     let recursive = args.recursive;
     let predict = args.predict;
     if let Err(error) = config::init(args.config.as_deref()) {

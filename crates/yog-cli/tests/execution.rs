@@ -90,6 +90,26 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn invalid_encoder_quality_is_rejected_before_external_tools_start() {
+    let fixture = Fixture::new("touch ffmpeg-started");
+    fixture.tool("ffprobe", "touch ffprobe-started");
+
+    let result = fixture
+        .command()
+        .args(["--encode-svt-av1", "--quality", "64"])
+        .output()
+        .unwrap();
+
+    assert_eq!(result.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&result.stderr),
+        "libsvtav1 quality must be in 0..=63, got 64\n"
+    );
+    assert!(!fixture.0.join("ffprobe-started").exists());
+    assert!(!fixture.0.join("ffmpeg-started").exists());
+}
+
+#[test]
 fn prediction_samples_the_real_plan_without_preparing_the_requested_output() {
     let fixture = Fixture::new(
         r#"printf '%s\n' "$*" >> ffmpeg-commands

@@ -267,6 +267,7 @@ esac"#,
             .unwrap();
         assert!(vmaf.contains("[0:4]crop=w=320:h=180"), "{vmaf}");
         assert!(vmaf.contains("[1:2]setpts=PTS-STARTPTS"), "{vmaf}");
+        assert!(vmaf.contains(":n_threads="), "{vmaf}");
         if expected_mode == "full" {
             assert!(!vmaf.contains("n_subsample="), "{vmaf}");
         } else {

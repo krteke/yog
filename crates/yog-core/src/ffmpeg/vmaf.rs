@@ -218,12 +218,18 @@ impl Ffmpeg {
         let subsample = n_subsample
             .map(|value| format!(":n_subsample={value}"))
             .unwrap_or_default();
+
+        let n_threads = std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1);
+
         let filter = format!(
             "[0:{distorted_stream_index}]crop=w={reference_width}:h={reference_height}:x=0:y=0:exact=1,setpts=PTS-STARTPTS[dist];\
              [1:{reference_stream_index}]setpts=PTS-STARTPTS[ref];\
-             [dist][ref]libvmaf={features}log_fmt=json:log_path={}:shortest=1{subsample}[out]",
+             [dist][ref]libvmaf={features}log_fmt=json:log_path={}:shortest=1:n_threads={n_threads}{subsample}[out]",
             escape_filter_path(&metrics_path),
         );
+
         let mut args: Vec<OsString> = Vec::new();
         args.extend([
             Arg::HideBanner,

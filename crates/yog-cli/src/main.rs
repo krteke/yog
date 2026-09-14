@@ -53,21 +53,44 @@ async fn main() -> ExitCode {
             async {
                 if recursive {
                     let tasks = recursive::discover(request, &transcoder, &diagnostics).await?;
+                    let total = tasks.len();
+                    let mut succeeded = 0;
+                    let mut failed = 0;
                     for (request, media) in tasks {
-                        if predict {
+                        let input = request.input.clone();
+                        diagnostics.begin_task();
+                        let result = if predict {
                             transcoder
                                 .predict_probed(request, media, &diagnostics)
-                                .await?;
+                                .await
                         } else {
-                            transcoder.run_probed(request, media, &diagnostics).await?;
+                            transcoder.run_probed(request, media, &diagnostics).await
+                        };
+                        match result {
+                            Ok(()) => succeeded += 1,
+                            Err(RunError::Failed(error)) => {
+                                failed += 1;
+                                diagnostics.task_error(&input, &error);
+                            }
+                            Err(RunError::Cancelled) => break,
                         }
                     }
+
+                    let cancelled = cancelled.is_cancelled();
+                    diagnostics.batch_summary(total, succeeded, failed, cancelled);
+                    return Ok(if cancelled {
+                        ExitCode::from(130)
+                    } else if failed > 0 {
+                        ExitCode::FAILURE
+                    } else {
+                        ExitCode::SUCCESS
+                    });
                 } else if predict {
                     transcoder.predict(request, &diagnostics).await?;
                 } else {
                     transcoder.run(request, &diagnostics).await?;
                 }
-                Ok(())
+                Ok(ExitCode::SUCCESS)
             }
             .await
         }
@@ -75,7 +98,7 @@ async fn main() -> ExitCode {
     };
 
     let exit = match result {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(exit) => exit,
         Err(RunError::Cancelled) => {
             diagnostics.write("cancelled\n".as_bytes());
             ExitCode::from(130)

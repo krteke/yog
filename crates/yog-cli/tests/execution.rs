@@ -2,6 +2,7 @@
 
 use std::{
     fs,
+    io::Read,
     os::unix::{fs::PermissionsExt, process::CommandExt},
     path::PathBuf,
     process::{Child, Command, Stdio},
@@ -395,6 +396,149 @@ printf '{"streams":%s,"format":{"format_name":"%s","duration":"1"}}' "$streams" 
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(stderr.contains("warning: skipping input/nested/notes.md because ffprobe failed"));
     assert!(stderr.contains("NOT-MEDIA"));
+    assert!(stderr.contains("batch summary: total 2 | succeeded 2 | failed 0"));
+}
+
+#[test]
+fn recursive_mode_continues_after_task_failures_and_exits_after_the_summary() {
+    let fixture = Fixture::new(
+        r#"previous=''
+source=''
+for argument do
+    if test "$previous" = -i; then source=$argument; fi
+    previous=$argument
+done
+printf '%s\n' "$source" >> started
+case "$source" in
+    input/bad.mkv) printf 'BAD-TRANSCODE\n' >&2; exit 9 ;;
+esac
+printf encoded > "$argument""#,
+    );
+    fs::create_dir(fixture.0.join("input")).unwrap();
+    for input in ["first.mkv", "bad.mkv", "last.mkv"] {
+        fs::write(fixture.0.join("input").join(input), b"video").unwrap();
+    }
+
+    let result = fixture
+        .recursive_command("output")
+        .arg("--copy")
+        .output()
+        .unwrap();
+
+    assert_eq!(result.status.code(), Some(1));
+    assert_eq!(
+        fs::read(fixture.0.join("output/first.mkv")).unwrap(),
+        b"encoded"
+    );
+    assert_eq!(
+        fs::read(fixture.0.join("output/last.mkv")).unwrap(),
+        b"encoded"
+    );
+    assert!(!fixture.0.join("output/bad.mkv").exists());
+    assert!(!fixture.0.join("output/bad.mkv.part").exists());
+    assert_eq!(
+        fs::read_to_string(fixture.0.join("started"))
+            .unwrap()
+            .lines()
+            .count(),
+        3,
+    );
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("failed: input/bad.mkv: transcode failed"),
+        "{stderr}"
+    );
+    assert_eq!(stderr.matches("BAD-TRANSCODE").count(), 1, "{stderr}");
+    assert!(
+        stderr.ends_with("batch summary: total 3 | succeeded 2 | failed 1\n"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn cancelling_recursive_mode_stops_scheduling_and_prints_the_summary() {
+    let _serial = PROCESS_CONTROL_TEST
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let fixture = Fixture::new(
+        r#"previous=''
+source=''
+for argument do
+    if test "$previous" = -i; then source=$argument; fi
+    previous=$argument
+done
+printf '%s\n' "$source" >> started
+if test ! -e completed-one; then
+    touch completed-one
+    printf encoded > "$argument"
+    exit 0
+fi
+printf '%s' "$$" > child-pid
+while :; do :; done"#,
+    );
+    fs::create_dir(fixture.0.join("input")).unwrap();
+    for input in ["first.mkv", "second.mkv", "third.mkv"] {
+        fs::write(fixture.0.join("input").join(input), b"video").unwrap();
+    }
+
+    let mut child = Running(
+        fixture
+            .recursive_command("output")
+            .arg("--copy")
+            .process_group(0)
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let started = Instant::now();
+    while !fixture.0.join("child-pid").exists() {
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "second batch task did not start"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        Command::new("kill")
+            .args(["-INT", &child.0.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let status = loop {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "batch cancellation did not complete"
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+    let mut stderr = String::new();
+    child
+        .0
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+
+    assert_eq!(status.code(), Some(130));
+    assert_eq!(
+        fs::read_to_string(fixture.0.join("started"))
+            .unwrap()
+            .lines()
+            .count(),
+        2,
+    );
+    assert_eq!(fs::read_dir(fixture.0.join("output")).unwrap().count(), 1);
+    assert!(
+        stderr.ends_with(
+            "batch summary: total 3 | succeeded 1 | failed 0 | not processed 2 | cancelled\n"
+        ),
+        "{stderr}"
+    );
 }
 
 #[test]

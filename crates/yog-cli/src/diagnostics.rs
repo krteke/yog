@@ -86,6 +86,10 @@ impl Diagnostics {
         }
     }
 
+    pub fn begin_task(&self) {
+        self.streamed.store(false, Ordering::Relaxed);
+    }
+
     pub fn predict(&self, input: &Path, prediction: &Prediction) {
         let mut report = String::new();
         if !self.verbose {
@@ -225,6 +229,31 @@ impl Diagnostics {
     pub fn error(&self, error: &anyhow::Error) {
         self.write(format!("{error:#}\n").as_bytes());
 
+        self.write_error_details(error);
+    }
+
+    pub fn task_error(&self, input: &Path, error: &anyhow::Error) {
+        self.write(format!("failed: {}: {error:#}\n", input.display()).as_bytes());
+
+        self.write_error_details(error);
+    }
+
+    pub fn batch_summary(&self, total: usize, succeeded: usize, failed: usize, cancelled: bool) {
+        let mut summary =
+            format!("batch summary: total {total} | succeeded {succeeded} | failed {failed}");
+        if cancelled {
+            write!(
+                summary,
+                " | not processed {} | cancelled",
+                total - succeeded - failed,
+            )
+            .unwrap();
+        }
+        summary.push('\n');
+        self.write(summary.as_bytes());
+    }
+
+    fn write_error_details(&self, error: &anyhow::Error) {
         let Some(error) = Self::program_error(error) else {
             return;
         };

@@ -6,7 +6,6 @@ mod error;
 mod output;
 mod progress;
 mod recursive;
-mod terminal;
 mod transcode;
 mod validate;
 mod verify;
@@ -39,16 +38,8 @@ async fn main() -> ExitCode {
 
     let (request, options) = args.into_request().unwrap_or_else(|error| error.exit());
 
-    let _terminal = match terminal::NonblockingStderr::new() {
-        Ok(terminal) => terminal,
-        Err(error) => {
-            eprintln!("{error:#}");
-            return ExitCode::FAILURE;
-        }
-    };
-
     let cancelled = CancellationToken::new();
-    let diagnostics = diagnostics::Diagnostics::new(options.verbose, cancelled.clone());
+    let diagnostics = diagnostics::Diagnostics::new(options.verbose);
     let transcoder = transcode::Transcoder::new(&options, cancelled.clone());
     let mut signal_task = None;
     let result = match signal(SignalKind::interrupt()).context("cannot register Ctrl+C handler") {
@@ -60,7 +51,7 @@ async fn main() -> ExitCode {
             }));
             async {
                 if recursive {
-                    let tasks = recursive::discover(request, &transcoder, &diagnostics).await?;
+                    let tasks = recursive::discover(request, &transcoder).await?;
                     let total = tasks.len();
                     let mut succeeded = 0;
                     let mut failed = 0;
@@ -108,7 +99,7 @@ async fn main() -> ExitCode {
     let exit = match result {
         Ok(exit) => exit,
         Err(RunError::Cancelled) => {
-            diagnostics.write("cancelled\n".as_bytes());
+            println!("cancelled");
             ExitCode::from(130)
         }
         Err(RunError::Failed(error)) => {
@@ -117,7 +108,6 @@ async fn main() -> ExitCode {
         }
     };
 
-    diagnostics.finish().await;
     if let Some(task) = signal_task {
         task.abort();
         let _ = task.await;

@@ -1,34 +1,21 @@
 use std::{
     fmt::Write as _,
-    io::{self, Write},
     path::Path,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc::{self, Sender},
-    },
-    thread,
-    time::Duration,
+    sync::atomic::{AtomicBool, Ordering},
 };
 
-use tokio::task::{JoinHandle, spawn_blocking};
-use tokio_util::sync::CancellationToken;
 use yog_core::ffmpeg::{
     prediction::Prediction,
     vmaf::{VmafOptions, VmafScore},
 };
 
-use crate::config;
-
 pub struct Diagnostics {
-    sender: Option<Sender<Vec<u8>>>,
-    worker: Option<JoinHandle<()>>,
-    stopping: CancellationToken,
     verbose: bool,
-    streamed: AtomicBool,
+    stderr_logged: AtomicBool,
 }
 
 impl Diagnostics {
-    pub fn new(verbose: bool, cancelled: CancellationToken) -> Self {
+    pub fn new(verbose: bool) -> Self {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(if verbose {
             "debug"
         } else {
@@ -38,56 +25,26 @@ impl Diagnostics {
         .format_target(false)
         .init();
 
-        let retry_interval =
-            Duration::from_millis(config::get().diagnostics_retry_interval_ms.get());
-
-        let (sender, receiver) = mpsc::channel::<Vec<u8>>();
-        let stopping = CancellationToken::new();
-        let stop = stopping.clone();
-
-        let worker = spawn_blocking(move || {
-            for bytes in receiver {
-                let mut remaining = bytes.as_slice();
-                while !remaining.is_empty() {
-                    let result = io::stderr().lock().write(remaining);
-                    match result {
-                        Ok(0) => return,
-                        Ok(count) => remaining = &remaining[count..],
-                        Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                            if stop.is_cancelled() || cancelled.is_cancelled() {
-                                return;
-                            }
-                            thread::sleep(retry_interval);
-                        }
-                        Err(_) => return,
-                    }
-                }
-            }
-        });
-
         Self {
-            sender: Some(sender),
-            worker: Some(worker),
-            stopping,
             verbose,
-            streamed: AtomicBool::new(false),
+            stderr_logged: AtomicBool::new(false),
         }
     }
 
-    pub fn write(&self, bytes: &[u8]) {
-        let _ = self.sender.as_ref().unwrap().send(bytes.to_owned());
-    }
-
-    pub fn ffmpeg(&self, bytes: &[u8]) {
-        if self.verbose {
-            self.streamed.store(true, Ordering::Relaxed);
-            self.write(bytes);
+    pub fn ffmpeg(&self, bytes: &[u8]) -> bool {
+        let message = String::from_utf8_lossy(bytes);
+        let message = message.trim_end_matches(['\r', '\n']);
+        if message.is_empty() || !log::log_enabled!(log::Level::Debug) {
+            return false;
         }
+
+        self.stderr_logged.store(true, Ordering::Relaxed);
+        log::debug!("{message}");
+        true
     }
 
     pub fn begin_task(&self) {
-        self.streamed.store(false, Ordering::Relaxed);
+        self.stderr_logged.store(false, Ordering::Relaxed);
     }
 
     pub fn predict(&self, input: &Path, prediction: &Prediction) {
@@ -110,8 +67,7 @@ impl Diagnostics {
             if let Some(psnr) = prediction.quality.psnr_y_db {
                 write!(report, " | PSNR-Y {:.3}dB", psnr.value).unwrap();
             }
-            report.push('\n');
-            self.write(report.as_bytes());
+            println!("{report}");
             return;
         }
 
@@ -201,7 +157,8 @@ impl Diagnostics {
             }
             report.push('\n');
         }
-        self.write(report.as_bytes());
+        report.pop();
+        println!("{report}");
     }
 
     pub fn vmaf(&self, output: &Path, score: VmafScore, options: VmafOptions) {
@@ -209,33 +166,30 @@ impl Diagnostics {
             .n_subsample
             .map(|value| format!("n_subsample={value}"))
             .unwrap_or_else(|| "full".to_owned());
-        self.write(
-            format!(
-                "vmaf: {} | score {:.3} | {mode}\n",
-                output.display(),
-                score.value,
-            )
-            .as_bytes(),
+        println!(
+            "vmaf: {} | score {:.3} | {mode}",
+            output.display(),
+            score.value,
         );
     }
 
-    pub fn vmaf_warning(&self, error: &anyhow::Error, stderr_streamed: bool) {
-        self.write(format!("warning: vmaf: {error:#}\n").as_bytes());
+    pub fn vmaf_warning(&self, error: &anyhow::Error, stderr_logged: bool) {
+        eprintln!("warning: vmaf: {error:#}");
         if let Some(error) = Self::program_error(error) {
-            self.write_program_stderr(error, stderr_streamed);
+            Self::print_program_stderr(error, stderr_logged);
         }
     }
 
     pub fn error(&self, error: &anyhow::Error) {
-        self.write(format!("{error:#}\n").as_bytes());
+        eprintln!("{error:#}");
 
-        self.write_error_details(error);
+        self.print_error_details(error);
     }
 
     pub fn task_error(&self, input: &Path, error: &anyhow::Error) {
-        self.write(format!("failed: {}: {error:#}\n", input.display()).as_bytes());
+        eprintln!("failed: {}: {error:#}", input.display());
 
-        self.write_error_details(error);
+        self.print_error_details(error);
     }
 
     pub fn batch_summary(&self, total: usize, succeeded: usize, failed: usize, cancelled: bool) {
@@ -249,19 +203,15 @@ impl Diagnostics {
             )
             .unwrap();
         }
-        summary.push('\n');
-        self.write(summary.as_bytes());
+        println!("{summary}");
     }
 
-    fn write_error_details(&self, error: &anyhow::Error) {
+    fn print_error_details(&self, error: &anyhow::Error) {
         let Some(error) = Self::program_error(error) else {
             return;
         };
 
-        self.write_program_stderr(error, self.streamed.load(Ordering::Relaxed));
-        if matches!(error.reason, yog_core::error::Failure::TimedOut) {
-            self.stopping.cancel();
-        }
+        Self::print_program_stderr(error, self.stderr_logged.load(Ordering::Relaxed));
     }
 
     fn program_error(error: &anyhow::Error) -> Option<&yog_core::error::Error> {
@@ -270,27 +220,13 @@ impl Diagnostics {
             .find_map(|cause| cause.downcast_ref::<yog_core::error::Error>())
     }
 
-    fn write_program_stderr(&self, error: &yog_core::error::Error, stderr_streamed: bool) {
-        if !error.stderr.is_empty() {
-            if !stderr_streamed {
-                self.write(&error.stderr);
-            }
-            if !error.stderr.ends_with(b"\n") {
-                self.write(b"\n");
-            }
+    fn print_program_stderr(error: &yog_core::error::Error, stderr_logged: bool) {
+        if error.stderr.is_empty() || stderr_logged {
+            return;
         }
-    }
-
-    pub async fn finish(mut self) {
-        self.sender.take();
-        if let Err(error) = self.worker.take().unwrap().await {
-            std::panic::resume_unwind(error.into_panic());
+        eprint!("{}", String::from_utf8_lossy(&error.stderr));
+        if !error.stderr.ends_with(b"\n") {
+            eprintln!();
         }
-    }
-}
-
-impl Drop for Diagnostics {
-    fn drop(&mut self) {
-        self.stopping.cancel();
     }
 }

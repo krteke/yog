@@ -1,5 +1,4 @@
 progress_tick_interval_ms = 100
-diagnostics_retry_interval_ms = 10
 
 [prediction]
 samples = 5

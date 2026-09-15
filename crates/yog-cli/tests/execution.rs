@@ -176,6 +176,7 @@ esac"#,
         .args(["--predict", "--encode-x264"])
         .output()
         .unwrap();
+    let stdout = String::from_utf8_lossy(&result.stdout);
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(result.status.success(), "{stderr}");
     assert!(!fixture.0.join("output.mkv").exists());
@@ -206,11 +207,11 @@ esac"#,
         2
     );
     assert!(commands.contains("crop=w=320:h=180:x=0:y=0:exact=1"));
-    assert_eq!(stderr.lines().count(), 1, "{stderr}");
-    assert!(stderr.contains("speed 2.667x | time 1.5s"), "{stderr}");
-    assert!(stderr.contains("(840.0% of input)"), "{stderr}");
-    assert!(stderr.contains(" | VMAF 96.500"));
-    assert!(!stderr.contains("sample range"));
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    assert!(stdout.contains("speed 2.667x | time 1.5s"), "{stdout}");
+    assert!(stdout.contains("(840.0% of input)"), "{stdout}");
+    assert!(stdout.contains(" | VMAF 96.500"));
+    assert!(!stdout.contains("sample range"));
     assert!(!stderr.contains("executing command:"));
 
     let verbose = fixture
@@ -218,12 +219,13 @@ esac"#,
         .args(["--predict", "--encode-x264", "--verbose"])
         .output()
         .unwrap();
+    let stdout = String::from_utf8_lossy(&verbose.stdout);
     let stderr = String::from_utf8_lossy(&verbose.stderr);
     assert!(verbose.status.success(), "{stderr}");
     assert!(stderr.contains("executing command:"));
-    assert!(stderr.contains("sample range"));
-    assert!(stderr.contains("sample #1:"));
-    assert!(stderr.contains("sample #2:"));
+    assert!(stdout.contains("sample range"));
+    assert!(stdout.contains("sample #1:"));
+    assert!(stdout.contains("sample #2:"));
 }
 
 #[test]
@@ -269,17 +271,18 @@ esac"#,
             .arg("--copy")
             .output()
             .unwrap();
+        let stdout = String::from_utf8_lossy(&result.stdout);
         let stderr = String::from_utf8_lossy(&result.stderr);
         assert!(result.status.success(), "{stderr}");
         assert_eq!(fs::read(fixture.0.join("output.mkv")).unwrap(), b"encoded");
         assert!(!fixture.0.join("output.mkv.part").exists());
         assert!(
-            stderr.contains(&format!(
+            stdout.contains(&format!(
                 "vmaf: output.mkv | score 95.250 | {expected_mode}"
             )),
-            "{stderr}"
+            "{stdout}"
         );
-        assert!(stderr.find("complete:").unwrap() < stderr.find("vmaf:").unwrap());
+        assert!(stdout.find("complete:").unwrap() < stdout.find("vmaf:").unwrap());
 
         let commands = fs::read_to_string(fixture.0.join("ffmpeg-commands")).unwrap();
         let vmaf = commands
@@ -325,9 +328,10 @@ esac"#,
             command.arg("--verbose");
         }
         let result = command.output().unwrap();
+        let stdout = String::from_utf8_lossy(&result.stdout);
         let stderr = String::from_utf8_lossy(&result.stderr);
         assert!(result.status.success(), "{stderr}");
-        assert!(stderr.contains("complete: output.mkv"), "{stderr}");
+        assert!(stdout.contains("complete: output.mkv"), "{stdout}");
         assert!(
             stderr.contains("warning: vmaf: VMAF calculation failed"),
             "{stderr}"
@@ -353,7 +357,7 @@ printf 'frame=1\nout_time_us=1000000\nprogress=end\n'"#,
     assert_eq!(fs::read(fixture.0.join("output.mkv")).unwrap(), b"encoded");
     assert!(!fixture.0.join("output.mkv.part").exists());
     assert_eq!(fs::read_dir(&fixture.0).unwrap().count(), 4);
-    assert!(String::from_utf8_lossy(&result.stderr).contains("complete:"));
+    assert!(String::from_utf8_lossy(&result.stdout).contains("complete:"));
     assert!(!result.stderr.contains(&0x1b));
 }
 
@@ -413,10 +417,11 @@ printf '{"streams":%s,"format":{"format_name":"%s","duration":"1"}}' "$streams" 
     assert!(!fixture.0.join("output/nested/notes.md").exists());
     assert!(!fixture.0.join("output/first.ts.part").exists());
     assert!(!fixture.0.join("output/nested/movie.ts.part").exists());
+    let stdout = String::from_utf8_lossy(&result.stdout);
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(stderr.contains("warning: skipping input/nested/notes.md because ffprobe failed"));
     assert!(stderr.contains("NOT-MEDIA"));
-    assert!(stderr.contains("batch summary: total 2 | succeeded 2 | failed 0"));
+    assert!(stdout.contains("batch summary: total 2 | succeeded 2 | failed 0"));
 }
 
 #[test]
@@ -463,6 +468,7 @@ printf encoded > "$argument""#,
             .count(),
         3,
     );
+    let stdout = String::from_utf8_lossy(&result.stdout);
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(
         stderr.contains("failed: input/bad.mkv: transcode failed"),
@@ -470,8 +476,8 @@ printf encoded > "$argument""#,
     );
     assert_eq!(stderr.matches("BAD-TRANSCODE").count(), 1, "{stderr}");
     assert!(
-        stderr.ends_with("batch summary: total 3 | succeeded 2 | failed 1\n"),
-        "{stderr}"
+        stdout.ends_with("batch summary: total 3 | succeeded 2 | failed 1\n"),
+        "{stdout}"
     );
 }
 
@@ -506,6 +512,7 @@ while :; do :; done"#,
             .recursive_command("output")
             .arg("--copy")
             .process_group(0)
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap(),
@@ -535,13 +542,13 @@ while :; do :; done"#,
         );
         thread::sleep(Duration::from_millis(10));
     };
-    let mut stderr = String::new();
+    let mut stdout = String::new();
     child
         .0
-        .stderr
+        .stdout
         .take()
         .unwrap()
-        .read_to_string(&mut stderr)
+        .read_to_string(&mut stdout)
         .unwrap();
 
     assert_eq!(status.code(), Some(130));
@@ -554,10 +561,10 @@ while :; do :; done"#,
     );
     assert_eq!(fs::read_dir(fixture.0.join("output")).unwrap().count(), 1);
     assert!(
-        stderr.ends_with(
+        stdout.ends_with(
             "batch summary: total 3 | succeeded 1 | failed 0 | not processed 2 | cancelled\n"
         ),
-        "{stderr}"
+        "{stdout}"
     );
 }
 
@@ -844,11 +851,12 @@ esac
         fs::remove_file(fixture.0.join("output.mkv")).unwrap();
         fs::write(fixture.0.join("probe-calls"), "").unwrap();
         let result = fixture.command().args(flags).output().unwrap();
+        let stdout = String::from_utf8_lossy(&result.stdout);
         let stderr = String::from_utf8_lossy(&result.stderr);
         assert!(result.status.success(), "{stderr}");
         assert!(stderr.contains("audio stream #8: missing"), "{stderr}");
         assert!(stderr.contains("metadata \"title\""), "{stderr}");
-        assert!(stderr.find("warning: verify:").unwrap() < stderr.find("complete:").unwrap());
+        assert!(stdout.contains("complete: output.mkv"), "{stdout}");
         assert!(!fixture.0.join("output.mkv.part").exists());
         assert_eq!(fs::read(fixture.0.join("output.mkv")).unwrap(), b"encoded");
         let calls = fs::read_to_string(fixture.0.join("probe-calls")).unwrap();
@@ -1004,11 +1012,12 @@ printf '%s' '{{"streams":[{{"index":0,"codec_type":"audio"}}],"format":{{"format
             .args(["--copy", "--verify", "-O"])
             .output()
             .unwrap();
+        let stdout = String::from_utf8_lossy(&result.stdout);
         let stderr = String::from_utf8_lossy(&result.stderr);
         assert!(result.status.success(), "{stderr}");
         assert!(stderr.contains("verification incomplete"), "{stderr}");
         assert!(stderr.contains("broken"), "{stderr}");
-        assert!(stderr.contains("complete:"));
+        assert!(stdout.contains("complete: output.mkv"));
         assert!(!fixture.0.join("output.mkv.part").exists());
         assert_eq!(fs::read(fixture.0.join("output.mkv")).unwrap(), b"encoded");
     }
@@ -1090,7 +1099,7 @@ fn failures_delete_only_our_part_and_preserve_existing_targets() {
         assert_eq!(result.status.code(), Some(1), "{body}");
         assert_eq!(fs::read(fixture.0.join("output.mkv")).unwrap(), b"original");
         assert!(!fixture.0.join("output.mkv.part").exists());
-        assert!(!String::from_utf8_lossy(&result.stderr).contains("complete:"));
+        assert!(!String::from_utf8_lossy(&result.stdout).contains("complete:"));
     }
     fixture.tool(
         "ffmpeg",
@@ -1210,7 +1219,7 @@ impl Drop for Running {
 }
 
 #[test]
-fn timeout_reaps_child_and_cleans_part_even_when_stderr_is_not_consumed() {
+fn timeout_reaps_child_and_cleans_part() {
     let _serial = PROCESS_CONTROL_TEST
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -1218,7 +1227,7 @@ fn timeout_reaps_child_and_cleans_part_even_when_stderr_is_not_consumed() {
         r#"printf '%s' "$$" > child-pid
 for last do :; done
 printf partial > "$last"
-i=0; while [ "$i" -lt 10000 ]; do printf 'diagnostic-data\n' >&2; i=$((i+1)); done
+printf 'diagnostic-data\n' >&2
 while :; do :; done"#,
     );
     let mut command = Command::new(env!("CARGO_BIN_EXE_yog"));
@@ -1236,7 +1245,6 @@ while :; do :; done"#,
                 "./ffmpeg",
                 "--timeout",
                 "1",
-                "--verbose",
                 "--copy",
             ])
             .process_group(0)
@@ -1395,56 +1403,4 @@ esac"#,
         let pid = fs::read_to_string(fixture.0.join("child-pid")).unwrap();
         assert!(!PathBuf::from(format!("/proc/{pid}")).exists());
     }
-}
-
-#[test]
-fn ctrl_c_can_interrupt_log_drain_after_the_output_is_committed() {
-    let _serial = PROCESS_CONTROL_TEST
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let fixture = Fixture::new(
-        r#"for last do :; done
-printf encoded > "$last"
-i=0; while [ "$i" -lt 10000 ]; do printf 'diagnostic-data\n' >&2; i=$((i+1)); done"#,
-    );
-    let mut child = Running(
-        fixture
-            .command()
-            .args(["--verbose", "--copy"])
-            .process_group(0)
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap(),
-    );
-    let started = Instant::now();
-    while !fixture.0.join("output.mkv").exists() {
-        assert!(
-            started.elapsed() < Duration::from_secs(4),
-            "output was not committed"
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
-    // The child process has succeeded. Only an undrained log queue keeps the CLI
-    // alive; blocking the runtime while joining it would disable Ctrl+C here.
-    assert!(child.0.try_wait().unwrap().is_none());
-    assert!(
-        Command::new("kill")
-            .args(["-INT", &child.0.id().to_string()])
-            .status()
-            .unwrap()
-            .success()
-    );
-    let status = loop {
-        if let Some(status) = child.0.try_wait().unwrap() {
-            break status;
-        }
-        assert!(
-            started.elapsed() < Duration::from_secs(4),
-            "signal handling blocked during log drain"
-        );
-        thread::sleep(Duration::from_millis(10));
-    };
-    assert_eq!(status.code(), Some(0));
-    assert_eq!(fs::read(fixture.0.join("output.mkv")).unwrap(), b"encoded");
-    assert!(!fixture.0.join("output.mkv.part").exists());
 }

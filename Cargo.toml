@@ -11,7 +11,7 @@ yog-cli = { path = "crates/yog-cli" }
 yog-core = { path = "crates/yog-core" }
 yog-tui = { path = "crates/yog-tui" }
 
-clap = "4.6.6"
+clap = "4.6.7"
 ratatui = "0.30.2"
 serde = "1.0.229"
 serde_json = "1.0.151"

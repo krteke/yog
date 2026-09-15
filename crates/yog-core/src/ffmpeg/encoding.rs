@@ -141,21 +141,24 @@ pub enum VideoEncoding {
     SvtAv1 {
         #[cfg_attr(feature = "clap", command(flatten))]
         rate: Option<RateControl>,
-        #[cfg_attr(feature = "clap", arg(long, short))]
+        #[cfg_attr(feature = "clap", arg(long, short, value_parser = clap::value_parser!(u8).range(0..=13)))]
+        /// [range: 0-13]
         preset: Option<u8>,
     },
     #[cfg_attr(feature = "clap", command(long_flag = "encode-aom-av1"))]
     AomAv1 {
         #[cfg_attr(feature = "clap", command(flatten))]
         rate: Option<RateControl>,
-        #[cfg_attr(feature = "clap", arg(long, short))]
+        #[cfg_attr(feature = "clap", arg(long, short = 'u', value_parser = clap::value_parser!(u8).range(0..=8)))]
+        /// [range: 0-8]
         cpu_used: Option<u8>,
     },
     #[cfg_attr(feature = "clap", command(long_flag = "encode-rav1e"))]
     Rav1e {
         #[cfg_attr(feature = "clap", command(flatten))]
         rate: Option<RateControl>,
-        #[cfg_attr(feature = "clap", arg(long, short))]
+        #[cfg_attr(feature = "clap", arg(long, short, value_parser = clap::value_parser!(u8).range(0..=10)))]
+        /// [range: 0-10]
         speed: Option<u8>,
     },
     #[cfg_attr(feature = "clap", command(long_flag = "encode-nvenc"))]
@@ -260,6 +263,20 @@ impl VideoEncoding {
             | Self::Qsv { rate, .. }
             | Self::Vaapi { rate, .. } => *rate,
         }
+    }
+
+    pub fn set_quality(&mut self, quality: u8) {
+        let rate = match self {
+            Self::X264 { rate, .. }
+            | Self::X265 { rate, .. }
+            | Self::SvtAv1 { rate, .. }
+            | Self::AomAv1 { rate, .. }
+            | Self::Rav1e { rate, .. }
+            | Self::Nvenc { rate, .. }
+            | Self::Qsv { rate, .. }
+            | Self::Vaapi { rate, .. } => rate,
+        };
+        *rate = Some(RateControl::Quality(quality));
     }
 
     pub(super) fn append_options(&self, args: &mut Vec<OsString>) {

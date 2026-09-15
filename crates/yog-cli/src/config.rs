@@ -15,7 +15,6 @@ static CONFIG: OnceLock<Config> = OnceLock::new();
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub progress_tick_interval_ms: NonZeroU64,
-    pub diagnostics_retry_interval_ms: NonZeroU64,
     pub prediction: Prediction,
 }
 
@@ -62,7 +61,6 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             progress_tick_interval_ms: NonZeroU64::new(100).unwrap(),
-            diagnostics_retry_interval_ms: NonZeroU64::new(10).unwrap(),
             prediction: Prediction::default(),
         }
     }
@@ -112,12 +110,7 @@ mod tests {
     fn partial_config_keeps_defaults_and_preserves_explicit_zero_ticks() {
         let config: Config = toml::from_str("progress_tick_interval_ms = 1").unwrap();
         assert_eq!(config.progress_tick_interval_ms.get(), 1);
-        assert_eq!(config.diagnostics_retry_interval_ms.get(), 10);
         assert_eq!(config.prediction.samples.get(), 5);
         assert_eq!(config.prediction.sample_sec, Duration::from_secs_f64(2.0));
-
-        let config: Config = toml::from_str("diagnostics_retry_interval_ms = 25").unwrap();
-        assert_eq!(config.progress_tick_interval_ms.get(), 100);
-        assert_eq!(config.diagnostics_retry_interval_ms.get(), 25);
     }
 }

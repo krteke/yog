@@ -119,7 +119,7 @@ impl Transcoder {
         let result = self
             .ffmpeg
             .predict(&self.probe, &request, &media, options, |bytes| {
-                diagnostics.ffmpeg(bytes)
+                diagnostics.ffmpeg(bytes);
             })
             .await
             .context("prediction failed")?;
@@ -155,7 +155,9 @@ impl Transcoder {
         command
             .run(
                 |record| progress.update(record),
-                |bytes| diagnostics.ffmpeg(bytes),
+                |bytes| {
+                    diagnostics.ffmpeg(bytes);
+                },
             )
             .await
             .context("transcode failed")?;
@@ -202,7 +204,7 @@ impl Transcoder {
         }
 
         for warning in warnings {
-            diagnostics.write(format!("warning: verify: {warning}\n").as_bytes());
+            eprintln!("warning: verify: {warning}");
         }
 
         if self.ffmpeg.cancellation().is_cancelled() {
@@ -212,11 +214,11 @@ impl Transcoder {
         output
             .publish()
             .with_context(|| format!("cannot publish output {}", target.display()))?;
-        diagnostics.write(format!("complete: {}\n", target.display()).as_bytes());
+        println!("complete: {}", target.display());
 
         if let Some(options) = self.vmaf {
             let progress = Display::calculating_vmaf(self.verbose);
-            let mut stderr_streamed = false;
+            let mut stderr_logged = false;
             let result = self
                 .ffmpeg
                 .vmaf(
@@ -226,8 +228,7 @@ impl Transcoder {
                     &target,
                     options,
                     |bytes| {
-                        stderr_streamed |= self.verbose && !bytes.is_empty();
-                        diagnostics.ffmpeg(bytes);
+                        stderr_logged |= diagnostics.ffmpeg(bytes);
                     },
                 )
                 .await
@@ -237,7 +238,7 @@ impl Transcoder {
                 Ok(score) => diagnostics.vmaf(&target, score, options),
                 Err(error) => match RunError::from(error) {
                     RunError::Cancelled => return Err(RunError::Cancelled),
-                    RunError::Failed(error) => diagnostics.vmaf_warning(&error, stderr_streamed),
+                    RunError::Failed(error) => diagnostics.vmaf_warning(&error, stderr_logged),
                 },
             }
         }

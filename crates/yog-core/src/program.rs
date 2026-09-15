@@ -73,7 +73,7 @@ impl Command<'_> {
             return Err(failure);
         }
 
-        log::debug!("executing command: {self}");
+        log::info!("executing command: {self}");
         let mut child = TokioCommand::new(&self.program.path)
             .args(&self.args)
             .stdin(Stdio::null())

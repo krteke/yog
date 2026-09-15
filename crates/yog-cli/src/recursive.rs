@@ -1,4 +1,4 @@
-use crate::{diagnostics::Diagnostics, error::RunError, transcode::Transcoder};
+use crate::{error::RunError, transcode::Transcoder};
 use anyhow::Context;
 use clap::ValueEnum;
 use rustix::path::Arg;
@@ -9,7 +9,6 @@ use yog_core::{ffmpeg::plan::TranscodeRequest, ffprobe::types::MediaInfo};
 pub async fn discover(
     template: TranscodeRequest,
     transcoder: &Transcoder,
-    diagnostics: &Diagnostics,
 ) -> Result<Vec<(TranscodeRequest, MediaInfo)>, RunError> {
     if !template.input.is_dir() {
         return Err(RunError::Failed(anyhow::anyhow!(
@@ -53,7 +52,7 @@ pub async fn discover(
                         warning.push('\n');
                     }
                 }
-                diagnostics.write(warning.as_bytes());
+                eprint!("{warning}");
                 continue;
             }
         };

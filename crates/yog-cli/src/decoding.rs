@@ -5,11 +5,26 @@ use yog_core::ffmpeg::decoding::DecodingBackend;
 #[derive(Debug, clap::Args)]
 #[group(id = "decoding", multiple = false)]
 pub struct DecodingArgs {
-    #[arg(long = "decode-vaapi", global = true, require_equals = true)]
+    #[arg(
+        long = "decode-vaapi",
+        global = true,
+        require_equals = true,
+        value_name = "DEVICE"
+    )]
     vaapi: Option<Option<OsString>>,
-    #[arg(long = "decode-cuda", global = true, require_equals = true)]
+    #[arg(
+        long = "decode-cuda",
+        global = true,
+        require_equals = true,
+        value_name = "DEVICE"
+    )]
     cuda: Option<Option<OsString>>,
-    #[arg(long = "decode-qsv", global = true, require_equals = true)]
+    #[arg(
+        long = "decode-qsv",
+        global = true,
+        require_equals = true,
+        value_name = "DEVICE"
+    )]
     qsv: Option<Option<OsString>>,
 }
 

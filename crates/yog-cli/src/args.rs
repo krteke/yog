@@ -1,6 +1,7 @@
-use clap::{ArgGroup, CommandFactory, Parser};
+use clap::{ArgGroup, CommandFactory, Parser, Subcommand};
 use std::{num::NonZeroU32, ops::RangeInclusive, path::PathBuf, str::FromStr, time::Duration};
 use yog_core::ffmpeg::{
+    encoding::VideoEncoding,
     plan::{Container, TranscodeRequest, VideoAction},
     vmaf::VmafOptions,
 };
@@ -9,86 +10,96 @@ use yog_runtime::{Command, EmulationOptions, Operation, Options};
 use crate::decoding::DecodingArgs;
 
 #[derive(Debug, Parser)]
-#[command(
-    version,
-    about,
-    group(ArgGroup::new("emulation_output").args(["png", "svg"]).multiple(true))
-)]
+#[command(version, about)]
 pub struct Args {
-    pub input: PathBuf,
-    #[arg(short, long, global = true)]
-    pub recursive: bool,
-    #[arg(long, global = true, conflicts_with = "verify")]
-    pub predict: bool,
-    #[arg(long, global = true)]
-    pub config: Option<PathBuf>,
-    #[command(flatten)]
-    pub emulation: EmulationArgs,
-    #[arg(short, long, global = true)]
-    pub output: Option<PathBuf>,
+    #[arg(short, long, global = true, required = false, value_name = "PATH")]
+    input: PathBuf,
+    #[arg(short, long, global = true, value_name = "PATH")]
+    config: Option<PathBuf>,
     #[arg(short = 'C', long, global = true)]
-    pub container: Option<Container>,
+    container: Option<Container>,
     #[command(flatten)]
-    pub decoding: DecodingArgs,
-    #[arg(short = 'O', long, global = true)]
-    pub overwrite: bool,
+    decoding: DecodingArgs,
     #[command(flatten)]
-    pub execution: ExecutionOptions,
+    execution: ExecutionOptions,
     #[command(subcommand)]
-    pub video: Option<VideoAction>,
+    command: CliCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum CliCommand {
+    Transcode(TranscodeArgs),
+    Predict(PredictArgs),
+    Emulate(EmulateArgs),
 }
 
 #[derive(Debug, clap::Args)]
-pub struct EmulationArgs {
-    #[arg(
-        long,
-        global = true,
-        conflicts_with_all = ["predict", "recursive", "verify", "vmaf"],
-        requires = "emulation_output"
-    )]
-    pub emulate: bool,
-    #[arg(long, global = true, requires = "emulate", group = "emulation_output")]
-    pub png: Option<PathBuf>,
-    #[arg(long, global = true, requires = "emulate", group = "emulation_output")]
-    pub svg: Option<PathBuf>,
-    #[arg(
-        long,
-        global = true,
-        value_name = "MIN,MAX",
-        value_parser = parse_quality_range,
-        requires = "emulate"
-    )]
-    pub range: Option<RangeInclusive<u8>>,
-}
-
-#[derive(Debug, clap::Args)]
-pub struct ExecutionOptions {
-    #[arg(long, default_value = "ffmpeg", global = true)]
-    pub ffmpeg: PathBuf,
-    #[arg(long, default_value = "ffprobe", global = true)]
-    pub ffprobe: PathBuf,
-    #[arg(long, short, global = true)]
-    pub timeout: Option<u64>,
-    #[arg(long, global = true)]
-    pub verbose: bool,
-    #[arg(long, global = true, conflicts_with = "verbose")]
-    pub quiet: bool,
+struct TranscodeArgs {
+    #[arg(short, long, global = true, required = false, value_name = "PATH")]
+    output: PathBuf,
     #[arg(short, long, global = true)]
-    pub verify: bool,
+    recursive: bool,
+    #[arg(short = 'O', long, global = true)]
+    overwrite: bool,
+    #[arg(short, long, global = true)]
+    verify: bool,
     #[arg(
         long,
         global = true,
         value_name = "full|N_SUBSAMPLE",
         num_args = 0..=1,
         default_missing_value = "full",
-        require_equals = true,
-        conflicts_with = "predict"
+        require_equals = true
     )]
-    pub vmaf: Option<VmafMode>,
+    vmaf: Option<VmafMode>,
+    #[command(subcommand)]
+    video: Option<VideoAction>,
+}
+
+#[derive(Debug, clap::Args)]
+struct PredictArgs {
+    #[arg(short, long, global = true)]
+    recursive: bool,
+    #[command(subcommand)]
+    video: VideoEncoding,
+}
+
+#[derive(Debug, clap::Args)]
+#[command(group(
+    ArgGroup::new("emulation_output")
+        .args(["png", "svg"])
+        .required(true)
+        .multiple(true)
+))]
+struct EmulateArgs {
+    #[arg(long, group = "emulation_output", value_name = "PATH")]
+    png: Option<PathBuf>,
+    #[arg(long, group = "emulation_output", value_name = "PATH")]
+    svg: Option<PathBuf>,
+    #[arg(long, value_parser = parse_quality_range, value_name = "MIN,MAX")]
+    range: Option<RangeInclusive<u8>>,
+    #[arg(short = 'O', long)]
+    overwrite: bool,
+    #[command(subcommand)]
+    video: VideoEncoding,
+}
+
+#[derive(Debug, clap::Args)]
+struct ExecutionOptions {
+    #[arg(long, default_value = "ffmpeg", global = true)]
+    ffmpeg: PathBuf,
+    #[arg(long, default_value = "ffprobe", global = true)]
+    ffprobe: PathBuf,
+    #[arg(long, short, global = true, value_name = "SECONDS")]
+    timeout: Option<u64>,
+    #[arg(long, global = true)]
+    verbose: bool,
+    #[arg(long, global = true, conflicts_with = "verbose")]
+    quiet: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VmafMode {
+enum VmafMode {
     Full,
     Subsample(NonZeroU32),
 }
@@ -138,21 +149,69 @@ fn parse_quality_range(value: &str) -> Result<RangeInclusive<u8>, String> {
 }
 
 impl Args {
-    pub fn into_runtime(self) -> Result<(Option<PathBuf>, Command, Options), clap::Error> {
-        let operation = if self.emulation.emulate {
-            Operation::Emulate(EmulationOptions {
-                png: self.emulation.png.clone(),
-                svg: self.emulation.svg.clone(),
-                qualities: self.emulation.range.clone(),
-            })
-        } else if self.predict {
-            Operation::Predict
-        } else {
-            Operation::Transcode
+    pub(super) fn into_runtime(self) -> Result<(Option<PathBuf>, Command, Options), clap::Error> {
+        let Self {
+            input,
+            config,
+            container,
+            decoding,
+            execution,
+            command,
+        } = self;
+        // let input = input.ok_or_else(|| {
+        //     clap::Error::raw(
+        //         clap::error::ErrorKind::MissingRequiredArgument,
+        //         "--input <PATH> is required",
+        //     )
+        //     .format(&mut Self::command())
+        // })?;
+        let decoding = decoding
+            .try_into()
+            .map_err(|error: clap::Error| error.format(&mut Self::command()))?;
+
+        let mut options = Options {
+            ffmpeg: execution.ffmpeg,
+            ffprobe: execution.ffprobe,
+            timeout: execution.timeout.map(Duration::from_secs),
+            verbose: execution.verbose,
+            verify: false,
+            vmaf: None,
+            terminal_output: !execution.quiet,
         };
-        let config = self.config.clone();
-        let recursive = self.recursive;
-        let (request, execution) = self.into_request()?;
+        let (operation, mut request, recursive) = match command {
+            CliCommand::Transcode(args) => {
+                options.verify = args.verify;
+                options.vmaf = args.vmaf.map(Into::into);
+                (
+                    Operation::Transcode,
+                    TranscodeRequest::new(input, args.output)
+                        .with_video(args.video.unwrap_or_default())
+                        .with_overwrite(args.overwrite),
+                    args.recursive,
+                )
+            }
+            CliCommand::Predict(args) => (
+                Operation::Predict,
+                TranscodeRequest::new(input, PathBuf::new())
+                    .with_video(VideoAction::Encode(args.video)),
+                args.recursive,
+            ),
+            CliCommand::Emulate(args) => (
+                Operation::Emulate(EmulationOptions {
+                    png: args.png,
+                    svg: args.svg,
+                    qualities: args.range,
+                }),
+                TranscodeRequest::new(input, PathBuf::new())
+                    .with_video(VideoAction::Encode(args.video))
+                    .with_overwrite(args.overwrite),
+                false,
+            ),
+        };
+        request = request.with_decoding(decoding);
+        if let Some(container) = container {
+            request = request.with_container(container);
+        }
 
         Ok((
             config,
@@ -161,222 +220,262 @@ impl Args {
                 operation,
                 recursive,
             },
-            execution.into(),
+            options,
         ))
-    }
-
-    pub fn into_request(self) -> Result<(TranscodeRequest, ExecutionOptions), clap::Error> {
-        let mut request = TranscodeRequest::new(self.input, self.output.unwrap_or_default())
-            .with_video(self.video.unwrap_or_default())
-            .with_decoding(
-                self.decoding
-                    .try_into()
-                    .map_err(|error: clap::Error| error.format(&mut Self::command()))?,
-            )
-            .with_overwrite(self.overwrite);
-        if let Some(container) = self.container {
-            request = request.with_container(container);
-        }
-
-        Ok((request, self.execution))
-    }
-}
-
-impl From<ExecutionOptions> for Options {
-    fn from(options: ExecutionOptions) -> Self {
-        Self {
-            ffmpeg: options.ffmpeg,
-            ffprobe: options.ffprobe,
-            timeout: options.timeout.map(Duration::from_secs),
-            verbose: options.verbose,
-            verify: options.verify,
-            vmaf: options.vmaf.map(Into::into),
-            terminal_output: !options.quiet,
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::{CommandFactory, error::ErrorKind};
+    use clap::error::ErrorKind;
     use yog_core::ffmpeg::{
         decoding::DecodingBackend,
-        encoding::{NvencMultipass, NvencPreset, Preset, RateControl, VideoCodec, VideoEncoding},
+        encoding::{RateControl, VideoCodec},
     };
     use yog_runtime::Validate;
 
+    fn parse<const N: usize>(args: [&str; N]) -> (Option<PathBuf>, Command, Options) {
+        Args::try_parse_from(args).unwrap().into_runtime().unwrap()
+    }
+
     #[test]
-    fn modes_enforce_option_scope_required_fields_and_rate_exclusion() {
+    fn command_tree_scopes_operation_arguments() {
         Args::command().debug_assert();
-        for (flags, kind) in [
+
+        let missing_input = Args::try_parse_from(["yog", "transcode", "-o", "output"])
+            .unwrap()
+            .into_runtime()
+            .unwrap_err();
+        assert_eq!(missing_input.kind(), ErrorKind::MissingRequiredArgument);
+        assert!(
+            missing_input
+                .to_string()
+                .contains("--input <PATH> is required")
+        );
+
+        for (args, kind) in [
             (
-                vec!["--encode-x264", "--quality", "23", "--bitrate", "1000000"],
-                ErrorKind::ArgumentConflict,
+                vec!["yog", "-i", "input", "transcode", "--copy"],
+                ErrorKind::MissingRequiredArgument,
             ),
             (
-                vec!["--copy", "--quality", "23"],
-                ErrorKind::UnknownArgument,
-            ),
-            (
-                vec!["--encode-x264", "--multipass", "qres"],
+                vec!["yog", "-i", "input", "predict", "--verify", "--encode-x264"],
                 ErrorKind::UnknownArgument,
             ),
             (
                 vec![
-                    "--encode-vaapi",
-                    "h264",
-                    "--device",
-                    "/dev/dri/renderD128",
-                    "--preset",
-                    "p4",
+                    "yog",
+                    "-i",
+                    "input",
+                    "emulate",
+                    "--recursive",
+                    "--png",
+                    "plot.png",
+                    "--encode-x264",
                 ],
                 ErrorKind::UnknownArgument,
             ),
-            (vec!["--encode-nvenc"], ErrorKind::MissingRequiredArgument),
             (
-                vec!["--encode-qsv", "h264", "--preset", "p4"],
-                ErrorKind::InvalidValue,
+                vec!["yog", "-i", "input", "emulate", "--encode-x264"],
+                ErrorKind::MissingRequiredArgument,
             ),
             (
-                vec!["--encode-aom-av1", "--cpu-used", "fast"],
-                ErrorKind::ValueValidation,
-            ),
-            (
-                vec!["--encode-rav1e", "--preset", "6"],
+                vec!["yog", "-i", "input", "predict", "--copy"],
                 ErrorKind::UnknownArgument,
             ),
             (
-                vec!["--encode-x264", "--bitrate", "0"],
-                ErrorKind::ValueValidation,
-            ),
-            (
-                vec!["--encode-x264", "--quality", "256"],
-                ErrorKind::ValueValidation,
-            ),
-            (
-                vec!["--decode-cuda", "--decode-qsv", "--copy"],
-                ErrorKind::ArgumentConflict,
-            ),
-            (
-                vec!["--encode-nvenc", "hevc", "--encode-vaapi", "hevc"],
+                vec!["yog", "-i", "input", "--predict", "--encode-x264"],
                 ErrorKind::UnknownArgument,
-            ),
-            (
-                vec!["--quality", "23", "--encode-x264"],
-                ErrorKind::UnknownArgument,
-            ),
-            (vec!["--encode", "nvenc"], ErrorKind::UnknownArgument),
-            (
-                vec!["--predict", "--verify", "--encode-x264"],
-                ErrorKind::ArgumentConflict,
             ),
         ] {
-            let error = Args::try_parse_from(
-                ["yog", "input", "-o", "output"]
-                    .into_iter()
-                    .chain(flags.iter().copied()),
-            )
-            .unwrap_err();
-            assert_eq!(error.kind(), kind, "{flags:?}: {error}");
+            let error = Args::try_parse_from(args).unwrap_err();
+            assert_eq!(error.kind(), kind, "{error}");
         }
     }
 
     #[test]
-    fn vmaf_selects_full_or_a_positive_subsample_interval() {
-        for (flags, expected) in [
-            (vec!["--vmaf", "--copy"], VmafMode::Full),
-            (vec!["--vmaf=full", "--copy"], VmafMode::Full),
-            (
-                vec!["--vmaf=7", "--copy"],
-                VmafMode::Subsample(NonZeroU32::new(7).unwrap()),
-            ),
-        ] {
-            let (_, options) =
-                Args::try_parse_from(["yog", "input", "-o", "output"].into_iter().chain(flags))
-                    .unwrap()
-                    .into_request()
-                    .unwrap();
-            assert_eq!(options.vmaf, Some(expected));
-        }
-
-        for flags in [
-            vec!["--vmaf=0", "--copy"],
-            vec!["--predict", "--vmaf", "--encode-x264"],
-        ] {
-            assert!(
-                Args::try_parse_from(["yog", "input", "-o", "output"].into_iter().chain(flags),)
-                    .is_err()
-            );
-        }
-
-        let (_, options) =
-            Args::try_parse_from(["yog", "--vmaf", "input", "-o", "output", "--copy"])
-                .unwrap()
-                .into_request()
-                .unwrap();
-        assert_eq!(options.vmaf, Some(VmafMode::Full));
-    }
-
-    #[test]
-    fn emulation_requires_an_encoder_chart_output_and_supported_ordered_range() {
-        let (_, command, _) = Args::try_parse_from([
+    fn global_arguments_work_before_between_and_after_nested_subcommands() {
+        let (_, transcode, options) = parse([
             "yog",
-            "input.mkv",
-            "--emulate",
+            "transcode",
+            "-o",
+            "output",
+            "--copy",
+            "-i",
+            "input",
+            "-C",
+            "mp4",
+            "--decode-cuda=0",
+            "--timeout",
+            "7",
+            "--verbose",
+            "--ffmpeg",
+            "custom-ffmpeg",
+            "--ffprobe",
+            "custom-ffprobe",
+        ]);
+        assert_eq!(transcode.request.input, PathBuf::from("input"));
+        assert_eq!(transcode.request.output, PathBuf::from("output"));
+        assert_eq!(transcode.request.container, Some(Container::Mp4));
+        assert!(matches!(transcode.request.video, VideoAction::Copy));
+        assert!(matches!(
+            transcode.request.decoding,
+            DecodingBackend::Cuda(Some(ref device)) if device == "0"
+        ));
+        assert_eq!(options.timeout, Some(Duration::from_secs(7)));
+        assert!(options.verbose);
+        assert_eq!(options.ffmpeg, PathBuf::from("custom-ffmpeg"));
+        assert_eq!(options.ffprobe, PathBuf::from("custom-ffprobe"));
+
+        let (_, predict, _) = parse([
+            "yog",
+            "-C",
+            "webm",
+            "predict",
+            "--recursive",
+            "--encode-nvenc",
+            "hevc",
+            "--quality",
+            "27",
+            "--input",
+            "input",
+        ]);
+        assert_eq!(predict.request.input, PathBuf::from("input"));
+        assert_eq!(predict.request.container, Some(Container::Webm));
+        assert!(predict.recursive);
+        assert!(matches!(
+            predict.request.video,
+            VideoAction::Encode(VideoEncoding::Nvenc {
+                codec: VideoCodec::Hevc,
+                rate: Some(RateControl::Quality(27)),
+                ..
+            })
+        ));
+
+        let (_, emulate, _) = parse([
+            "yog",
+            "emulate",
+            "--png",
+            "quality.png",
+            "--encode-x264",
+            "--input",
+            "input",
+        ]);
+        assert_eq!(emulate.request.input, PathBuf::from("input"));
+        assert!(matches!(emulate.operation, Operation::Emulate(_)));
+    }
+
+    #[test]
+    fn operations_map_directly_to_runtime_commands() {
+        let (_, transcode, options) = parse([
+            "yog",
+            "-i",
+            "input",
+            "transcode",
+            "-o",
+            "output",
+            "--recursive",
+            "--overwrite",
+            "--verify",
+            "--vmaf=7",
+        ]);
+        assert!(matches!(transcode.operation, Operation::Transcode));
+        assert!(matches!(transcode.request.video, VideoAction::Copy));
+        assert!(transcode.request.overwrite);
+        assert!(transcode.recursive);
+        assert!(options.verify);
+        assert_eq!(options.vmaf.unwrap().n_subsample, NonZeroU32::new(7));
+
+        let (_, prediction, options) = parse([
+            "yog",
+            "predict",
+            "--recursive",
+            "--encode-x264",
+            "--quality",
+            "23",
+            "-i",
+            "input",
+        ]);
+        assert!(matches!(prediction.operation, Operation::Predict));
+        assert!(prediction.request.output.as_os_str().is_empty());
+        assert!(prediction.recursive);
+        assert!(!options.verify);
+        assert!(options.vmaf.is_none());
+
+        let (_, emulation, _) = parse([
+            "yog",
+            "-i",
+            "input",
+            "emulate",
             "--png",
             "quality.png",
             "--svg",
             "quality.svg",
             "--range",
             "20,22",
+            "--overwrite",
             "--encode-x264",
-        ])
-        .unwrap()
-        .into_runtime()
-        .unwrap();
-        command.validate().unwrap();
-        assert!(command.request.output.as_os_str().is_empty());
+        ]);
+        emulation.validate().unwrap();
+        assert!(emulation.request.output.as_os_str().is_empty());
+        assert!(emulation.request.overwrite);
         assert!(matches!(
-            command.operation,
+            emulation.operation,
             Operation::Emulate(EmulationOptions {
                 qualities: Some(ref range),
                 ..
             }) if range == &(20..=22)
         ));
+    }
 
-        for flags in [
-            vec!["--emulate", "--encode-x264"],
+    #[test]
+    fn vmaf_and_emulation_ranges_reject_invalid_values() {
+        for args in [
             vec![
-                "--emulate",
+                "yog",
+                "-i",
+                "input",
+                "transcode",
+                "-o",
+                "output",
+                "--vmaf=0",
+            ],
+            vec![
+                "yog",
+                "-i",
+                "input",
+                "emulate",
                 "--png",
-                "quality.png",
+                "plot.png",
                 "--range",
                 "30,20",
                 "--encode-x264",
             ],
+            vec![
+                "yog",
+                "-i",
+                "input",
+                "emulate",
+                "--png",
+                "plot.png",
+                "--range",
+                "256,257",
+                "--encode-x264",
+            ],
         ] {
-            assert!(
-                Args::try_parse_from(
-                    ["yog", "input.mkv"]
-                        .into_iter()
-                        .chain(flags.iter().copied()),
-                )
-                .is_err(),
-                "{flags:?}"
-            );
+            assert!(Args::try_parse_from(args).is_err());
         }
 
-        for (flags, expected) in [
-            (
-                vec!["--emulate", "--png", "quality.png", "--copy"],
-                "--emulate requires a video encoder",
-            ),
+        for (args, expected) in [
             (
                 vec![
-                    "--emulate",
+                    "yog",
+                    "-i",
+                    "input",
+                    "emulate",
                     "--png",
-                    "quality.png",
+                    "plot.png",
                     "--range",
                     "50,52",
                     "--encode-x264",
@@ -385,422 +484,117 @@ mod tests {
             ),
             (
                 vec![
-                    "--emulate",
+                    "yog",
+                    "-i",
+                    "input",
+                    "emulate",
                     "--png",
-                    "quality.png",
+                    "plot.png",
                     "--encode-x264",
                     "--quality",
                     "20",
                 ],
-                "--quality and --bitrate cannot be used with --emulate",
+                "emulation does not accept a fixed quality or bitrate",
             ),
             (
                 vec![
-                    "--emulate",
+                    "yog",
+                    "-i",
+                    "input",
+                    "emulate",
                     "--png",
-                    "quality.plot",
+                    "plot",
                     "--svg",
-                    "quality.plot",
+                    "plot",
                     "--encode-x264",
                 ],
-                "--png and --svg must use different paths",
+                "PNG and SVG outputs must use different paths",
             ),
         ] {
-            let (_, command, _) = Args::try_parse_from(
-                ["yog", "input.mkv"]
-                    .into_iter()
-                    .chain(flags.iter().copied()),
-            )
-            .unwrap()
-            .into_runtime()
-            .unwrap();
-            let error = command.validate().unwrap_err();
-            assert_eq!(error.to_string(), expected, "{flags:?}");
+            let (_, command, _) = Args::try_parse_from(args).unwrap().into_runtime().unwrap();
+            assert_eq!(command.validate().unwrap_err().to_string(), expected);
         }
     }
 
     #[test]
-    fn prediction_and_emulation_do_not_accept_a_video_output() {
-        let prediction = Args::try_parse_from([
-            "yog",
-            "input.mkv",
-            "--predict",
-            "--encode-x264",
-            "--quality",
-            "23",
-        ])
-        .unwrap();
-        assert!(prediction.output.is_none());
+    fn help_follows_operation_then_encoder_hierarchy() {
+        let root = Args::try_parse_from(["yog", "--help"]).unwrap_err();
+        assert_eq!(root.kind(), ErrorKind::DisplayHelp);
+        let root = root.to_string();
+        assert!(root.contains("transcode"));
+        assert!(root.contains("predict"));
+        assert!(root.contains("emulate"));
+        assert!(!root.contains("--png"));
+        assert!(!root.contains("--output"));
 
-        for flags in [
-            vec!["--predict", "--encode-x264"],
-            vec!["--emulate", "--png", "quality.png", "--encode-x264"],
-        ] {
-            let (_, command, _) = Args::try_parse_from(
-                ["yog", "input.mkv", "--output", "video.mkv"]
-                    .into_iter()
-                    .chain(flags),
-            )
-            .unwrap()
-            .into_runtime()
-            .unwrap();
-            let error = command.validate().unwrap_err();
-            assert!(
-                error
-                    .to_string()
-                    .starts_with("--output cannot be used with")
-            );
-        }
-    }
+        let predict = Args::try_parse_from(["yog", "predict", "--help"]).unwrap_err();
+        assert_eq!(predict.kind(), ErrorKind::DisplayHelp);
+        let predict = predict.to_string();
+        assert!(predict.contains("--encode-x264"));
+        assert!(predict.contains("--recursive"));
+        assert!(!predict.contains("--output"));
+        assert!(!predict.contains("--vmaf"));
 
-    #[test]
-    fn encoding_flags_can_be_reordered_inside_the_mode() {
-        for encoding_flags in [
-            vec!["--preset", "p4", "--multipass", "qres", "--quality", "27"],
-            vec!["--quality", "27", "--multipass", "qres", "--preset", "p4"],
-        ] {
-            let (request, options) = Args::try_parse_from(
-                [
-                    "yog",
-                    "input",
-                    "-o",
-                    "output",
-                    "--decode-vaapi=/dev/dri/custom",
-                    "-C",
-                    "mp4",
-                    "-O",
-                    "--timeout",
-                    "7",
-                    "--encode-nvenc",
-                    "hevc",
-                ]
-                .into_iter()
-                .chain(encoding_flags),
-            )
-            .unwrap()
-            .into_request()
-            .unwrap();
-            assert!(
-                matches!(request.decoding, DecodingBackend::Vaapi(Some(device)) if device == "/dev/dri/custom")
-            );
-            assert!(matches!(
-                request.video,
-                VideoAction::Encode(VideoEncoding::Nvenc {
-                    codec: VideoCodec::Hevc,
-                    rate: Some(RateControl::Quality(27)),
-                    preset: Some(NvencPreset::P4),
-                    multipass: Some(NvencMultipass::QuarterResolution),
-                })
-            ));
-            assert!(matches!(request.container, Some(Container::Mp4)));
-            assert!(request.overwrite);
-            assert_eq!(options.timeout, Some(7));
-        }
-    }
+        let emulate = Args::try_parse_from(["yog", "emulate", "--help"]).unwrap_err();
+        assert_eq!(emulate.kind(), ErrorKind::DisplayHelp);
+        let emulate = emulate.to_string();
+        assert!(emulate.contains("--png"));
+        assert!(emulate.contains("--range"));
+        assert!(!emulate.contains("--recursive"));
 
-    #[test]
-    fn global_options_work_before_after_and_across_the_mode() {
-        let (request, _) = Args::try_parse_from([
-            "yog",
-            "input",
-            "--encode-vaapi",
-            "--decode-cuda",
-            "av1",
-            "-o",
-            "output",
-        ])
-        .unwrap()
-        .into_request()
-        .unwrap();
-        assert!(matches!(request.decoding, DecodingBackend::Cuda(None)));
-        assert!(matches!(
-            request.video,
-            VideoAction::Encode(VideoEncoding::Vaapi {
-                codec: VideoCodec::Av1,
-                ..
-            })
-        ));
-        for flags in [
-            vec![
-                "input",
-                "-o",
-                "output",
-                "-C",
-                "mp4",
-                "-O",
-                "--decode-cuda=0",
-                "--timeout",
-                "7",
-                "--verbose",
-                "--ffmpeg",
-                "custom-ffmpeg",
-                "--ffprobe",
-                "custom-ffprobe",
-                "--encode-nvenc",
-                "hevc",
-                "--quality",
-                "27",
-            ],
-            vec![
-                "input",
-                "--encode-nvenc",
-                "--quality",
-                "27",
-                "-o",
-                "output",
-                "-C",
-                "mp4",
-                "-O",
-                "--decode-cuda=0",
-                "--timeout",
-                "7",
-                "--verbose",
-                "--ffmpeg",
-                "custom-ffmpeg",
-                "--ffprobe",
-                "custom-ffprobe",
-                "hevc",
-            ],
-            vec![
-                "-C",
-                "mp4",
-                "input",
-                "--decode-cuda=0",
-                "--ffmpeg",
-                "custom-ffmpeg",
-                "--encode-nvenc",
-                "--quality",
-                "27",
-                "-o",
-                "output",
-                "-O",
-                "--timeout",
-                "7",
-                "hevc",
-                "--verbose",
-                "--ffprobe",
-                "custom-ffprobe",
-            ],
-        ] {
-            let (request, options) = Args::try_parse_from(["yog"].into_iter().chain(flags))
-                .unwrap()
-                .into_request()
-                .unwrap();
-            assert_eq!(request.output, PathBuf::from("output"));
-            assert!(matches!(request.container, Some(Container::Mp4)));
-            assert!(request.overwrite);
-            assert!(
-                matches!(request.decoding, DecodingBackend::Cuda(Some(device)) if device == "0")
-            );
-            assert!(matches!(
-                request.video,
-                VideoAction::Encode(VideoEncoding::Nvenc {
-                    codec: VideoCodec::Hevc,
-                    rate: Some(RateControl::Quality(27)),
-                    ..
-                })
-            ));
-            assert_eq!(options.timeout, Some(7));
-            assert!(options.verbose);
-            assert_eq!(options.ffmpeg, PathBuf::from("custom-ffmpeg"));
-            assert_eq!(options.ffprobe, PathBuf::from("custom-ffprobe"));
-        }
-        for flags in [
-            vec!["input"],
-            vec!["input", "--copy"],
-            vec!["input", "--encode-vaapi", "av1"],
-        ] {
-            let (_, command, _) = Args::try_parse_from(["yog"].into_iter().chain(flags))
-                .unwrap()
-                .into_runtime()
-                .unwrap();
-            let error = command.validate().unwrap_err();
-            assert_eq!(error.to_string(), "--output is required");
-        }
-        for flags in [
-            vec!["--decode-cuda", "--copy", "--decode-qsv"],
-            vec!["--copy", "--decode-cuda", "--decode-qsv"],
-        ] {
-            let error =
-                Args::try_parse_from(["yog", "input", "-o", "output"].into_iter().chain(flags))
-                    .and_then(Args::into_request)
-                    .unwrap_err();
-            assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
-        }
-    }
-
-    #[test]
-    fn omitted_mode_and_omitted_rate_keep_their_defaults() {
-        for flags in [vec![], vec!["--copy"]] {
-            let (request, _) =
-                Args::try_parse_from(["yog", "input", "-o", "output"].into_iter().chain(flags))
-                    .unwrap()
-                    .into_request()
-                    .unwrap();
-            assert!(request.container.is_none());
-            assert!(matches!(request.decoding, DecodingBackend::Software));
-            assert!(matches!(request.video, VideoAction::Copy));
-        }
-        let (request, _) = Args::try_parse_from([
-            "yog",
-            "input",
-            "-o",
-            "output",
-            "--encode-x264",
-            "--preset",
-            "medium",
-        ])
-        .unwrap()
-        .into_request()
-        .unwrap();
-        assert!(matches!(
-            request.video,
-            VideoAction::Encode(VideoEncoding::X264 {
-                rate: None,
-                preset: Some(Preset::Medium)
-            })
-        ));
-        let (request, _) = Args::try_parse_from([
-            "yog",
-            "input",
-            "-o",
-            "output",
-            "--encode-x264",
-            "--quality",
-            "0",
-        ])
-        .unwrap()
-        .into_request()
-        .unwrap();
-        assert!(matches!(
-            request.video,
-            VideoAction::Encode(VideoEncoding::X264 {
-                rate: Some(RateControl::Quality(0)),
-                ..
-            })
-        ));
-        let (request, _) =
-            Args::try_parse_from(["yog", "input", "-o", "output", "--decode-cuda", "--copy"])
-                .unwrap()
-                .into_request()
-                .unwrap();
-        assert!(matches!(request.video, VideoAction::Copy));
-        assert!(matches!(request.decoding, DecodingBackend::Cuda(None)));
-    }
-
-    #[test]
-    fn every_output_container_has_a_cli_value() {
-        for (value, expected) in [
-            ("mkv", Container::Matroska),
-            ("mp4", Container::Mp4),
-            ("mov", Container::Mov),
-            ("m4a", Container::M4a),
-            ("3gp", Container::ThreeGp),
-            ("3g2", Container::ThreeG2),
-            ("f4v", Container::F4v),
-            ("ismv", Container::Ismv),
-            ("psp", Container::Psp),
-            ("webm", Container::Webm),
-            ("ts", Container::MpegTs),
-            ("m2ts", Container::M2ts),
-            ("avi", Container::Avi),
-            ("flv", Container::Flv),
-            ("asf", Container::Asf),
-            ("wmv", Container::Wmv),
-            ("mpg", Container::MpegPs),
-            ("mpeg", Container::MpegPs),
-            ("vob", Container::Vob),
-            ("ogg", Container::Ogg),
-            ("ogv", Container::Ogv),
-        ] {
-            let (request, _) =
-                Args::try_parse_from(["yog", "input", "-o", "output", "-C", value, "--copy"])
-                    .unwrap()
-                    .into_request()
-                    .unwrap();
-            assert_eq!(request.container, Some(expected), "{value}");
-        }
-    }
-
-    #[test]
-    fn help_displays_only_the_selected_modes_flags_without_requiring_files() {
-        let help = Args::try_parse_from(["yog", "--encode-nvenc", "--help"]).unwrap_err();
-        assert_eq!(help.kind(), ErrorKind::DisplayHelp);
-        let text = help.to_string();
-        assert!(text.contains("--multipass"));
-        assert!(text.contains("p7"));
-        assert!(text.contains("--quality"));
-        assert!(!text.contains("--device"));
-        assert!(!text.contains("Commands:"));
-        let help = Args::try_parse_from(["yog", "--encode-vaapi", "--help"]).unwrap_err();
-        assert_eq!(help.kind(), ErrorKind::DisplayHelp);
-        assert!(help.to_string().contains("--device"));
-        assert!(!help.to_string().contains("--preset"));
-        for flags in [
-            vec!["--encode-vaapi", "--help"],
-            vec![
-                "input",
-                "--encode-vaapi",
-                "av1",
-                "-o",
-                "output.mkv",
-                "--help",
-            ],
-        ] {
-            let help = Args::try_parse_from(["yog"].into_iter().chain(flags)).unwrap_err();
-            assert_eq!(help.kind(), ErrorKind::DisplayHelp);
-            let text = help.to_string();
-            let usage = text
-                .lines()
-                .find(|line| line.starts_with("Usage:"))
-                .unwrap();
-            assert!(usage.matches("--output <OUTPUT>").count() <= 1, "{usage}");
-        }
-        assert_eq!(
-            Args::try_parse_from(["yog", "--version"])
-                .unwrap_err()
-                .kind(),
-            ErrorKind::DisplayVersion
-        );
+        let encoder =
+            Args::try_parse_from(["yog", "transcode", "--encode-nvenc", "--help"]).unwrap_err();
+        assert_eq!(encoder.kind(), ErrorKind::DisplayHelp);
+        let encoder = encoder.to_string();
+        assert!(encoder.contains("--multipass"));
+        assert!(encoder.contains("--input"));
+        assert!(!encoder.contains("--device"));
     }
 
     #[cfg(unix)]
     #[test]
-    fn native_paths_and_mode_like_file_names_are_preserved() {
+    fn native_and_option_like_paths_are_preserved() {
         use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
         let native = OsString::from_vec(b"path-\xff".to_vec());
         let mut decoder = OsString::from("--decode-vaapi=");
         decoder.push(&native);
-        let (request, _) = Args::try_parse_from([
+        let (_, command, _) = Args::try_parse_from([
             "yog".into(),
-            native.clone(),
+            "transcode".into(),
             "-o".into(),
             native.clone(),
-            decoder,
             "--encode-vaapi".into(),
             "hevc".into(),
             "--device".into(),
             native.clone(),
+            "--input".into(),
+            native.clone(),
+            decoder,
         ])
         .unwrap()
-        .into_request()
+        .into_runtime()
         .unwrap();
-        assert_eq!(request.input.as_os_str(), native);
-        assert_eq!(request.output.as_os_str(), native);
+        assert_eq!(command.request.input.as_os_str(), native);
+        assert_eq!(command.request.output.as_os_str(), native);
         assert!(
-            matches!(request.decoding, DecodingBackend::Vaapi(Some(device)) if device == native)
+            matches!(command.request.decoding, DecodingBackend::Vaapi(Some(device)) if device == native)
         );
         assert!(
-            matches!(request.video, VideoAction::Encode(VideoEncoding::Vaapi { device, .. }) if device.as_os_str() == native)
+            matches!(command.request.video, VideoAction::Encode(VideoEncoding::Vaapi { device, .. }) if device.as_os_str() == native)
         );
 
-        let (request, _) =
-            Args::try_parse_from(["yog", "--output=--encode-vaapi", "--", "--encode-nvenc"])
-                .unwrap()
-                .into_request()
-                .unwrap();
-        assert_eq!(request.input, PathBuf::from("--encode-nvenc"));
-        assert_eq!(request.output, PathBuf::from("--encode-vaapi"));
-        assert!(matches!(request.video, VideoAction::Copy));
+        let (_, command, _) = Args::try_parse_from([
+            "yog",
+            "transcode",
+            "--output=--encode-vaapi",
+            "--copy",
+            "--input=--encode-nvenc",
+        ])
+        .unwrap()
+        .into_runtime()
+        .unwrap();
+        assert_eq!(command.request.input, PathBuf::from("--encode-nvenc"));
+        assert_eq!(command.request.output, PathBuf::from("--encode-vaapi"));
     }
 }

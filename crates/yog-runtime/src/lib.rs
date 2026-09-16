@@ -42,7 +42,6 @@ pub struct Options {
     pub verbose: bool,
     pub verify: bool,
     pub vmaf: Option<VmafOptions>,
-    /// Controls direct diagnostics and progress output. Log records still use the `log` facade.
     pub terminal_output: bool,
 }
 

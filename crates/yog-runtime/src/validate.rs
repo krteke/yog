@@ -18,36 +18,43 @@ impl Validate for Command {
             Operation::Transcode => {
                 anyhow::ensure!(
                     !self.request.output.as_os_str().is_empty(),
-                    "--output is required"
+                    "transcoding requires an output path"
                 );
             }
             Operation::Predict => {
                 anyhow::ensure!(
                     self.request.output.as_os_str().is_empty(),
-                    "--output cannot be used with --predict"
+                    "prediction does not accept a video output"
+                );
+                anyhow::ensure!(
+                    matches!(self.request.video, VideoAction::Encode(_)),
+                    "prediction requires a video encoder"
                 );
             }
             Operation::Emulate(options) => {
-                anyhow::ensure!(!self.recursive, "--emulate cannot be used with --recursive");
+                anyhow::ensure!(
+                    !self.recursive,
+                    "emulation does not support recursive processing"
+                );
                 anyhow::ensure!(
                     self.request.output.as_os_str().is_empty(),
-                    "--output cannot be used with --emulate"
+                    "emulation does not accept a video output"
                 );
                 anyhow::ensure!(
                     options.png.is_some() || options.svg.is_some(),
-                    "--emulate requires --png or --svg"
+                    "emulation requires a PNG or SVG output"
                 );
                 anyhow::ensure!(
                     options.png.is_none() || options.png != options.svg,
-                    "--png and --svg must use different paths"
+                    "PNG and SVG outputs must use different paths"
                 );
 
                 let VideoAction::Encode(encoding) = &self.request.video else {
-                    anyhow::bail!("--emulate requires a video encoder");
+                    anyhow::bail!("emulation requires a video encoder");
                 };
                 anyhow::ensure!(
                     encoding.rate().is_none(),
-                    "--quality and --bitrate cannot be used with --emulate"
+                    "emulation does not accept a fixed quality or bitrate"
                 );
 
                 if let Some(range) = &options.qualities {

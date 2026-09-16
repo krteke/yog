@@ -51,6 +51,8 @@ impl Fixture {
             .env("XDG_CONFIG_HOME", &self.0)
             .env_remove("RUST_LOG")
             .args([
+                "transcode",
+                "-i",
                 "input.mkv",
                 "-o",
                 "output.mkv",
@@ -71,6 +73,7 @@ impl Fixture {
             .env("XDG_CONFIG_HOME", &self.0)
             .env_remove("RUST_LOG")
             .args([
+                "-i",
                 "input.mkv",
                 "--ffprobe",
                 "./ffprobe",
@@ -88,6 +91,8 @@ impl Fixture {
             .current_dir(&self.0)
             .env("XDG_CONFIG_HOME", &self.0)
             .args([
+                "transcode",
+                "-i",
                 "input",
                 "-o",
                 output,
@@ -217,7 +222,7 @@ esac"#,
 
     let result = fixture
         .analysis_command()
-        .args(["--predict", "--encode-x264"])
+        .args(["predict", "--encode-x264"])
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&result.stdout);
@@ -260,7 +265,7 @@ esac"#,
 
     let verbose = fixture
         .analysis_command()
-        .args(["--predict", "--encode-x264", "--verbose"])
+        .args(["predict", "--encode-x264", "--verbose"])
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&verbose.stdout);
@@ -279,9 +284,10 @@ esac"#,
         .env("XDG_CONFIG_HOME", &fixture.0)
         .env_remove("RUST_LOG")
         .args([
+            "predict",
+            "-i",
             "input-dir",
             "--recursive",
-            "--predict",
             "--encode-x264",
             "--ffprobe",
             "./ffprobe",
@@ -350,7 +356,7 @@ fi"#,
         .args([
             "--config",
             "emulation.toml",
-            "--emulate",
+            "emulate",
             "--png",
             "quality.png",
             "--svg",
@@ -1374,7 +1380,7 @@ fn probe_and_ffmpeg_diagnostics_are_emitted_once_in_both_output_modes() {
     );
     let result = fixture
         .analysis_command()
-        .args(["--predict", "--encode-vaapi", "av1", "--quality", "28"])
+        .args(["predict", "--encode-vaapi", "av1", "--quality", "28"])
         .output()
         .unwrap();
     let error = String::from_utf8_lossy(&result.stderr);
@@ -1417,6 +1423,8 @@ while :; do :; done"#,
             .current_dir(&fixture.0)
             .env("XDG_CONFIG_HOME", &fixture.0)
             .args([
+                "transcode",
+                "-i",
                 "input.mkv",
                 "-o",
                 "output.mkv",

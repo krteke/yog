@@ -204,6 +204,7 @@ mod tests {
         decoding::DecodingBackend,
         encoding::{NvencMultipass, NvencPreset, Preset, RateControl, VideoCodec, VideoEncoding},
     };
+    use yog_runtime::Validate;
 
     #[test]
     fn modes_enforce_option_scope_required_fields_and_rate_exclusion() {

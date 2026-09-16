@@ -18,18 +18,13 @@ use yog_core::ffmpeg::{plan::TranscodeRequest, vmaf::VmafOptions};
 
 pub use config::Config;
 pub use emulate::EmulationOptions;
+pub use validate::Validate;
 
 #[derive(Debug)]
 pub struct Command {
     pub request: TranscodeRequest,
     pub operation: Operation,
     pub recursive: bool,
-}
-
-impl Command {
-    pub fn validate(&self) -> anyhow::Result<()> {
-        validate::command(self)
-    }
 }
 
 #[derive(Debug, Clone)]

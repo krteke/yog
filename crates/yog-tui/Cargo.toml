@@ -9,6 +9,7 @@ yog-cli = { workspace = true, optional = true }
 yog-runtime.workspace = true
 
 ratatui.workspace = true
+tokio.workspace = true
 
 [features]
 default = ["cli"]

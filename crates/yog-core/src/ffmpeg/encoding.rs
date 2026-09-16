@@ -33,7 +33,7 @@ pub enum Preset {
 }
 
 impl Preset {
-    pub(super) fn value(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Ultrafast => "ultrafast",
             Self::Superfast => "superfast",
@@ -61,7 +61,7 @@ pub enum QsvPreset {
 }
 
 impl QsvPreset {
-    pub(super) fn value(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Veryfast => "veryfast",
             Self::Faster => "faster",
@@ -87,7 +87,7 @@ pub enum NvencPreset {
 }
 
 impl NvencPreset {
-    pub(super) fn value(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::P1 => "p1",
             Self::P2 => "p2",
@@ -111,7 +111,7 @@ pub enum NvencMultipass {
 }
 
 impl NvencMultipass {
-    pub(super) fn value(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Disabled => "disabled",
             Self::QuarterResolution => "qres",
@@ -252,6 +252,16 @@ impl VideoEncoding {
         }
     }
 
+    pub fn quality_parameter(&self) -> &'static str {
+        match self.quality_option() {
+            VideoOption::Crf => "CRF",
+            VideoOption::Cq => "CQ",
+            VideoOption::Qp => "QP",
+            VideoOption::GlobalQuality => "global_quality",
+            _ => unreachable!("quality controls only use quality-related video options"),
+        }
+    }
+
     pub fn rate(&self) -> Option<RateControl> {
         match self {
             Self::X264 { rate, .. }
@@ -279,6 +289,21 @@ impl VideoEncoding {
         *rate = Some(RateControl::Quality(quality));
     }
 
+    fn quality_option(&self) -> VideoOption {
+        match self {
+            Self::Nvenc { .. } => VideoOption::Cq,
+            Self::Qsv { .. }
+            | Self::Vaapi {
+                codec: VideoCodec::Av1,
+                ..
+            } => VideoOption::GlobalQuality,
+            Self::Vaapi { .. } | Self::Rav1e { .. } => VideoOption::Qp,
+            Self::X264 { .. } | Self::X265 { .. } | Self::SvtAv1 { .. } | Self::AomAv1 { .. } => {
+                VideoOption::Crf
+            }
+        }
+    }
+
     pub(super) fn append_options(&self, args: &mut Vec<OsString>) {
         let rate = self.rate();
         let mut append = |option, value: OsString| args.add(Arg::Video { option, value });
@@ -287,44 +312,38 @@ impl VideoEncoding {
                 append(VideoOption::Bitrate, bitrate.to_string().into())
             }
             Some(RateControl::Quality(quality)) => {
-                let option = match self {
+                match self {
                     Self::Nvenc { .. } => {
                         append(VideoOption::RateControl, "vbr".into());
                         append(VideoOption::Bitrate, "0".into());
-                        VideoOption::Cq
                     }
-                    Self::Qsv { .. } => VideoOption::GlobalQuality,
                     Self::Vaapi {
                         codec: VideoCodec::Av1,
                         ..
                     } => {
                         append(VideoOption::RateControlMode, "CQP".into());
-                        VideoOption::GlobalQuality
                     }
                     Self::Vaapi { .. } => {
                         append(VideoOption::RateControlMode, "CQP".into());
-                        VideoOption::Qp
                     }
-                    Self::Rav1e { .. } => VideoOption::Qp,
                     Self::AomAv1 { .. } => {
                         append(VideoOption::Bitrate, "0".into());
-                        VideoOption::Crf
                     }
-                    _ => VideoOption::Crf,
-                };
-                append(option, quality.to_string().into());
+                    _ => {}
+                }
+                append(self.quality_option(), quality.to_string().into());
             }
             None => {}
         }
         match self {
             Self::X264 { preset, .. } | Self::X265 { preset, .. } => {
                 if let Some(preset) = preset {
-                    append(VideoOption::Preset, preset.value().into());
+                    append(VideoOption::Preset, preset.as_str().into());
                 }
             }
             Self::Qsv { preset, .. } => {
                 if let Some(preset) = preset {
-                    append(VideoOption::Preset, preset.value().into());
+                    append(VideoOption::Preset, preset.as_str().into());
                 }
             }
             Self::SvtAv1 { preset, .. } => {
@@ -346,10 +365,10 @@ impl VideoEncoding {
                 preset, multipass, ..
             } => {
                 if let Some(preset) = preset {
-                    append(VideoOption::Preset, preset.value().into());
+                    append(VideoOption::Preset, preset.as_str().into());
                 }
                 if let Some(value) = multipass {
-                    append(VideoOption::Multipass, value.value().into());
+                    append(VideoOption::Multipass, value.as_str().into());
                 }
             }
             Self::Vaapi { .. } => {}
@@ -360,6 +379,71 @@ impl VideoEncoding {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quality_parameter_names_match_the_ffmpeg_options() {
+        let cases = [
+            (
+                VideoEncoding::X264 {
+                    rate: None,
+                    preset: None,
+                },
+                "CRF",
+            ),
+            (
+                VideoEncoding::SvtAv1 {
+                    rate: None,
+                    preset: None,
+                },
+                "CRF",
+            ),
+            (
+                VideoEncoding::Rav1e {
+                    rate: None,
+                    speed: None,
+                },
+                "QP",
+            ),
+            (
+                VideoEncoding::Nvenc {
+                    codec: VideoCodec::Av1,
+                    rate: None,
+                    preset: None,
+                    multipass: None,
+                },
+                "CQ",
+            ),
+            (
+                VideoEncoding::Qsv {
+                    codec: VideoCodec::Hevc,
+                    rate: None,
+                    preset: None,
+                },
+                "global_quality",
+            ),
+            (
+                VideoEncoding::Vaapi {
+                    codec: VideoCodec::H264,
+                    rate: None,
+                    device: PathBuf::new(),
+                },
+                "QP",
+            ),
+            (
+                VideoEncoding::Vaapi {
+                    codec: VideoCodec::Av1,
+                    rate: None,
+                    device: PathBuf::new(),
+                },
+                "global_quality",
+            ),
+        ];
+
+        for (encoding, expected) in cases {
+            assert_eq!(encoding.quality_parameter(), expected, "{encoding:?}");
+        }
+    }
+
     #[test]
     fn quality_controls_are_encoder_specific_and_bitrate_does_not_add_limits() {
         let quality = Some(RateControl::Quality(30));

@@ -17,6 +17,13 @@ dirs.workspace = true
 walkdir.workspace = true
 env_logger.workspace = true
 log.workspace = true
+plotters = { workspace = true, features = [
+    "bitmap_backend",
+    "bitmap_encoder",
+    "line_series",
+    "svg_backend",
+    "ttf",
+] }
 
 [dev-dependencies]
 serde_json.workspace = true

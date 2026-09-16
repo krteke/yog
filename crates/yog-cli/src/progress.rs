@@ -16,6 +16,15 @@ impl Display {
         Self::with_template(verbose, "{spinner} Predicting...")
     }
 
+    pub fn emulating(verbose: bool) -> Self {
+        Self::with_template(verbose, "{spinner} {msg}")
+    }
+
+    pub fn emulate_quality(&self, parameter: &str, quality: u8, maximum: u8) {
+        self.bar
+            .set_message(format!("Emulating {parameter} {quality}/{maximum}..."));
+    }
+
     pub fn calculating_vmaf(verbose: bool) -> Self {
         Self::with_template(verbose, "{spinner} Calculating VMAF...")
     }

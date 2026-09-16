@@ -30,3 +30,4 @@ dialoguer = "0.12.0"
 tempfile = "3.27.0"
 log = "0.4.34"
 env_logger = "0.11.11"
+plotters = { version = "0.3.7", default-features = false }

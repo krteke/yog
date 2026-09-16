@@ -9,6 +9,8 @@ use yog_core::ffmpeg::{
     vmaf::{VmafOptions, VmafScore},
 };
 
+use crate::emulate::EmulationOptions;
+
 pub struct Diagnostics {
     verbose: bool,
     stderr_logged: AtomicBool,
@@ -158,6 +160,22 @@ impl Diagnostics {
             report.push('\n');
         }
         report.pop();
+        println!("{report}");
+    }
+
+    pub fn emulation(&self, input: &Path, parameter: &str, options: &EmulationOptions) {
+        let mut report = format!(
+            "emulation: {} | {parameter} {}..={}",
+            input.display(),
+            options.qualities.start(),
+            options.qualities.end(),
+        );
+        if let Some(path) = &options.png {
+            write!(report, " | PNG {}", path.display()).unwrap();
+        }
+        if let Some(path) = &options.svg {
+            write!(report, " | SVG {}", path.display()).unwrap();
+        }
         println!("{report}");
     }
 

@@ -49,7 +49,7 @@ impl Output {
 
     pub fn publish(mut self) -> io::Result<()> {
         if self.part.metadata()?.len() == 0 {
-            return Err(io::Error::other("FFmpeg generated output file is empty"));
+            return Err(io::Error::other("generated output file is empty"));
         }
         if self.overwrite {
             fs::rename(&self.part, &self.target)?;

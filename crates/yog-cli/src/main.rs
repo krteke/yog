@@ -2,6 +2,7 @@ mod args;
 mod config;
 mod decoding;
 mod diagnostics;
+mod emulate;
 mod error;
 mod output;
 mod progress;
@@ -18,6 +19,13 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::sync::CancellationToken;
 
 use crate::{error::RunError, validate::Validate};
+use yog_core::ffmpeg::plan::VideoAction;
+
+enum Operation {
+    Transcode,
+    Predict,
+    Emulate(emulate::EmulationOptions),
+}
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
@@ -30,7 +38,23 @@ async fn main() -> ExitCode {
     };
 
     let recursive = args.recursive;
-    let predict = args.predict;
+    let operation = match (args.emulation.emulate, args.predict, args.video.as_ref()) {
+        (true, _, Some(VideoAction::Encode(encoding))) => {
+            Operation::Emulate(emulate::EmulationOptions {
+                png: args.emulation.png.clone(),
+                svg: args.emulation.svg.clone(),
+                qualities: args
+                    .emulation
+                    .range
+                    .clone()
+                    .unwrap_or_else(|| encoding.quality_range()),
+            })
+        }
+        (true, _, _) => unreachable!("validated emulation arguments require a video encoder"),
+        (false, true, _) => Operation::Predict,
+        (false, false, _) => Operation::Transcode,
+    };
+
     if let Err(error) = config::init(args.config.as_deref()) {
         eprintln!("{error:#}");
         return ExitCode::FAILURE;
@@ -51,19 +75,26 @@ async fn main() -> ExitCode {
             }));
             async {
                 if recursive {
-                    let tasks = recursive::discover(request, &transcoder).await?;
+                    let predict = matches!(operation, Operation::Predict);
+                    let tasks = recursive::discover(request, &transcoder, predict).await?;
                     let total = tasks.len();
                     let mut succeeded = 0;
                     let mut failed = 0;
                     for (request, media) in tasks {
                         let input = request.input.clone();
                         diagnostics.begin_task();
-                        let result = if predict {
-                            transcoder
-                                .predict_probed(request, media, &diagnostics)
-                                .await
-                        } else {
-                            transcoder.run_probed(request, media, &diagnostics).await
+                        let result = match operation {
+                            Operation::Predict => {
+                                transcoder
+                                    .predict_probed(request, media, &diagnostics)
+                                    .await
+                            }
+                            Operation::Transcode => {
+                                transcoder.run_probed(request, media, &diagnostics).await
+                            }
+                            Operation::Emulate(_) => {
+                                unreachable!("emulation cannot be recursive")
+                            }
                         };
                         match result {
                             Ok(()) => succeeded += 1,
@@ -84,10 +115,14 @@ async fn main() -> ExitCode {
                     } else {
                         ExitCode::SUCCESS
                     });
-                } else if predict {
-                    transcoder.predict(request, &diagnostics).await?;
                 } else {
-                    transcoder.run(request, &diagnostics).await?;
+                    match &operation {
+                        Operation::Transcode => transcoder.run(request, &diagnostics).await?,
+                        Operation::Predict => transcoder.predict(request, &diagnostics).await?,
+                        Operation::Emulate(options) => {
+                            transcoder.emulate(request, options, &diagnostics).await?
+                        }
+                    }
                 }
                 Ok(ExitCode::SUCCESS)
             }

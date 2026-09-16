@@ -1,5 +1,5 @@
-use clap::{CommandFactory, Parser};
-use std::{num::NonZeroU32, path::PathBuf, str::FromStr};
+use clap::{ArgGroup, CommandFactory, Parser};
+use std::{num::NonZeroU32, ops::RangeInclusive, path::PathBuf, str::FromStr};
 use yog_core::ffmpeg::{
     plan::{Container, TranscodeRequest, VideoAction},
     vmaf::VmafOptions,
@@ -8,7 +8,11 @@ use yog_core::ffmpeg::{
 use crate::decoding::DecodingArgs;
 
 #[derive(Debug, Parser)]
-#[command(version, about)]
+#[command(
+    version,
+    about,
+    group(ArgGroup::new("emulation_output").args(["png", "svg"]).multiple(true))
+)]
 pub struct Args {
     pub input: PathBuf,
     #[arg(short, long, global = true)]
@@ -17,8 +21,10 @@ pub struct Args {
     pub predict: bool,
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
-    #[arg(short, long, global = true, required = false)]
-    pub output: PathBuf,
+    #[command(flatten)]
+    pub emulation: EmulationArgs,
+    #[arg(short, long, global = true)]
+    pub output: Option<PathBuf>,
     #[arg(short = 'C', long, global = true)]
     pub container: Option<Container>,
     #[command(flatten)]
@@ -29,6 +35,29 @@ pub struct Args {
     pub execution: ExecutionOptions,
     #[command(subcommand)]
     pub video: Option<VideoAction>,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct EmulationArgs {
+    #[arg(
+        long,
+        global = true,
+        conflicts_with_all = ["predict", "recursive", "verify", "vmaf"],
+        requires = "emulation_output"
+    )]
+    pub emulate: bool,
+    #[arg(long, global = true, requires = "emulate", group = "emulation_output")]
+    pub png: Option<PathBuf>,
+    #[arg(long, global = true, requires = "emulate", group = "emulation_output")]
+    pub svg: Option<PathBuf>,
+    #[arg(
+        long,
+        global = true,
+        value_name = "MIN,MAX",
+        value_parser = parse_quality_range,
+        requires = "emulate"
+    )]
+    pub range: Option<RangeInclusive<u8>>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -86,9 +115,28 @@ impl From<VmafMode> for VmafOptions {
     }
 }
 
+fn parse_quality_range(value: &str) -> Result<RangeInclusive<u8>, String> {
+    let Some((start, end)) = value.split_once(',') else {
+        return Err("expected MIN,MAX".to_owned());
+    };
+    let start = start
+        .trim()
+        .parse::<u8>()
+        .map_err(|_| "MIN must be an integer from 0 to 255".to_owned())?;
+    let end = end
+        .trim()
+        .parse::<u8>()
+        .map_err(|_| "MAX must be an integer from 0 to 255".to_owned())?;
+    if start > end {
+        return Err("MIN must not exceed MAX".to_owned());
+    }
+
+    Ok(start..=end)
+}
+
 impl Args {
     pub fn into_request(self) -> Result<(TranscodeRequest, ExecutionOptions), clap::Error> {
-        let mut request = TranscodeRequest::new(self.input, self.output)
+        let mut request = TranscodeRequest::new(self.input, self.output.unwrap_or_default())
             .with_video(self.video.unwrap_or_default())
             .with_decoding(
                 self.decoding
@@ -107,6 +155,7 @@ impl Args {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::validate::Validate;
     use clap::{CommandFactory, error::ErrorKind};
     use yog_core::ffmpeg::{
         decoding::DecodingBackend,
@@ -223,6 +272,132 @@ mod tests {
                 .into_request()
                 .unwrap();
         assert_eq!(options.vmaf, Some(VmafMode::Full));
+    }
+
+    #[test]
+    fn emulation_requires_an_encoder_chart_output_and_supported_ordered_range() {
+        let args = Args::try_parse_from([
+            "yog",
+            "input.mkv",
+            "--emulate",
+            "--png",
+            "quality.png",
+            "--svg",
+            "quality.svg",
+            "--range",
+            "20,22",
+            "--encode-x264",
+        ])
+        .unwrap()
+        .validate()
+        .unwrap();
+        assert_eq!(args.emulation.range, Some(20..=22));
+        assert!(args.output.is_none());
+
+        for flags in [
+            vec!["--emulate", "--encode-x264"],
+            vec![
+                "--emulate",
+                "--png",
+                "quality.png",
+                "--range",
+                "30,20",
+                "--encode-x264",
+            ],
+        ] {
+            assert!(
+                Args::try_parse_from(
+                    ["yog", "input.mkv"]
+                        .into_iter()
+                        .chain(flags.iter().copied()),
+                )
+                .is_err(),
+                "{flags:?}"
+            );
+        }
+
+        for (flags, expected) in [
+            (
+                vec!["--emulate", "--png", "quality.png", "--copy"],
+                "--emulate requires a video encoder",
+            ),
+            (
+                vec![
+                    "--emulate",
+                    "--png",
+                    "quality.png",
+                    "--range",
+                    "50,52",
+                    "--encode-x264",
+                ],
+                "libx264 quality range must be within 0..=51, got 50..=52",
+            ),
+            (
+                vec![
+                    "--emulate",
+                    "--png",
+                    "quality.png",
+                    "--encode-x264",
+                    "--quality",
+                    "20",
+                ],
+                "--quality and --bitrate cannot be used with --emulate",
+            ),
+            (
+                vec![
+                    "--emulate",
+                    "--png",
+                    "quality.plot",
+                    "--svg",
+                    "quality.plot",
+                    "--encode-x264",
+                ],
+                "--png and --svg must use different paths",
+            ),
+        ] {
+            let error = Args::try_parse_from(
+                ["yog", "input.mkv"]
+                    .into_iter()
+                    .chain(flags.iter().copied()),
+            )
+            .unwrap()
+            .validate()
+            .unwrap_err();
+            assert_eq!(error.to_string(), expected, "{flags:?}");
+        }
+    }
+
+    #[test]
+    fn prediction_and_emulation_do_not_accept_a_video_output() {
+        let prediction = Args::try_parse_from([
+            "yog",
+            "input.mkv",
+            "--predict",
+            "--encode-x264",
+            "--quality",
+            "23",
+        ])
+        .unwrap();
+        assert!(prediction.output.is_none());
+
+        for flags in [
+            vec!["--predict", "--encode-x264"],
+            vec!["--emulate", "--png", "quality.png", "--encode-x264"],
+        ] {
+            let error = Args::try_parse_from(
+                ["yog", "input.mkv", "--output", "video.mkv"]
+                    .into_iter()
+                    .chain(flags),
+            )
+            .unwrap()
+            .validate()
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .starts_with("--output cannot be used with")
+            );
+        }
     }
 
     #[test]
@@ -382,9 +557,11 @@ mod tests {
             vec!["input", "--copy"],
             vec!["input", "--encode-vaapi", "av1"],
         ] {
-            let error = Args::try_parse_from(["yog"].into_iter().chain(flags)).unwrap_err();
-            assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
-            assert!(error.to_string().contains("output"));
+            let error = Args::try_parse_from(["yog"].into_iter().chain(flags))
+                .unwrap()
+                .validate()
+                .unwrap_err();
+            assert_eq!(error.to_string(), "--output is required");
         }
         for flags in [
             vec!["--decode-cuda", "--copy", "--decode-qsv"],

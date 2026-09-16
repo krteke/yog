@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Deserializer, de};
 use std::{
     fs, io,
-    num::{NonZeroU64, NonZeroUsize},
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     path::Path,
     sync::OnceLock,
     time::Duration,
@@ -16,6 +16,7 @@ static CONFIG: OnceLock<Config> = OnceLock::new();
 pub struct Config {
     pub progress_tick_interval_ms: NonZeroU64,
     pub prediction: Prediction,
+    pub emulation: Emulation,
 }
 
 #[derive(Debug, Deserialize, Clone, Copy)]
@@ -24,6 +25,13 @@ pub struct Prediction {
     pub samples: NonZeroUsize,
     #[serde(deserialize_with = "deserialize_duration")]
     pub sample_sec: Duration,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy)]
+#[serde(default, deny_unknown_fields)]
+pub struct Emulation {
+    pub width: NonZeroU32,
+    pub height: NonZeroU32,
 }
 
 impl From<Prediction> for PredictionOptions {
@@ -57,11 +65,21 @@ impl Default for Prediction {
     }
 }
 
+impl Default for Emulation {
+    fn default() -> Self {
+        Self {
+            width: NonZeroU32::new(1280).unwrap(),
+            height: NonZeroU32::new(720).unwrap(),
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             progress_tick_interval_ms: NonZeroU64::new(100).unwrap(),
             prediction: Prediction::default(),
+            emulation: Emulation::default(),
         }
     }
 }
@@ -112,5 +130,14 @@ mod tests {
         assert_eq!(config.progress_tick_interval_ms.get(), 1);
         assert_eq!(config.prediction.samples.get(), 5);
         assert_eq!(config.prediction.sample_sec, Duration::from_secs_f64(2.0));
+        assert_eq!(config.emulation.width.get(), 1280);
+        assert_eq!(config.emulation.height.get(), 720);
+    }
+
+    #[test]
+    fn emulation_dimensions_must_be_positive() {
+        for config in ["[emulation]\nwidth = 0", "[emulation]\nheight = 0"] {
+            assert!(toml::from_str::<Config>(config).is_err(), "{config}");
+        }
     }
 }

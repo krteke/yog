@@ -15,6 +15,7 @@ use yog_core::{
     ffmpeg::{
         Ffmpeg,
         plan::{TranscodeRequest, VideoAction},
+        prediction::Prediction,
         vmaf::VmafOptions,
     },
     ffprobe::Ffprobe,
@@ -26,7 +27,7 @@ pub struct Transcoder {
     ffmpeg: Ffmpeg,
     verify: bool,
     vmaf: Option<VmafOptions>,
-    verbose: bool,
+    pub(super) verbose: bool,
 }
 
 impl Transcoder {
@@ -57,7 +58,7 @@ impl Transcoder {
         request: TranscodeRequest,
         diagnostics: &Diagnostics,
     ) -> Result<(), RunError> {
-        if self.ffmpeg.cancellation().is_cancelled() {
+        if self.cancelled() {
             return Err(RunError::Cancelled);
         }
         if !request.input.exists() {
@@ -78,7 +79,7 @@ impl Transcoder {
         media: MediaInfo,
         diagnostics: &Diagnostics,
     ) -> Result<(), RunError> {
-        if self.ffmpeg.cancellation().is_cancelled() {
+        if self.cancelled() {
             return Err(RunError::Cancelled);
         }
         let output = Output::prepare(&request.output, request.overwrite)
@@ -91,7 +92,7 @@ impl Transcoder {
         request: TranscodeRequest,
         diagnostics: &Diagnostics,
     ) -> Result<(), RunError> {
-        if self.ffmpeg.cancellation().is_cancelled() {
+        if self.cancelled() {
             return Err(RunError::Cancelled);
         }
         if !request.input.exists() {
@@ -109,7 +110,7 @@ impl Transcoder {
         media: MediaInfo,
         diagnostics: &Diagnostics,
     ) -> Result<(), RunError> {
-        if self.ffmpeg.cancellation().is_cancelled() {
+        if self.cancelled() {
             return Err(RunError::Cancelled);
         }
         let config = config::get();
@@ -117,10 +118,7 @@ impl Transcoder {
         let progress = Display::predicting(self.verbose);
 
         let result = self
-            .ffmpeg
-            .predict(&self.probe, &request, &media, options, |bytes| {
-                diagnostics.ffmpeg(bytes);
-            })
+            .predict_result(&request, &media, options, diagnostics)
             .await
             .context("prediction failed")?;
 
@@ -128,6 +126,25 @@ impl Transcoder {
         diagnostics.predict(&request.input, &result);
 
         Ok(())
+    }
+
+    pub(super) async fn predict_result(
+        &self,
+        request: &TranscodeRequest,
+        media: &MediaInfo,
+        options: yog_core::ffmpeg::prediction::PredictionOptions,
+        diagnostics: &Diagnostics,
+    ) -> anyhow::Result<Prediction> {
+        self.ffmpeg
+            .predict(&self.probe, request, media, options, |bytes| {
+                diagnostics.ffmpeg(bytes);
+            })
+            .await
+            .map_err(|e| e.into())
+    }
+
+    pub(super) fn cancelled(&self) -> bool {
+        self.ffmpeg.cancellation().is_cancelled()
     }
 
     async fn execute(
@@ -207,7 +224,7 @@ impl Transcoder {
             eprintln!("warning: verify: {warning}");
         }
 
-        if self.ffmpeg.cancellation().is_cancelled() {
+        if self.cancelled() {
             return Err(RunError::Cancelled);
         }
 

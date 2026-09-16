@@ -1,6 +1,7 @@
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
 
+#[derive(Clone, Copy)]
 pub(super) enum VideoOption {
     /// -b
     Bitrate,

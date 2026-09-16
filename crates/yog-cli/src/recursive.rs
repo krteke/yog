@@ -9,6 +9,7 @@ use yog_core::{ffmpeg::plan::TranscodeRequest, ffprobe::types::MediaInfo};
 pub async fn discover(
     template: TranscodeRequest,
     transcoder: &Transcoder,
+    predict: bool,
 ) -> Result<Vec<(TranscodeRequest, MediaInfo)>, RunError> {
     if !template.input.is_dir() {
         return Err(RunError::Failed(anyhow::anyhow!(
@@ -16,7 +17,7 @@ pub async fn discover(
             template.input.display()
         )));
     }
-    if template.output.exists() && !template.output.is_dir() {
+    if !predict && template.output.exists() && !template.output.is_dir() {
         return Err(RunError::Failed(anyhow::anyhow!(
             "recursive output is not a directory: {}",
             template.output.display()
@@ -60,35 +61,37 @@ pub async fn discover(
             continue;
         }
 
-        let relative = input
-            .strip_prefix(&template.input)
-            .expect("walked entry must be below the input directory")
-            .to_owned();
         let mut request = template.clone();
         request.input = input;
-        let output_container = request
-            .output_container(&media)
-            .with_context(|| {
-                format!(
-                    "cannot select output container for {}",
-                    request.input.display()
-                )
-            })
-            .map_err(RunError::from)?;
-        let mut output = template.output.join(relative);
-        if request.container.is_some() {
-            let value = output_container
-                .to_possible_value()
-                .expect("Container variants must have clap values");
-            output.set_extension(value.get_name());
+        if !predict {
+            let relative = request
+                .input
+                .strip_prefix(&template.input)
+                .expect("walked entry must be below the input directory");
+            let output_container = request
+                .output_container(&media)
+                .with_context(|| {
+                    format!(
+                        "cannot select output container for {}",
+                        request.input.display()
+                    )
+                })
+                .map_err(RunError::from)?;
+            let mut output = template.output.join(relative);
+            if request.container.is_some() {
+                let value = output_container
+                    .to_possible_value()
+                    .expect("Container variants must have clap values");
+                output.set_extension(value.get_name());
+            }
+            if !outputs.insert(output.clone()) {
+                return Err(RunError::Failed(anyhow::anyhow!(
+                    "multiple input files map to {}",
+                    output.display()
+                )));
+            }
+            request.output = output;
         }
-        if !outputs.insert(output.clone()) {
-            return Err(RunError::Failed(anyhow::anyhow!(
-                "multiple input files map to {}",
-                output.display()
-            )));
-        }
-        request.output = output;
         tasks.push((request, media));
     }
 

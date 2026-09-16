@@ -64,6 +64,24 @@ impl Fixture {
         command
     }
 
+    fn analysis_command(&self) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_yog"));
+        command
+            .current_dir(&self.0)
+            .env("XDG_CONFIG_HOME", &self.0)
+            .env_remove("RUST_LOG")
+            .args([
+                "input.mkv",
+                "--ffprobe",
+                "./ffprobe",
+                "--ffmpeg",
+                "./ffmpeg",
+                "--timeout",
+                "3",
+            ]);
+        command
+    }
+
     fn recursive_command(&self, output: &str) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_yog"));
         command
@@ -110,7 +128,7 @@ fn invalid_encoder_quality_is_rejected_before_external_tools_start() {
 }
 
 #[test]
-fn prediction_samples_the_real_plan_without_preparing_the_requested_output() {
+fn prediction_samples_the_real_plan_without_a_video_output() {
     let fixture = Fixture::new(
         r#"printf '%s\n' "$*" >> ffmpeg-commands
 filter=''
@@ -158,7 +176,7 @@ if test "$packets" = true; then
     exit 0
 fi
 case "$last" in
-    input.mkv)
+    input.mkv|input-dir/clip.mkv)
         printf '%s' '{"streams":[{"index":0,"codec_type":"video","width":320,"height":180,"pix_fmt":"yuv420p"},{"index":1,"codec_type":"video","codec_name":"png","disposition":{"attached_pic":1}},{"index":2,"codec_type":"attachment","extradata_size":7}],"format":{"format_name":"matroska,webm","duration":"4"},"pixel_formats":[{"name":"yuv420p","nb_components":3,"log2_chroma_w":1,"log2_chroma_h":1,"flags":{"rgb":0,"alpha":0,"palette":0,"hwaccel":0},"components":[{"bit_depth":8},{"bit_depth":8},{"bit_depth":8}]}]}'
         ;;
     *)
@@ -172,7 +190,7 @@ esac"#,
     );
 
     let result = fixture
-        .command()
+        .analysis_command()
         .args(["--predict", "--encode-x264"])
         .output()
         .unwrap();
@@ -215,7 +233,7 @@ esac"#,
     assert!(!stderr.contains("executing command:"));
 
     let verbose = fixture
-        .command()
+        .analysis_command()
         .args(["--predict", "--encode-x264", "--verbose"])
         .output()
         .unwrap();
@@ -226,6 +244,143 @@ esac"#,
     assert!(stdout.contains("sample range"));
     assert!(stdout.contains("sample #1:"));
     assert!(stdout.contains("sample #2:"));
+
+    fs::create_dir(fixture.0.join("input-dir")).unwrap();
+    fs::write(fixture.0.join("input-dir/clip.mkv"), b"input").unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_yog"));
+    let recursive = command
+        .current_dir(&fixture.0)
+        .env("XDG_CONFIG_HOME", &fixture.0)
+        .env_remove("RUST_LOG")
+        .args([
+            "input-dir",
+            "--recursive",
+            "--predict",
+            "--encode-x264",
+            "--ffprobe",
+            "./ffprobe",
+            "--ffmpeg",
+            "./ffmpeg",
+            "--timeout",
+            "3",
+        ])
+        .output()
+        .unwrap();
+    assert!(recursive.status.success(), "{:?}", recursive.stderr);
+    assert!(
+        String::from_utf8_lossy(&recursive.stdout)
+            .ends_with("batch summary: total 1 | succeeded 1 | failed 0\n")
+    );
+    assert!(!fixture.0.join("output").exists());
+}
+
+#[test]
+fn emulation_writes_parameterized_charts_directly_at_the_configured_size() {
+    let fixture = Fixture::new(
+        r#"printf '%s\n' "$*" >> ffmpeg-commands
+filter=''
+for argument do
+    case "$argument" in
+        encoder=libsvtav1)
+            printf '%s\n' 'Encoder libsvtav1 [test]' '    Supported pixel formats: yuv420p'
+            exit 0
+            ;;
+        *libvmaf=*) filter=$argument ;;
+    esac
+done
+if test -n "$filter"; then
+    metrics=${filter#*log_path=\'}
+    metrics=${metrics%%\':shortest=*}
+    printf '%s' '{"frames":[{"frameNum":0,"metrics":{"vmaf":96.5,"float_ssim":0.99,"psnr_y":42.0}}]}' > "$metrics"
+    exit 0
+fi
+for last do :; done
+printf 12345678901234567890 > "$last"
+printf 'out_time_us=1000000\nspeed=1x\nprogress=end\n'"#,
+    );
+    fixture.tool(
+        "ffprobe",
+        r#"packets=false
+for argument do
+    test "$argument" = -show_packets && packets=true
+done
+for last do :; done
+if test "$packets" = true; then
+    printf '%s' '{"packets":[{"stream_index":0,"size":"10"}]}'
+elif test "$last" = input.mkv; then
+    printf '%s' '{"streams":[{"index":0,"codec_type":"video","width":320,"height":180,"pix_fmt":"yuv420p"}],"format":{"format_name":"matroska,webm","duration":"1"},"pixel_formats":[{"name":"yuv420p","nb_components":3,"log2_chroma_w":1,"log2_chroma_h":1,"flags":{"rgb":0,"alpha":0,"palette":0,"hwaccel":0},"components":[{"bit_depth":8},{"bit_depth":8},{"bit_depth":8}]}]}'
+else
+    printf '%s' '{"streams":[{"index":0,"codec_type":"video"}],"format":{"duration":"1"}}'
+fi"#,
+    );
+    fs::write(
+        fixture.0.join("emulation.toml"),
+        "[emulation]\nwidth = 900\nheight = 500\n",
+    )
+    .unwrap();
+
+    let result = fixture
+        .analysis_command()
+        .args([
+            "--config",
+            "emulation.toml",
+            "--emulate",
+            "--png",
+            "quality.png",
+            "--svg",
+            "quality.svg",
+            "--range",
+            "20,22",
+            "--encode-svt-av1",
+            "--preset",
+            "6",
+        ])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(result.status.success(), "{stderr}");
+    assert!(
+        fs::read(fixture.0.join("quality.png"))
+            .unwrap()
+            .starts_with(b"\x89PNG\r\n\x1a\n")
+    );
+    let svg = fs::read_to_string(fixture.0.join("quality.svg")).unwrap();
+    for label in [
+        "<svg",
+        "width=\"900\" height=\"500\"",
+        "SVT-AV1 / Software / Preset 6",
+        "CRF value",
+        "VMAF score",
+        "Estimated size",
+        "MiB",
+    ] {
+        assert!(svg.contains(label), "missing {label:?} in SVG");
+    }
+    assert!(!fixture.0.join("output.mkv").exists());
+    assert!(fs::read_dir(&fixture.0).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".part")
+    }));
+
+    let commands = fs::read_to_string(fixture.0.join("ffmpeg-commands")).unwrap();
+    for quality in 20..=22 {
+        assert_eq!(
+            commands
+                .lines()
+                .filter(|command| command.contains(&format!("-crf:v {quality}")))
+                .count(),
+            1,
+            "{commands}",
+        );
+    }
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    assert!(stdout.contains("CRF 20..=22"), "{stdout}");
+    assert!(stdout.contains("PNG quality.png"), "{stdout}");
+    assert!(stdout.contains("SVG quality.svg"), "{stdout}");
 }
 
 #[test]
@@ -1192,7 +1347,7 @@ fn probe_and_ffmpeg_diagnostics_are_emitted_once_in_both_output_modes() {
         "printf '%s' \"$*\" > ffmpeg-args; printf 'PREDICTION-DIAGNOSTIC\\n' >&2; exit 22",
     );
     let result = fixture
-        .command()
+        .analysis_command()
         .args(["--predict", "--encode-vaapi", "av1", "--quality", "28"])
         .output()
         .unwrap();

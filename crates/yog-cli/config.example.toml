@@ -3,3 +3,7 @@ progress_tick_interval_ms = 100
 [prediction]
 samples = 5
 sample_sec = 2.0
+
+[emulation]
+width = 1280
+height = 720

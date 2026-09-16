@@ -15,10 +15,50 @@ impl Validate for Args {
     type Output = Self;
 
     fn validate(self) -> anyhow::Result<Self::Output> {
-        self.video
-            .map(|video| video.validate())
-            .transpose()
-            .map(|video| Self { video, ..self })
+        let video = self.video.map(|video| video.validate()).transpose()?;
+        let args = Self { video, ..self };
+
+        if args.emulation.emulate {
+            anyhow::ensure!(
+                args.output.is_none(),
+                "--output cannot be used with --emulate"
+            );
+
+            let Some(VideoAction::Encode(encoding)) = args.video.as_ref() else {
+                anyhow::bail!("--emulate requires a video encoder");
+            };
+
+            anyhow::ensure!(
+                encoding.rate().is_none(),
+                "--quality and --bitrate cannot be used with --emulate"
+            );
+            anyhow::ensure!(
+                args.emulation.png != args.emulation.svg,
+                "--png and --svg must use different paths"
+            );
+
+            if let Some(range) = &args.emulation.range {
+                let supported = encoding.quality_range();
+                anyhow::ensure!(
+                    supported.contains(range.start()) && supported.contains(range.end()),
+                    "{} quality range must be within {}..={}, got {}..={}",
+                    encoding.name(),
+                    supported.start(),
+                    supported.end(),
+                    range.start(),
+                    range.end(),
+                );
+            }
+        } else if args.predict {
+            anyhow::ensure!(
+                args.output.is_none(),
+                "--output cannot be used with --predict"
+            );
+        } else {
+            anyhow::ensure!(args.output.is_some(), "--output is required");
+        }
+
+        Ok(args)
     }
 }
 

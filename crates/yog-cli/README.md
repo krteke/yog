@@ -14,6 +14,7 @@ cargo run -p yog-cli -- input.mkv -o output.mkv --encode-x264 --vmaf=5
 cargo run -p yog-cli -- input.mkv --predict --encode-x264 --quality 23
 cargo run -p yog-cli -- input.mkv --emulate --png quality.png --svg quality.svg --range 18,30 --encode-x264 --preset medium
 cargo run -p yog-cli -- input.mp4 -o output.mp4 -C mp4 -v --copy
+cargo run -p yog-cli -- input.mkv -o output.mkv --quiet --copy
 ```
 
 [config.toml](./config.example.toml)

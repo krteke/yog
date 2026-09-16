@@ -1,5 +1,4 @@
 use super::{EmulationOptions, EmulationPoint};
-use crate::config;
 use anyhow::Context;
 use plotters::{
     coord::{
@@ -36,15 +35,13 @@ pub(super) fn render(
     request: &TranscodeRequest,
     options: &EmulationOptions,
     points: &[EmulationPoint],
+    image_size: (u32, u32),
 ) -> anyhow::Result<()> {
     let VideoAction::Encode(encoding) = &request.video else {
         unreachable!("emulation arguments require a video encoder");
     };
     let title = title(encoding, &request.decoding);
     let quality_parameter = encoding.quality_parameter();
-    let emulation = &config::get().emulation;
-    let image_size = (emulation.width.get(), emulation.height.get());
-
     if let Some(path) = &options.png {
         draw(
             BitMapBackend::new(path, image_size).into_drawing_area(),

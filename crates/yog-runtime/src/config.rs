@@ -4,14 +4,11 @@ use std::{
     fs, io,
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     path::Path,
-    sync::OnceLock,
     time::Duration,
 };
 use yog_core::ffmpeg::prediction::PredictionOptions;
 
-static CONFIG: OnceLock<Config> = OnceLock::new();
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub progress_tick_interval_ms: NonZeroU64,
@@ -85,13 +82,17 @@ impl Default for Config {
 }
 
 impl Config {
-    fn load(path: Option<&Path>) -> Result<Self> {
+    pub fn load(path: Option<&Path>) -> Result<Self> {
+        let default_path;
         let config = match path {
             Some(path) => path,
-            None => match dirs::config_dir() {
-                Some(dir) => &dir.join("yog").join("config.toml"),
-                None => return Ok(Self::default()),
-            },
+            None => {
+                let Some(directory) = dirs::config_dir() else {
+                    return Ok(Self::default());
+                };
+                default_path = directory.join("yog").join("config.toml");
+                &default_path
+            }
         };
 
         let content = match fs::read_to_string(config) {
@@ -106,18 +107,6 @@ impl Config {
 
         Ok(config)
     }
-}
-
-pub fn init(path: Option<&Path>) -> Result<()> {
-    CONFIG
-        .set(Config::load(path)?)
-        .expect("configuration was already initialized");
-
-    Ok(())
-}
-
-pub fn get() -> &'static Config {
-    CONFIG.get().expect("configuration is not initialized")
 }
 
 #[cfg(test)]

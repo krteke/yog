@@ -1,7 +1,5 @@
-use crate::{error::RunError, transcode::Transcoder};
+use crate::{diagnostics::Diagnostics, error::RunError, transcode::Transcoder};
 use anyhow::Context;
-use clap::ValueEnum;
-use rustix::path::Arg;
 use std::collections::HashSet;
 use walkdir::WalkDir;
 use yog_core::{ffmpeg::plan::TranscodeRequest, ffprobe::types::MediaInfo};
@@ -9,6 +7,7 @@ use yog_core::{ffmpeg::plan::TranscodeRequest, ffprobe::types::MediaInfo};
 pub async fn discover(
     template: TranscodeRequest,
     transcoder: &Transcoder,
+    diagnostics: &Diagnostics,
     predict: bool,
 ) -> Result<Vec<(TranscodeRequest, MediaInfo)>, RunError> {
     if !template.input.is_dir() {
@@ -39,21 +38,7 @@ pub async fn discover(
             Ok(media) => media,
             Err(RunError::Cancelled) => return Err(RunError::Cancelled),
             Err(RunError::Failed(error)) => {
-                let mut warning = format!(
-                    "warning: skipping {} because ffprobe failed: {error:#}\n",
-                    input.display()
-                );
-                if let Some(error) = error
-                    .chain()
-                    .find_map(|cause| cause.downcast_ref::<yog_core::error::Error>())
-                    && !error.stderr.is_empty()
-                {
-                    warning.push_str(&error.stderr.to_string_lossy());
-                    if !warning.ends_with('\n') {
-                        warning.push('\n');
-                    }
-                }
-                eprint!("{warning}");
+                diagnostics.skipped_probe(&input, &error);
                 continue;
             }
         };
@@ -79,10 +64,7 @@ pub async fn discover(
                 .map_err(RunError::from)?;
             let mut output = template.output.join(relative);
             if request.container.is_some() {
-                let value = output_container
-                    .to_possible_value()
-                    .expect("Container variants must have clap values");
-                output.set_extension(value.get_name());
+                output.set_extension(output_container.extension());
             }
             if !outputs.insert(output.clone()) {
                 return Err(RunError::Failed(anyhow::anyhow!(

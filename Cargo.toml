@@ -10,6 +10,7 @@ edition = "2024"
 yog-cli = { path = "crates/yog-cli" }
 yog-core = { path = "crates/yog-core" }
 yog-tui = { path = "crates/yog-tui" }
+yog-runtime = { path = "crates/yog-runtime" }
 
 clap = "4.6.7"
 ratatui = "0.30.2"

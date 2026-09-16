@@ -1,16 +1,15 @@
 mod chart;
 
-use crate::{
-    config, diagnostics::Diagnostics, error::RunError, progress::Display, transcode::Transcoder,
-};
+use crate::{diagnostics::Diagnostics, error::RunError, progress::Display, transcode::Transcoder};
 use anyhow::Context;
 use std::{ops::RangeInclusive, path::PathBuf};
 use yog_core::ffmpeg::plan::{TranscodeRequest, VideoAction};
 
+#[derive(Debug, Clone)]
 pub struct EmulationOptions {
     pub png: Option<PathBuf>,
     pub svg: Option<PathBuf>,
-    pub qualities: RangeInclusive<u8>,
+    pub qualities: Option<RangeInclusive<u8>>,
 }
 
 struct EmulationPoint {
@@ -38,16 +37,20 @@ impl Transcoder {
         chart::check_paths(options, request.overwrite)
             .context("cannot prepare emulation chart output")?;
         let media = self.probe(&request.input).await?;
-        let prediction_options = config::get().prediction.into();
-        let progress = Display::emulating(self.verbose);
-        let maximum = *options.qualities.end();
+        let prediction_options = self.config.prediction.into();
+        let progress = Display::emulating(self.progress_visible(), self.tick_interval());
         let VideoAction::Encode(encoding) = &request.video else {
             unreachable!("emulation arguments require a video encoder");
         };
+        let qualities = options
+            .qualities
+            .clone()
+            .unwrap_or_else(|| encoding.quality_range());
+        let maximum = *qualities.end();
         let quality_parameter = encoding.quality_parameter();
-        let mut points = Vec::with_capacity(options.qualities.clone().count());
+        let mut points = Vec::with_capacity(qualities.clone().count());
 
-        for quality in options.qualities.clone() {
+        for quality in qualities.clone() {
             if self.cancelled() {
                 return Err(RunError::Cancelled);
             }
@@ -72,8 +75,17 @@ impl Transcoder {
         if self.cancelled() {
             return Err(RunError::Cancelled);
         }
-        chart::render(&request, options, &points).context("cannot render emulation chart")?;
-        diagnostics.emulation(&request.input, quality_parameter, options);
+        chart::render(
+            &request,
+            options,
+            &points,
+            (
+                self.config.emulation.width.get(),
+                self.config.emulation.height.get(),
+            ),
+        )
+        .context("cannot render emulation chart")?;
+        diagnostics.emulation(&request.input, quality_parameter, &qualities, options);
         Ok(())
     }
 }

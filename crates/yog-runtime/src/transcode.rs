@@ -1,6 +1,5 @@
 use crate::{
-    args::ExecutionOptions,
-    config,
+    Config, Options,
     diagnostics::Diagnostics,
     error::RunError,
     output::Output,
@@ -27,20 +26,23 @@ pub struct Transcoder {
     ffmpeg: Ffmpeg,
     verify: bool,
     vmaf: Option<VmafOptions>,
+    pub(super) config: Config,
     pub(super) verbose: bool,
+    terminal_output: bool,
 }
 
 impl Transcoder {
-    pub fn new(options: &ExecutionOptions, cancelled: CancellationToken) -> Self {
-        let timeout = options.timeout.map(Duration::from_secs);
+    pub fn new(options: &Options, config: Config, cancelled: CancellationToken) -> Self {
         Self {
-            probe: Ffprobe::new(&options.ffprobe, timeout)
+            probe: Ffprobe::new(&options.ffprobe, options.timeout)
                 .with_cancellation(cancelled.clone())
                 .with_data_hashes(options.verify),
-            ffmpeg: Ffmpeg::new(&options.ffmpeg, timeout).with_cancellation(cancelled),
+            ffmpeg: Ffmpeg::new(&options.ffmpeg, options.timeout).with_cancellation(cancelled),
             verify: options.verify,
-            vmaf: options.vmaf.map(Into::into),
+            vmaf: options.vmaf,
+            config,
             verbose: options.verbose,
+            terminal_output: options.terminal_output,
         }
     }
 
@@ -113,9 +115,8 @@ impl Transcoder {
         if self.cancelled() {
             return Err(RunError::Cancelled);
         }
-        let config = config::get();
-        let options = config.prediction.into();
-        let progress = Display::predicting(self.verbose);
+        let options = self.config.prediction.into();
+        let progress = Display::predicting(self.progress_visible(), self.tick_interval());
 
         let result = self
             .predict_result(&request, &media, options, diagnostics)
@@ -147,6 +148,14 @@ impl Transcoder {
         self.ffmpeg.cancellation().is_cancelled()
     }
 
+    pub(super) fn progress_visible(&self) -> bool {
+        self.terminal_output && !self.verbose
+    }
+
+    pub(super) fn tick_interval(&self) -> Duration {
+        Duration::from_millis(self.config.progress_tick_interval_ms.get())
+    }
+
     async fn execute(
         &self,
         mut request: TranscodeRequest,
@@ -167,7 +176,7 @@ impl Transcoder {
             .build(&plan)
             .context("cannot build transcode command")?;
 
-        let progress = Display::new(self.verbose);
+        let progress = Display::new(self.progress_visible(), self.tick_interval());
         progress.start(media.format.try_duration().ok());
         command
             .run(
@@ -221,7 +230,7 @@ impl Transcoder {
         }
 
         for warning in warnings {
-            eprintln!("warning: verify: {warning}");
+            diagnostics.verify_warning(&warning);
         }
 
         if self.cancelled() {
@@ -231,10 +240,10 @@ impl Transcoder {
         output
             .publish()
             .with_context(|| format!("cannot publish output {}", target.display()))?;
-        println!("complete: {}", target.display());
+        diagnostics.complete(&target);
 
         if let Some(options) = self.vmaf {
-            let progress = Display::calculating_vmaf(self.verbose);
+            let progress = Display::calculating_vmaf(self.progress_visible(), self.tick_interval());
             let mut stderr_logged = false;
             let result = self
                 .ffmpeg

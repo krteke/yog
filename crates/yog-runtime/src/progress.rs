@@ -1,4 +1,3 @@
-use crate::config;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::{fmt::Write, time::Duration};
 use yog_core::ffmpeg::progress::Progress;
@@ -8,16 +7,20 @@ pub struct Display {
 }
 
 impl Display {
-    pub fn new(verbose: bool) -> Self {
-        Self::with_template(verbose, "{spinner} {msg} [{elapsed_precise}]")
+    pub fn new(visible: bool, tick_interval: Duration) -> Self {
+        Self::with_template(
+            visible,
+            tick_interval,
+            "{spinner} {msg} [{elapsed_precise}]",
+        )
     }
 
-    pub fn predicting(verbose: bool) -> Self {
-        Self::with_template(verbose, "{spinner} Predicting...")
+    pub fn predicting(visible: bool, tick_interval: Duration) -> Self {
+        Self::with_template(visible, tick_interval, "{spinner} Predicting...")
     }
 
-    pub fn emulating(verbose: bool) -> Self {
-        Self::with_template(verbose, "{spinner} {msg}")
+    pub fn emulating(visible: bool, tick_interval: Duration) -> Self {
+        Self::with_template(visible, tick_interval, "{spinner} {msg}")
     }
 
     pub fn emulate_quality(&self, parameter: &str, quality: u8, maximum: u8) {
@@ -25,22 +28,20 @@ impl Display {
             .set_message(format!("Emulating {parameter} {quality}/{maximum}..."));
     }
 
-    pub fn calculating_vmaf(verbose: bool) -> Self {
-        Self::with_template(verbose, "{spinner} Calculating VMAF...")
+    pub fn calculating_vmaf(visible: bool, tick_interval: Duration) -> Self {
+        Self::with_template(visible, tick_interval, "{spinner} Calculating VMAF...")
     }
 
-    fn with_template(verbose: bool, template: &str) -> Self {
-        let bar = if verbose {
-            ProgressBar::hidden()
-        } else {
+    fn with_template(visible: bool, tick_interval: Duration, template: &str) -> Self {
+        let bar = if visible {
             ProgressBar::new_spinner()
+        } else {
+            ProgressBar::hidden()
         };
         bar.set_style(ProgressStyle::with_template(template).unwrap());
 
         if !bar.is_hidden() {
-            bar.enable_steady_tick(Duration::from_millis(
-                config::get().progress_tick_interval_ms.get(),
-            ));
+            bar.enable_steady_tick(tick_interval);
         }
         Self { bar }
     }
@@ -100,7 +101,7 @@ mod tests {
 
     #[test]
     fn time_based_progress_clamps_signed_times_and_overruns_without_finishing() {
-        let display = Display::new(true);
+        let display = Display::new(false, Duration::from_millis(100));
         display.start(Some(Duration::from_millis(1500)));
         assert_eq!(display.bar.length(), Some(1_500_000));
         for (time, expected) in [(-250_000, 0), (750_000, 750_000), (2_000_000, 1_500_000)] {

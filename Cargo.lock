@@ -2625,21 +2625,13 @@ dependencies = [
 name = "yog-cli"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "clap",
- "dirs 7.0.0",
  "env_logger",
- "indicatif",
- "log",
- "plotters",
- "rustix",
- "serde",
  "serde_json",
  "tokio",
  "tokio-util",
- "toml",
- "walkdir",
  "yog-core",
+ "yog-runtime",
 ]
 
 [[package]]
@@ -2659,12 +2651,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "yog-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs 7.0.0",
+ "indicatif",
+ "log",
+ "plotters",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "walkdir",
+ "yog-core",
+]
+
+[[package]]
 name = "yog-tui"
 version = "0.1.0"
 dependencies = [
  "ratatui",
  "yog-cli",
  "yog-core",
+ "yog-runtime",
 ]
 
 [[package]]

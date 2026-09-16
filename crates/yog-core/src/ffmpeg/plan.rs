@@ -52,6 +52,31 @@ pub enum Container {
 }
 
 impl Container {
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Matroska => "mkv",
+            Self::Mp4 => "mp4",
+            Self::Mov => "mov",
+            Self::M4a => "m4a",
+            Self::ThreeGp => "3gp",
+            Self::ThreeG2 => "3g2",
+            Self::F4v => "f4v",
+            Self::Ismv => "ismv",
+            Self::Psp => "psp",
+            Self::Webm => "webm",
+            Self::MpegTs => "ts",
+            Self::M2ts => "m2ts",
+            Self::Avi => "avi",
+            Self::Flv => "flv",
+            Self::Asf => "asf",
+            Self::Wmv => "wmv",
+            Self::MpegPs => "mpg",
+            Self::Vob => "vob",
+            Self::Ogg => "ogg",
+            Self::Ogv => "ogv",
+        }
+    }
+
     pub(super) fn muxer(self) -> &'static str {
         match self {
             Self::Matroska => "matroska",

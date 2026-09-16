@@ -1,5 +1,6 @@
 use std::{
-    fmt::Write as _,
+    fmt::Write,
+    ops::RangeInclusive,
     path::Path,
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -13,22 +14,15 @@ use crate::emulate::EmulationOptions;
 
 pub struct Diagnostics {
     verbose: bool,
+    terminal_output: bool,
     stderr_logged: AtomicBool,
 }
 
 impl Diagnostics {
-    pub fn new(verbose: bool) -> Self {
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(if verbose {
-            "debug"
-        } else {
-            "warn"
-        }))
-        .format_timestamp(None)
-        .format_target(false)
-        .init();
-
+    pub fn new(verbose: bool, terminal_output: bool) -> Self {
         Self {
             verbose,
+            terminal_output,
             stderr_logged: AtomicBool::new(false),
         }
     }
@@ -50,6 +44,10 @@ impl Diagnostics {
     }
 
     pub fn predict(&self, input: &Path, prediction: &Prediction) {
+        if !self.terminal_output {
+            return;
+        }
+
         let mut report = String::new();
         if !self.verbose {
             write!(
@@ -163,12 +161,22 @@ impl Diagnostics {
         println!("{report}");
     }
 
-    pub fn emulation(&self, input: &Path, parameter: &str, options: &EmulationOptions) {
+    pub fn emulation(
+        &self,
+        input: &Path,
+        parameter: &str,
+        qualities: &RangeInclusive<u8>,
+        options: &EmulationOptions,
+    ) {
+        if !self.terminal_output {
+            return;
+        }
+
         let mut report = format!(
             "emulation: {} | {parameter} {}..={}",
             input.display(),
-            options.qualities.start(),
-            options.qualities.end(),
+            qualities.start(),
+            qualities.end(),
         );
         if let Some(path) = &options.png {
             write!(report, " | PNG {}", path.display()).unwrap();
@@ -180,6 +188,10 @@ impl Diagnostics {
     }
 
     pub fn vmaf(&self, output: &Path, score: VmafScore, options: VmafOptions) {
+        if !self.terminal_output {
+            return;
+        }
+
         let mode = options
             .n_subsample
             .map(|value| format!("n_subsample={value}"))
@@ -192,6 +204,10 @@ impl Diagnostics {
     }
 
     pub fn vmaf_warning(&self, error: &anyhow::Error, stderr_logged: bool) {
+        if !self.terminal_output {
+            return;
+        }
+
         eprintln!("warning: vmaf: {error:#}");
         if let Some(error) = Self::program_error(error) {
             Self::print_program_stderr(error, stderr_logged);
@@ -199,18 +215,30 @@ impl Diagnostics {
     }
 
     pub fn error(&self, error: &anyhow::Error) {
+        if !self.terminal_output {
+            return;
+        }
+
         eprintln!("{error:#}");
 
         self.print_error_details(error);
     }
 
     pub fn task_error(&self, input: &Path, error: &anyhow::Error) {
+        if !self.terminal_output {
+            return;
+        }
+
         eprintln!("failed: {}: {error:#}", input.display());
 
         self.print_error_details(error);
     }
 
     pub fn batch_summary(&self, total: usize, succeeded: usize, failed: usize, cancelled: bool) {
+        if !self.terminal_output {
+            return;
+        }
+
         let mut summary =
             format!("batch summary: total {total} | succeeded {succeeded} | failed {failed}");
         if cancelled {
@@ -222,6 +250,38 @@ impl Diagnostics {
             .unwrap();
         }
         println!("{summary}");
+    }
+
+    pub fn complete(&self, output: &Path) {
+        if self.terminal_output {
+            println!("complete: {}", output.display());
+        }
+    }
+
+    pub fn verify_warning(&self, warning: &str) {
+        if self.terminal_output {
+            eprintln!("warning: verify: {warning}");
+        }
+    }
+
+    pub fn skipped_probe(&self, input: &Path, error: &anyhow::Error) {
+        if !self.terminal_output {
+            return;
+        }
+
+        eprintln!(
+            "warning: skipping {} because ffprobe failed: {error:#}",
+            input.display()
+        );
+        if let Some(error) = Self::program_error(error) {
+            Self::print_program_stderr(error, false);
+        }
+    }
+
+    pub fn cancelled(&self) {
+        if self.terminal_output {
+            println!("cancelled");
+        }
     }
 
     fn print_error_details(&self, error: &anyhow::Error) {

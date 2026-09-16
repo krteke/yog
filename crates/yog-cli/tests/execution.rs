@@ -128,6 +128,32 @@ fn invalid_encoder_quality_is_rejected_before_external_tools_start() {
 }
 
 #[test]
+fn quiet_disables_runtime_terminal_output_on_success_and_failure() {
+    for (ffmpeg, expected_status, output_exists) in [
+        (
+            "for last do :; done; printf diagnostic >&2; printf encoded > \"$last\"",
+            0,
+            true,
+        ),
+        ("printf diagnostic >&2; exit 9", 1, false),
+    ] {
+        let fixture = Fixture::new(ffmpeg);
+        let result = fixture
+            .command()
+            .env("RUST_LOG", "debug")
+            .args(["--quiet", "--copy"])
+            .output()
+            .unwrap();
+
+        assert_eq!(result.status.code(), Some(expected_status));
+        assert!(result.stdout.is_empty(), "{:?}", result.stdout);
+        assert!(result.stderr.is_empty(), "{:?}", result.stderr);
+        assert_eq!(fixture.0.join("output.mkv").exists(), output_exists);
+        assert!(!fixture.0.join("output.mkv.part").exists());
+    }
+}
+
+#[test]
 fn prediction_samples_the_real_plan_without_a_video_output() {
     let fixture = Fixture::new(
         r#"printf '%s\n' "$*" >> ffmpeg-commands

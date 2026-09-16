@@ -5,25 +5,12 @@ edition.workspace = true
 
 [dependencies]
 yog-core = { workspace = true, features = ["clap"] }
+yog-runtime.workspace = true
+
 tokio = { workspace = true, features = ["rt", "macros", "signal"] }
 tokio-util = { workspace = true, features = ["rt"] }
 clap = { workspace = true, features = ["derive"] }
-rustix = { workspace = true, features = ["fs"] }
-indicatif.workspace = true
-anyhow.workspace = true
-serde = { workspace = true, features = ["derive"] }
-toml.workspace = true
-dirs.workspace = true
-walkdir.workspace = true
 env_logger.workspace = true
-log.workspace = true
-plotters = { workspace = true, features = [
-    "bitmap_backend",
-    "bitmap_encoder",
-    "line_series",
-    "svg_backend",
-    "ttf",
-] }
 
 [dev-dependencies]
 serde_json.workspace = true

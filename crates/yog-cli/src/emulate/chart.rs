@@ -1,8 +1,14 @@
 use super::{EmulationOptions, EmulationPoint};
 use crate::config;
 use anyhow::Context;
-use plotters::{coord::Shift, prelude::*};
-use std::{fs, ops::Range};
+use plotters::{
+    coord::{
+        Shift,
+        ranged1d::{DefaultFormatting, KeyPointHint, Ranged},
+    },
+    prelude::*,
+};
+use std::fs;
 use yog_core::ffmpeg::{
     decoding::DecodingBackend,
     encoding::{VideoCodec, VideoEncoding},
@@ -153,88 +159,88 @@ where
     let last = points
         .last()
         .expect("emulation quality range always produces at least one point");
-    let quality_axis = axis_range(first.quality as f64, last.quality as f64, 0.5);
+    let quality_values = [first.quality as f64, last.quality as f64];
+    let quality_bounds = axis_bounds(quality_values[0], quality_values[1], 0.5);
     let (vmaf_minimum, vmaf_maximum) = value_bounds(points, |point| point.vmaf);
-    let vmaf_axis = axis_range(vmaf_minimum, vmaf_maximum, 0.5);
+    let vmaf_bounds = axis_bounds(vmaf_minimum, vmaf_maximum, 0.5);
     let (size_minimum, size_maximum) =
         value_bounds(points, |point| point.size_bytes as f64 / MIB as f64);
     let size_padding = (size_minimum.abs() * 0.05).max(0.001);
-    let mut size_axis = axis_range(size_minimum, size_maximum, size_padding);
-    size_axis.start = size_axis.start.max(0.0);
+    let mut size_bounds = axis_bounds(size_minimum, size_maximum, size_padding);
+    size_bounds[0] = size_bounds[0].max(0.0);
+
+    let quality_bold_points = quality_axis_points(quality_values, 11);
+    let quality_light_points = quality_axis_points(quality_values, 64);
+    let vmaf_bold_points = axis_points(vmaf_bounds, 7);
+    let vmaf_light_points = axis_points(vmaf_bounds, 31);
+    let size_bold_points = axis_points(size_bounds, 7);
+    let size_light_points = axis_points(size_bounds, 31);
 
     root.fill(&WHITE)?;
     let mut chart = ChartBuilder::on(&root)
         .caption(title, ("sans-serif", 30))
-        .margin(24)
-        .set_label_area_size(LabelAreaPosition::Left, 72)
-        .set_label_area_size(LabelAreaPosition::Right, 84)
-        .set_label_area_size(LabelAreaPosition::Bottom, 56)
-        .build_cartesian_2d(quality_axis.clone(), vmaf_axis)?
-        .set_secondary_coord(quality_axis, size_axis);
+        .margin(20)
+        .set_label_area_size(LabelAreaPosition::Left, 70)
+        .set_label_area_size(LabelAreaPosition::Right, 105)
+        .set_label_area_size(LabelAreaPosition::Bottom, 55)
+        .build_cartesian_2d(
+            ExplicitAxis::new(
+                quality_bounds,
+                quality_bold_points.clone(),
+                quality_light_points.clone(),
+            ),
+            ExplicitAxis::new(vmaf_bounds, vmaf_bold_points, vmaf_light_points),
+        )?
+        .set_secondary_coord(
+            ExplicitAxis::new(quality_bounds, quality_bold_points, quality_light_points),
+            ExplicitAxis::new(size_bounds, size_bold_points, size_light_points),
+        );
 
     chart
         .configure_mesh()
         .x_desc(format!("{quality_parameter} value"))
         .y_desc("VMAF score")
-        .x_labels(points.len().min(16))
-        .x_label_formatter(&|quality| {
-            let rounded = quality.round();
-            if (quality - rounded).abs() < 1e-6 {
-                format!("{rounded:.0}")
-            } else {
-                String::new()
-            }
-        })
-        .axis_desc_style(("sans-serif", 20))
-        .label_style(("sans-serif", 16))
+        .x_labels(11)
+        .y_labels(7)
+        .light_line_style(RGBColor(225, 225, 225))
+        .x_label_formatter(&|quality| format!("{quality:.0}"))
+        .y_label_formatter(&|vmaf| format_vmaf(*vmaf, vmaf_bounds))
         .draw()?;
     chart
         .configure_secondary_axes()
         .x_labels(0)
+        .y_labels(7)
         .y_desc("Estimated size")
         .y_label_formatter(&format_size)
-        .axis_desc_style(("sans-serif", 20))
-        .label_style(("sans-serif", 16))
         .draw()?;
 
+    let vmaf_color = RGBColor(22, 163, 74);
+    let size_color = RGBColor(202, 138, 4);
     chart
         .draw_series(LineSeries::new(
             points
                 .iter()
                 .map(|point| (point.quality as f64, point.vmaf)),
-            BLUE.stroke_width(3),
+            &vmaf_color,
         ))?
         .label("VMAF score")
-        .legend(|(x, y)| PathElement::new([(x, y), (x + 28, y)], BLUE.stroke_width(3)));
-    chart.draw_series(
-        points
-            .iter()
-            .map(|point| Circle::new((point.quality as f64, point.vmaf), 3, BLUE.filled())),
-    )?;
+        .legend(move |(x, y)| PathElement::new([(x, y), (x + 28, y)], vmaf_color));
 
     chart
         .draw_secondary_series(LineSeries::new(
             points
                 .iter()
                 .map(|point| (point.quality as f64, point.size_bytes as f64 / MIB as f64)),
-            RED.stroke_width(3),
+            &size_color,
         ))?
         .label("Estimated size")
-        .legend(|(x, y)| PathElement::new([(x, y), (x + 28, y)], RED.stroke_width(3)));
-    chart.draw_secondary_series(points.iter().map(|point| {
-        Circle::new(
-            (point.quality as f64, point.size_bytes as f64 / MIB as f64),
-            3,
-            RED.filled(),
-        )
-    }))?;
+        .legend(move |(x, y)| PathElement::new([(x, y), (x + 28, y)], size_color));
 
     chart
         .configure_series_labels()
         .position(SeriesLabelPosition::UpperRight)
         .background_style(WHITE.mix(0.85))
         .border_style(BLACK)
-        .label_font(("sans-serif", 16))
         .draw()?;
     root.present()?;
     Ok(())
@@ -250,11 +256,44 @@ fn value_bounds(points: &[EmulationPoint], value: impl Fn(&EmulationPoint) -> f6
     })
 }
 
-fn axis_range(minimum: f64, maximum: f64, padding: f64) -> Range<f64> {
+fn axis_bounds(minimum: f64, maximum: f64, padding: f64) -> [f64; 2] {
     if minimum < maximum {
-        minimum..maximum
+        [minimum, maximum]
     } else {
-        minimum - padding..maximum + padding
+        [minimum - padding, maximum + padding]
+    }
+}
+
+fn axis_points(bounds: [f64; 2], count: usize) -> Vec<f64> {
+    let last = count - 1;
+    (0..count)
+        .map(|index| bounds[0] + (bounds[1] - bounds[0]) * index as f64 / last as f64)
+        .collect()
+}
+
+fn quality_axis_points(bounds: [f64; 2], maximum_points: usize) -> Vec<f64> {
+    let start = bounds[0].round() as u8;
+    let end = bounds[1].round() as u8;
+    if start >= end {
+        return vec![f64::from(start)];
+    }
+
+    let step = usize::from(end - start).div_ceil(maximum_points - 1);
+    let mut points = (usize::from(start)..=usize::from(end))
+        .step_by(step)
+        .map(|value| value as f64)
+        .collect::<Vec<_>>();
+    if points.last().copied() != Some(f64::from(end)) {
+        points.push(f64::from(end));
+    }
+    points
+}
+
+fn format_vmaf(value: f64, bounds: [f64; 2]) -> String {
+    if bounds[1] - bounds[0] < 0.1 {
+        format!("{value:.3}")
+    } else {
+        format!("{value:.2}")
     }
 }
 
@@ -263,5 +302,44 @@ fn format_size(size_mib: &f64) -> String {
         format!("{:.1} GiB", size_mib / 1024.0)
     } else {
         format!("{size_mib:.1} MiB")
+    }
+}
+
+#[derive(Clone)]
+struct ExplicitAxis {
+    bounds: [f64; 2],
+    bold_points: Vec<f64>,
+    light_points: Vec<f64>,
+}
+
+impl ExplicitAxis {
+    fn new(bounds: [f64; 2], bold_points: Vec<f64>, light_points: Vec<f64>) -> Self {
+        Self {
+            bounds,
+            bold_points,
+            light_points,
+        }
+    }
+}
+
+impl Ranged for ExplicitAxis {
+    type FormatOption = DefaultFormatting;
+    type ValueType = f64;
+
+    fn map(&self, value: &f64, limit: (i32, i32)) -> i32 {
+        let position = (*value - self.bounds[0]) / (self.bounds[1] - self.bounds[0]);
+        (f64::from(limit.0) + f64::from(limit.1 - limit.0) * position).round() as i32
+    }
+
+    fn key_points<Hint: KeyPointHint>(&self, hint: Hint) -> Vec<f64> {
+        if hint.weight().allow_light_points() {
+            self.light_points.clone()
+        } else {
+            self.bold_points.clone()
+        }
+    }
+
+    fn range(&self) -> std::ops::Range<f64> {
+        self.bounds[0]..self.bounds[1]
     }
 }

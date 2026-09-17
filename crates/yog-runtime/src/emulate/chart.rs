@@ -14,7 +14,7 @@ use yog_core::ffmpeg::{
     plan::{TranscodeRequest, VideoAction},
 };
 
-const MIB: u64 = 1_048_576;
+const MIB: f64 = 1024.0 * 1024.0;
 
 pub(super) fn check_paths(options: &EmulationOptions, overwrite: bool) -> anyhow::Result<()> {
     for path in [&options.png, &options.svg].into_iter().flatten() {
@@ -35,6 +35,7 @@ pub(super) fn render(
     request: &TranscodeRequest,
     options: &EmulationOptions,
     points: &[EmulationPoint],
+    source_bytes: u64,
     image_size: (u32, u32),
 ) -> anyhow::Result<()> {
     let VideoAction::Encode(encoding) = &request.video else {
@@ -48,6 +49,7 @@ pub(super) fn render(
             &title,
             quality_parameter,
             points,
+            source_bytes,
         )
         .with_context(|| format!("cannot render PNG {}", path.display()))?;
     }
@@ -57,6 +59,7 @@ pub(super) fn render(
             &title,
             quality_parameter,
             points,
+            source_bytes,
         )
         .with_context(|| format!("cannot render SVG {}", path.display()))?;
     }
@@ -145,6 +148,7 @@ fn draw<DB>(
     title: &str,
     quality_parameter: &str,
     points: &[EmulationPoint],
+    source_bytes: u64,
 ) -> anyhow::Result<()>
 where
     DB: DrawingBackend,
@@ -160,8 +164,9 @@ where
     let quality_bounds = axis_bounds(quality_values[0], quality_values[1], 0.5);
     let (vmaf_minimum, vmaf_maximum) = value_bounds(points, |point| point.vmaf);
     let vmaf_bounds = axis_bounds(vmaf_minimum, vmaf_maximum, 0.5);
-    let (size_minimum, size_maximum) =
-        value_bounds(points, |point| point.size_bytes as f64 / MIB as f64);
+    let (size_minimum, size_maximum) = value_bounds(points, |point| point.size_bytes as f64 / MIB);
+    let source_size = source_bytes as f64 / MIB;
+    let show_source_size = (size_minimum..=size_maximum).contains(&source_size);
     let size_padding = (size_minimum.abs() * 0.05).max(0.001);
     let mut size_bounds = axis_bounds(size_minimum, size_maximum, size_padding);
     size_bounds[0] = size_bounds[0].max(0.0);
@@ -227,11 +232,29 @@ where
         .draw_secondary_series(LineSeries::new(
             points
                 .iter()
-                .map(|point| (point.quality as f64, point.size_bytes as f64 / MIB as f64)),
+                .map(|point| (point.quality as f64, point.size_bytes as f64 / MIB)),
             &size_color,
         ))?
         .label("Estimated size")
         .legend(move |(x, y)| PathElement::new([(x, y), (x + 28, y)], size_color));
+
+    if show_source_size {
+        let source_color = RGBColor(96, 96, 96).mix(0.7);
+        chart
+            .draw_secondary_series(DashedLineSeries::new(
+                [
+                    (quality_bounds[0], source_size),
+                    (quality_bounds[1], source_size),
+                ],
+                6,
+                4,
+                source_color.stroke_width(1),
+            ))?
+            .label(format!("Input size: {}", format_size(&source_size)))
+            .legend(move |(x, y)| {
+                PathElement::new([(x, y), (x + 28, y)], source_color.stroke_width(1))
+            });
+    }
 
     chart
         .configure_series_labels()

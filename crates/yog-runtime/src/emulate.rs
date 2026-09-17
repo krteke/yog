@@ -33,6 +33,11 @@ impl Transcoder {
                 "input file does not exist"
             )));
         }
+        let source_bytes = request
+            .input
+            .metadata()
+            .with_context(|| format!("cannot read input metadata {}", request.input.display()))?
+            .len();
 
         chart::check_paths(options, request.overwrite)
             .context("cannot prepare emulation chart output")?;
@@ -79,6 +84,7 @@ impl Transcoder {
             &request,
             options,
             &points,
+            source_bytes,
             (
                 self.config.emulation.width.get(),
                 self.config.emulation.height.get(),

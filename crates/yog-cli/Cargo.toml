@@ -15,13 +15,6 @@ env_logger.workspace = true
 [dev-dependencies]
 serde_json.workspace = true
 
-[profile.release]
-codegen-units = 1
-lto = "thin"
-opt-level = 3
-panic = "abort"
-strip = true
-
 [[bin]]
 name = "yog"
 path = "src/main.rs"

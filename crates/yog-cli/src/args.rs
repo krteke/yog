@@ -78,7 +78,7 @@ struct EmulateArgs {
     svg: Option<PathBuf>,
     #[arg(long, value_parser = parse_quality_range, value_name = "MIN,MAX")]
     range: Option<RangeInclusive<u8>>,
-    #[arg(short = 'O', long)]
+    #[arg(short = 'O', long, global = true)]
     overwrite: bool,
     #[command(subcommand)]
     video: VideoEncoding,
@@ -158,13 +158,7 @@ impl Args {
             execution,
             command,
         } = self;
-        // let input = input.ok_or_else(|| {
-        //     clap::Error::raw(
-        //         clap::error::ErrorKind::MissingRequiredArgument,
-        //         "--input <PATH> is required",
-        //     )
-        //     .format(&mut Self::command())
-        // })?;
+
         let decoding = decoding
             .try_into()
             .map_err(|error: clap::Error| error.format(&mut Self::command()))?;

@@ -8,11 +8,14 @@ async fn main() -> ExitCode {
 
         let args = std::env::args_os();
 
-        if args.len() == 1 {
-            todo!()
+        let exit = if args.len() == 1 {
+            ExitCode::SUCCESS
         } else {
             let args = Args::parse_from(args);
-            return args.run().await;
-        }
+            args.run().await
+        };
+        return exit;
     }
+
+    todo!()
 }

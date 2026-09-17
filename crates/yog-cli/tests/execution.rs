@@ -330,6 +330,7 @@ for last do :; done
 printf 12345678901234567890 > "$last"
 printf 'out_time_us=1000000\nspeed=1x\nprogress=end\n'"#,
     );
+    fs::write(fixture.0.join("input.mkv"), b"12345678901234567890").unwrap();
     fixture.tool(
         "ffprobe",
         r#"packets=false
@@ -386,6 +387,7 @@ fi"#,
         "VMAF score",
         "Estimated size",
         "MiB",
+        "Input size:",
     ] {
         assert!(svg.contains(label), "missing {label:?} in SVG");
     }
@@ -413,6 +415,27 @@ fi"#,
     assert!(stdout.contains("CRF 20..=22"), "{stdout}");
     assert!(stdout.contains("PNG quality.png"), "{stdout}");
     assert!(stdout.contains("SVG quality.svg"), "{stdout}");
+
+    fs::write(fixture.0.join("input.mkv"), b"input").unwrap();
+    let result = fixture
+        .analysis_command()
+        .args([
+            "--config",
+            "emulation.toml",
+            "emulate",
+            "--svg",
+            "outside.svg",
+            "--range",
+            "20,22",
+            "--encode-svt-av1",
+            "--preset",
+            "6",
+        ])
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{:?}", result.stderr);
+    let svg = fs::read_to_string(fixture.0.join("outside.svg")).unwrap();
+    assert!(!svg.contains("Input size:"), "{svg}");
 }
 
 #[test]

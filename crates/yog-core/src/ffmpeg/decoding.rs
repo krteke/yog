@@ -1,4 +1,4 @@
-use std::ffi::OsString;
+use std::{ffi::OsString, fmt::Display};
 
 use crate::{
     ffmpeg::{
@@ -24,6 +24,32 @@ pub enum DecodingBackend {
     Vaapi(Option<OsString>),
     Cuda(Option<OsString>),
     Qsv(Option<OsString>),
+}
+
+impl Display for DecodingBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let device = match self {
+            Self::Software => return f.write_str("software"),
+            Self::Vaapi(device) => {
+                f.write_str("vaapi")?;
+                device
+            }
+            Self::Cuda(device) => {
+                f.write_str("cuda")?;
+                device
+            }
+            Self::Qsv(device) => {
+                f.write_str("qsv")?;
+                device
+            }
+        };
+
+        if let Some(device) = device {
+            f.write_fmt(format_args!(":{}", device.display()))?;
+        }
+
+        Ok(())
+    }
 }
 
 impl DecodingBackend {

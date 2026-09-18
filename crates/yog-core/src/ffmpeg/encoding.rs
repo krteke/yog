@@ -1,5 +1,5 @@
 use super::args::{Arg, ArgsExt, VideoOption};
-use std::{ffi::OsString, num::NonZeroU64, ops::RangeInclusive, path::PathBuf};
+use std::{borrow::Cow, ffi::OsString, num::NonZeroU64, ops::RangeInclusive, path::PathBuf};
 
 #[cfg(feature = "clap")]
 mod cli;
@@ -202,6 +202,29 @@ impl Default for VideoEncoding {
 }
 
 impl VideoEncoding {
+    pub fn preset(&self) -> Option<Cow<'static, str>> {
+        match self {
+            VideoEncoding::X264 { preset, .. } | VideoEncoding::X265 { preset, .. } => {
+                preset.map(|value| value.as_str().into())
+            }
+            VideoEncoding::Qsv { preset, .. } => preset.map(|value| value.as_str().into()),
+            VideoEncoding::Nvenc { preset, .. } => preset.map(|value| value.as_str().into()),
+            VideoEncoding::SvtAv1 { preset, .. } => preset.map(|value| value.to_string().into()),
+            VideoEncoding::AomAv1 { cpu_used, .. } => {
+                cpu_used.map(|value| value.to_string().into())
+            }
+            VideoEncoding::Rav1e { speed, .. } => speed.map(|value| value.to_string().into()),
+            VideoEncoding::Vaapi { .. } => None,
+        }
+    }
+
+    pub fn multipass(&self) -> Option<&'static str> {
+        match self {
+            VideoEncoding::Nvenc { multipass, .. } => multipass.map(|value| value.as_str()),
+            _ => None,
+        }
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             Self::X264 { .. } => "libx264",

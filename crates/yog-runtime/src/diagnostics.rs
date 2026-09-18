@@ -264,6 +264,17 @@ impl Diagnostics {
         }
     }
 
+    pub fn report_error(&self, path: Option<&Path>, error: &std::io::Error) {
+        if !self.terminal_output {
+            return;
+        }
+
+        match path {
+            Some(path) => eprintln!("warning: cannot write report {}: {error}", path.display()),
+            None => eprintln!("warning: cannot write report: {error}"),
+        }
+    }
+
     pub fn skipped_probe(&self, input: &Path, error: &anyhow::Error) {
         if !self.terminal_output {
             return;

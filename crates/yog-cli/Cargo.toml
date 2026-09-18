@@ -3,18 +3,18 @@ name = "yog-cli"
 version.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "yog"
+path = "src/main.rs"
+
 [dependencies]
 yog-core = { workspace = true, features = ["clap"] }
 yog-runtime.workspace = true
 
-tokio = { workspace = true, features = ["rt", "macros", "signal"] }
-tokio-util = { workspace = true, features = ["rt"] }
 clap = { workspace = true, features = ["derive"] }
 env_logger.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "signal"] }
+tokio-util = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
 serde_json.workspace = true
-
-[[bin]]
-name = "yog"
-path = "src/main.rs"

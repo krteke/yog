@@ -43,6 +43,8 @@ struct TranscodeArgs {
     overwrite: bool,
     #[arg(short, long, global = true)]
     verify: bool,
+    #[arg(long, global = true, value_name = "PATH")]
+    report: Option<PathBuf>,
     #[arg(
         long,
         global = true,
@@ -60,6 +62,8 @@ struct TranscodeArgs {
 struct PredictArgs {
     #[arg(short, long, global = true)]
     recursive: bool,
+    #[arg(long, global = true, value_name = "PATH")]
+    report: Option<PathBuf>,
     #[command(subcommand)]
     video: VideoEncoding,
 }
@@ -171,11 +175,13 @@ impl Args {
             verify: false,
             vmaf: None,
             terminal_output: !execution.quiet,
+            report: None,
         };
         let (operation, mut request, recursive) = match command {
             CliCommand::Transcode(args) => {
                 options.verify = args.verify;
                 options.vmaf = args.vmaf.map(Into::into);
+                options.report = args.report;
                 (
                     Operation::Transcode,
                     TranscodeRequest::new(input, args.output)
@@ -184,12 +190,15 @@ impl Args {
                     args.recursive,
                 )
             }
-            CliCommand::Predict(args) => (
-                Operation::Predict,
-                TranscodeRequest::new(input, PathBuf::new())
-                    .with_video(VideoAction::Encode(args.video)),
-                args.recursive,
-            ),
+            CliCommand::Predict(args) => {
+                options.report = args.report;
+                (
+                    Operation::Predict,
+                    TranscodeRequest::new(input, PathBuf::new())
+                        .with_video(VideoAction::Encode(args.video)),
+                    args.recursive,
+                )
+            }
             CliCommand::Emulate(args) => (
                 Operation::Emulate(EmulationOptions {
                     png: args.png,
@@ -237,22 +246,27 @@ mod tests {
     fn command_tree_scopes_operation_arguments() {
         Args::command().debug_assert();
 
-        let missing_input = Args::try_parse_from(["yog", "transcode", "-o", "output"])
-            .unwrap()
-            .into_runtime()
-            .unwrap_err();
-        assert_eq!(missing_input.kind(), ErrorKind::MissingRequiredArgument);
-        assert!(
-            missing_input
-                .to_string()
-                .contains("--input <PATH> is required")
+        for args in [
+            vec!["yog", "transcode", "-o", "output"],
+            vec!["yog", "-i", "input", "transcode", "--copy"],
+        ] {
+            let error = Args::try_parse_from(args).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument, "{error}");
+        }
+
+        assert_eq!(
+            Command {
+                request: TranscodeRequest::new("input", ""),
+                operation: Operation::Transcode,
+                recursive: false,
+            }
+            .validate()
+            .unwrap_err()
+            .to_string(),
+            "transcoding requires an output path"
         );
 
         for (args, kind) in [
-            (
-                vec!["yog", "-i", "input", "transcode", "--copy"],
-                ErrorKind::MissingRequiredArgument,
-            ),
             (
                 vec!["yog", "-i", "input", "predict", "--verify", "--encode-x264"],
                 ErrorKind::UnknownArgument,
@@ -282,9 +296,61 @@ mod tests {
                 vec!["yog", "-i", "input", "--predict", "--encode-x264"],
                 ErrorKind::UnknownArgument,
             ),
+            (
+                vec![
+                    "yog",
+                    "-i",
+                    "input",
+                    "emulate",
+                    "--png",
+                    "plot.png",
+                    "--encode-x264",
+                    "--report",
+                    "report.jsonl",
+                ],
+                ErrorKind::UnknownArgument,
+            ),
         ] {
             let error = Args::try_parse_from(args).unwrap_err();
             assert_eq!(error.kind(), kind, "{error}");
+        }
+    }
+
+    #[test]
+    fn reports_are_only_available_to_transcode_and_predict() {
+        for (_, _, options) in [
+            parse([
+                "yog",
+                "-i",
+                "input",
+                "transcode",
+                "-o",
+                "output",
+                "--copy",
+                "--report",
+                "report.jsonl",
+            ]),
+            parse([
+                "yog",
+                "-i",
+                "input",
+                "predict",
+                "--encode-x264",
+                "--report",
+                "report.jsonl",
+            ]),
+            parse([
+                "yog",
+                "-i",
+                "input",
+                "predict",
+                "--recursive",
+                "--report",
+                "report.jsonl",
+                "--encode-x264",
+            ]),
+        ] {
+            assert_eq!(options.report, Some(PathBuf::from("report.jsonl")));
         }
     }
 
@@ -380,6 +446,7 @@ mod tests {
         assert!(transcode.recursive);
         assert!(options.verify);
         assert_eq!(options.vmaf.unwrap().n_subsample, NonZeroU32::new(7));
+        assert!(options.report.is_none());
 
         let (_, prediction, options) = parse([
             "yog",
@@ -396,6 +463,7 @@ mod tests {
         assert!(prediction.recursive);
         assert!(!options.verify);
         assert!(options.vmaf.is_none());
+        assert!(options.report.is_none());
 
         let (_, emulation, _) = parse([
             "yog",

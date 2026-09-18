@@ -1,4 +1,4 @@
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Copy)]
 pub struct Progress {
     pub frame: Option<u64>,
     pub fps: Option<f64>,

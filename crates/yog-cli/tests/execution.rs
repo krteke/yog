@@ -1616,3 +1616,301 @@ esac"#,
         assert!(!PathBuf::from(format!("/proc/{pid}")).exists());
     }
 }
+
+fn read_report(fixture: &Fixture, name: &str) -> Vec<serde_json::Value> {
+    fs::read_to_string(fixture.0.join(name))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[test]
+fn transcode_reports_measured_result_and_stream_facts() {
+    use serde_json::Value;
+
+    let fixture = Fixture::new(
+        r#"for last do :; done
+printf 1234567 > "$last"
+printf 'frame=25\nfps=25.0\nspeed=2x\nout_time_us=1000000\ntotal_size=7\nprogress=end\n'"#,
+    );
+    fixture.tool(
+        "ffprobe",
+        r#"for last do :; done
+case "$last" in
+    input.mkv)
+        printf '%s' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","pix_fmt":"yuv420p","width":320,"height":180,"avg_frame_rate":"25/1","bit_rate":"1000"},{"index":1,"codec_type":"audio","codec_name":"aac","channels":2,"sample_rate":"48000"},{"index":2,"codec_type":"video","codec_name":"png","disposition":{"attached_pic":1}}],"format":{"format_name":"matroska,webm","duration":"1","start_time":"0"}}'
+        ;;
+    *)
+        printf '%s' '{"streams":[{"index":0,"codec_type":"video"}],"format":{"duration":"1"}}'
+        ;;
+esac"#,
+    );
+
+    let result = fixture
+        .command()
+        .args(["--copy", "--report", "report.jsonl"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(result.status.success(), "{stderr}");
+
+    let records = read_report(&fixture, "report.jsonl");
+    assert_eq!(records.len(), 1, "{records:?}");
+    let record = &records[0]["transcode"];
+    assert_eq!(record["status"], "success");
+    assert!(record["input"].as_str().unwrap().starts_with('/'));
+    assert!(record["input"].as_str().unwrap().ends_with("input.mkv"));
+    assert!(record["output"].as_str().unwrap().ends_with("output.mkv"));
+    assert_eq!(record["container"], "mkv");
+    assert_eq!(record["video"]["action"], "copy");
+    assert_eq!(record["video"]["encoder"], Value::Null);
+    assert_eq!(record["video"]["rate"], Value::Null);
+    assert_eq!(record["decoding"], "software");
+    assert_eq!(record["source"]["bytes"], 5);
+    assert_eq!(record["source"]["duration_seconds"], 1.0);
+    assert_eq!(
+        record["source"]["streams"],
+        serde_json::json!({"video":1,"audio":1,"subtitle":0,"attachment":0,"cover":1,"other":0})
+    );
+    assert_eq!(record["source"]["video"]["codec"], "h264");
+    assert_eq!(record["source"]["video"]["width"], 320);
+    assert_eq!(record["source"]["video"]["frame_rate"], "25/1");
+    assert_eq!(record["source"]["video"]["bit_rate"], "1000");
+    assert_eq!(
+        record["source"]["audio"],
+        serde_json::json!([{"codec":"aac","channels":2,"sample_rate":"48000"}])
+    );
+    assert_eq!(record["result"]["bytes"], 7);
+    assert_eq!(record["result"]["duration_seconds"], 1.0);
+    assert_eq!(record["result"]["size_percent"], 140.0);
+    assert_eq!(record["result"]["frames"], 25);
+    assert_eq!(record["result"]["fps"], 25.0);
+    assert!(record["result"]["elapsed_seconds"].as_f64().unwrap() > 0.0);
+    assert!(record["result"]["speed"].as_f64().unwrap() > 0.0);
+    assert_eq!(record["verify"], Value::Null);
+    assert_eq!(record["vmaf"], Value::Null);
+    assert_eq!(record["error"], Value::Null);
+}
+
+#[test]
+fn predictions_are_reported_with_the_configuration_that_produced_them() {
+    let fixture = Fixture::new(
+        r#"printf '%s\n' "$*" >> ffmpeg-commands
+filter=''
+cover=false
+image=false
+for argument do
+    case "$argument" in
+        encoder=libx264)
+            printf '%s\n' 'Encoder libx264 [test]' '    Supported pixel formats: yuv420p'
+            exit 0
+            ;;
+        *libvmaf=*) filter=$argument ;;
+        -attach) cover=true ;;
+        image2pipe) image=true ;;
+    esac
+done
+if test -n "$filter"; then
+    metrics=${filter#*log_path=\'}
+    metrics=${metrics%%\':shortest=*}
+    printf '%s' '{"frames":[{"frameNum":0,"metrics":{"vmaf":96.5,"float_ssim":0.99,"psnr_y":42.0}}]}' > "$metrics"
+    exit 0
+fi
+if test "$image" = true; then
+    printf cover
+    exit 0
+fi
+for last do :; done
+if test "$cover" = true; then
+    printf 12345678901234567890 > "$last"
+    printf 'out_time_us=1000000\nspeed=1x\nprogress=end\n'
+else
+    printf 123456789012345 > "$last"
+    printf 'out_time_us=2000000\nspeed=4x\nprogress=end\n'
+fi"#,
+    );
+    fixture.tool(
+        "ffprobe",
+        r#"packets=false
+for argument do
+    test "$argument" = -show_packets && packets=true
+done
+for last do :; done
+if test "$packets" = true; then
+    printf '%s' '{"packets":[{"stream_index":0,"size":"10"}]}'
+    exit 0
+fi
+case "$last" in
+    input.mkv)
+        printf '%s' '{"streams":[{"index":0,"codec_type":"video","width":320,"height":180,"pix_fmt":"yuv420p"},{"index":1,"codec_type":"video","codec_name":"png","disposition":{"attached_pic":1}},{"index":2,"codec_type":"attachment","extradata_size":7}],"format":{"format_name":"matroska,webm","duration":"4"},"pixel_formats":[{"name":"yuv420p","nb_components":3,"log2_chroma_w":1,"log2_chroma_h":1,"flags":{"rgb":0,"alpha":0,"palette":0,"hwaccel":0},"components":[{"bit_depth":8},{"bit_depth":8},{"bit_depth":8}]}]}'
+        ;;
+    *)
+        if test "$(wc -c < "$last")" = 20; then
+            printf '%s' '{"streams":[{"index":0,"codec_type":"video"},{"index":1,"codec_type":"attachment","extradata_size":5}],"format":{"duration":"1"}}'
+        else
+            printf '%s' '{"streams":[{"index":0,"codec_type":"video"}],"format":{"duration":"1"}}'
+        fi
+        ;;
+esac"#,
+    );
+
+    let result = fixture
+        .analysis_command()
+        .args(["predict", "--encode-x264", "--report", "report.jsonl"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(result.status.success(), "{stderr}");
+
+    let records = read_report(&fixture, "report.jsonl");
+    assert_eq!(records.len(), 1, "{records:?}");
+    let record = &records[0]["predict"];
+    assert_eq!(record["status"], "success");
+    assert!(record["input"].as_str().unwrap().starts_with('/'));
+    assert_eq!(record["container"], "mkv");
+    assert_eq!(record["video"]["encoder"], "libx264");
+    assert_eq!(record["decoding"], "software");
+    assert_eq!(
+        record["sampling"],
+        serde_json::json!({
+            "requested_samples": 5,
+            "sample_seconds": 2.0,
+            "measured_samples": 2,
+            "sampled_seconds": 4.0
+        })
+    );
+    assert_eq!(record["source"]["bytes"], 5);
+    assert_eq!(record["source"]["duration_seconds"], 4.0);
+    assert_eq!(record["source"]["streams"]["video"], 1);
+    assert_eq!(record["source"]["streams"]["cover"], 1);
+    assert!((record["speed"]["value"].as_f64().unwrap() - 8.0 / 3.0).abs() < 1e-9);
+    assert_eq!(record["speed"]["low"], 2.0);
+    assert_eq!(record["speed"]["high"], 4.0);
+    assert!((record["transcode_seconds"]["value"].as_f64().unwrap() - 1.5).abs() < 1e-9);
+    assert_eq!(
+        record["output_bytes"],
+        serde_json::json!({"value": 42, "low": 42, "high": 42})
+    );
+    assert!((record["size_percent"].as_f64().unwrap() - 840.0).abs() < 1e-9);
+    assert_eq!(record["quality"]["frames"], 2);
+    assert_eq!(record["quality"]["source_stream_index"], 0);
+    assert_eq!(record["quality"]["vmaf"]["value"], 96.5);
+    assert_eq!(record["quality"]["ssim"]["value"], 0.99);
+    assert_eq!(record["quality"]["psnr_y_db"]["value"], 42.0);
+    assert_eq!(record["samples"].as_array().unwrap().len(), 2);
+    assert_eq!(record["samples"][0]["start_seconds"], 0.0);
+    assert_eq!(record["samples"][0]["timed_payload_bytes"], 10);
+    assert_eq!(record["samples"][0]["vmaf"], 96.5);
+    assert_eq!(record["samples"][0]["scored_frames"], 1);
+    assert_eq!(record["samples"][1]["start_seconds"], 2.0);
+    assert_eq!(record["error"], serde_json::Value::Null);
+}
+
+#[test]
+fn recursive_reports_include_skipped_inputs_and_failures() {
+    let fixture = Fixture::new(
+        r#"previous=''
+source=''
+for argument do
+    if test "$previous" = -i; then source=$argument; fi
+    previous=$argument
+done
+case "$source" in
+    input/bad.mkv) printf 'BAD-TRANSCODE\n' >&2; exit 9 ;;
+esac
+for last do :; done
+printf encoded > "$last"
+printf 'frame=1\nout_time_us=1000000\nspeed=1x\nprogress=end\n'"#,
+    );
+    fs::create_dir(fixture.0.join("input")).unwrap();
+    for input in ["first.mkv", "bad.mkv", "last.mkv"] {
+        fs::write(fixture.0.join("input").join(input), b"video").unwrap();
+    }
+    fs::write(fixture.0.join("input/notes.md"), b"notes").unwrap();
+    fixture.tool(
+        "ffprobe",
+        r#"for last do :; done
+case "$last" in
+    input/notes.md) printf 'NOT-MEDIA\n' >&2; exit 1 ;;
+esac
+printf '%s' '{"streams":[{"index":0,"codec_type":"video"}],"format":{"format_name":"matroska,webm","duration":"1"}}'"#,
+    );
+
+    let result = fixture
+        .recursive_command("output")
+        .args(["--copy", "--report", "report.jsonl"])
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(1), "{:?}", result.stderr);
+
+    let records = read_report(&fixture, "report.jsonl");
+    assert_eq!(records.len(), 4, "{records:?}");
+
+    let skipped: Vec<_> = records
+        .iter()
+        .filter_map(|row| row["skipped"].as_object())
+        .collect();
+    assert_eq!(skipped.len(), 1);
+    assert!(skipped[0]["input"].as_str().unwrap().ends_with("notes.md"));
+    let reason = skipped[0]["reason"].as_str().unwrap();
+    assert!(reason.contains("probe failed"), "{reason}");
+
+    let items: Vec<_> = records
+        .iter()
+        .filter_map(|row| row["transcode"].as_object())
+        .collect();
+    assert_eq!(items.len(), 3);
+    assert_eq!(
+        items
+            .iter()
+            .filter(|item| item["status"] == "success")
+            .count(),
+        2
+    );
+    let failed: Vec<_> = items
+        .iter()
+        .filter(|item| item["status"] == "failure")
+        .collect();
+    assert_eq!(failed.len(), 1);
+    assert!(failed[0]["input"].as_str().unwrap().ends_with("bad.mkv"));
+    assert!(
+        failed[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("transcode failed")
+    );
+    for item in items.iter().filter(|item| item["status"] == "success") {
+        assert_eq!(item["result"]["bytes"], 7);
+        assert_eq!(item["source"]["bytes"], 5);
+    }
+}
+
+#[test]
+fn reports_survive_failures_and_reject_conflicting_paths() {
+    let fixture = Fixture::new("");
+    fixture.tool("ffprobe", "touch ffprobe-started");
+
+    assert!(!fixture.0.join("ffprobe-started").exists());
+    assert!(!fixture.0.join("output.mkv").exists());
+
+    let fixture = Fixture::new("printf 'BOOM\n' >&2; exit 7");
+    fs::write(fixture.0.join("report.jsonl"), b"stale line\n").unwrap();
+    let result = fixture
+        .command()
+        .args(["--copy", "--report", "report.jsonl"])
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(1), "{:?}", result.stderr);
+    let records = read_report(&fixture, "report.jsonl");
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0]["transcode"]["status"], "failure");
+    assert!(
+        records[0]["transcode"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("transcode failed"),
+        "{}",
+        records[0]
+    );
+}

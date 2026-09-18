@@ -5,12 +5,14 @@ mod error;
 mod output;
 mod progress;
 mod recursive;
+mod report;
 mod transcode;
 mod validate;
 mod verify;
 
 use diagnostics::Diagnostics;
 use error::RunError;
+use report::{Record, Report, Status};
 use std::{path::PathBuf, time::Duration};
 use tokio_util::sync::CancellationToken;
 use transcode::Transcoder;
@@ -19,6 +21,8 @@ use yog_core::ffmpeg::{plan::TranscodeRequest, vmaf::VmafOptions};
 pub use config::Config;
 pub use emulate::EmulationOptions;
 pub use validate::Validate;
+
+use crate::report::record::{PredictRecord, SkippedRecord, TaskRecord, TranscodeRecord};
 
 #[derive(Debug)]
 pub struct Command {
@@ -43,6 +47,7 @@ pub struct Options {
     pub verify: bool,
     pub vmaf: Option<VmafOptions>,
     pub terminal_output: bool,
+    pub report: Option<PathBuf>,
 }
 
 impl Default for Options {
@@ -55,6 +60,7 @@ impl Default for Options {
             verify: false,
             vmaf: None,
             terminal_output: true,
+            report: None,
         }
     }
 }
@@ -113,30 +119,107 @@ pub async fn run(
         return RunOutcome::Failed(error);
     }
 
-    let transcoder = Transcoder::new(&options, config, cancellation.clone());
-    if command.recursive {
-        return run_batch(command, &transcoder, &diagnostics, &cancellation).await;
-    }
-
-    let result = match &command.operation {
-        Operation::Transcode => transcoder.run(command.request, &diagnostics).await,
-        Operation::Predict => transcoder.predict(command.request, &diagnostics).await,
-        Operation::Emulate(options) => {
-            transcoder
-                .emulate(command.request, options, &diagnostics)
-                .await
+    let mut report = match Report::try_from(options.report.as_deref()) {
+        Ok(report) => report,
+        Err(error) => {
+            diagnostics.error(&error);
+            return RunOutcome::Failed(error);
         }
     };
 
-    match result {
-        Ok(()) => RunOutcome::Completed,
-        Err(RunError::Cancelled) => {
+    let transcoder = Transcoder::new(&options, config, cancellation.clone());
+    let outcome = if command.recursive {
+        run_batch(
+            command,
+            &transcoder,
+            &diagnostics,
+            &cancellation,
+            &mut report,
+        )
+        .await
+    } else {
+        run_single(command, &transcoder, &diagnostics, &mut report).await
+    };
+    report.finish(&diagnostics);
+
+    outcome
+}
+
+enum TaskOutcome {
+    Success,
+    Failed(anyhow::Error),
+    Cancelled,
+}
+
+impl From<Result<(), RunError>> for TaskOutcome {
+    fn from(value: Result<(), RunError>) -> Self {
+        match value {
+            Ok(()) => Self::Success,
+            Err(RunError::Cancelled) => Self::Cancelled,
+            Err(RunError::Failed(error)) => Self::Failed(error),
+        }
+    }
+}
+
+fn finish_record<R: TaskRecord>(record: R, outcome: &TaskOutcome) -> Record {
+    match outcome {
+        TaskOutcome::Success => record.finish(Status::Success, None),
+        TaskOutcome::Cancelled => record.finish(Status::Cancelled, None),
+        TaskOutcome::Failed(error) => record.finish(Status::Failure, Some(format!("{error:#}"))),
+    }
+}
+
+fn record_task<R: TaskRecord>(
+    record: R,
+    outcome: &TaskOutcome,
+    report: &mut Report,
+    diagnostics: &Diagnostics,
+) {
+    report.write(&finish_record(record, outcome), diagnostics);
+}
+
+fn finish(outcome: TaskOutcome, diagnostics: &Diagnostics) -> RunOutcome {
+    match outcome {
+        TaskOutcome::Success => RunOutcome::Completed,
+        TaskOutcome::Cancelled => {
             diagnostics.cancelled();
             RunOutcome::Cancelled
         }
-        Err(RunError::Failed(error)) => {
+        TaskOutcome::Failed(error) => {
             diagnostics.error(&error);
             RunOutcome::Failed(error)
+        }
+    }
+}
+
+async fn run_single(
+    command: Command,
+    transcoder: &Transcoder,
+    diagnostics: &Diagnostics,
+    report: &mut Report,
+) -> RunOutcome {
+    let Command {
+        request, operation, ..
+    } = command;
+
+    match operation {
+        Operation::Transcode => {
+            let mut record = TranscodeRecord::new(&request);
+            let result = transcoder.run(request, diagnostics, &mut record).await;
+            let outcome = result.into();
+            record_task(record, &outcome, report, diagnostics);
+            finish(outcome, diagnostics)
+        }
+        Operation::Predict => {
+            let mut record = PredictRecord::new(&request, transcoder.prediction_options());
+            let result = transcoder.predict(request, diagnostics, &mut record).await;
+            let outcome = result.into();
+            record_task(record, &outcome, report, diagnostics);
+            finish(outcome, diagnostics)
+        }
+        Operation::Emulate(options) => {
+            let result = transcoder.emulate(request, &options, diagnostics).await;
+            finish(result.into(), diagnostics)
         }
     }
 }
@@ -146,10 +229,15 @@ async fn run_batch(
     transcoder: &Transcoder,
     diagnostics: &Diagnostics,
     cancellation: &CancellationToken,
+    report: &mut Report,
 ) -> RunOutcome {
-    let predict = matches!(&command.operation, Operation::Predict);
-    let tasks = match recursive::discover(command.request, transcoder, diagnostics, predict).await {
-        Ok(tasks) => tasks,
+    let Command {
+        request, operation, ..
+    } = command;
+    let predict = matches!(operation, Operation::Predict);
+    let input_root = request.input.clone();
+    let discovery = match recursive::discover(request, transcoder, diagnostics, predict).await {
+        Ok(discovery) => discovery,
         Err(RunError::Cancelled) => {
             diagnostics.cancelled();
             return RunOutcome::Cancelled;
@@ -159,25 +247,55 @@ async fn run_batch(
             return RunOutcome::Failed(error);
         }
     };
-    let total = tasks.len();
+    let total = discovery.tasks.len();
     let mut succeeded = 0;
     let mut failures = Vec::new();
 
-    for (request, media) in tasks {
+    for skipped in &discovery.skipped {
+        report.write(
+            &Record::Skipped(SkippedRecord::new(&skipped.input, &skipped.error)),
+            diagnostics,
+        );
+    }
+
+    if discovery.tasks.is_empty() {
+        let error = anyhow::anyhow!("no video files found in {}", input_root.display());
+        diagnostics.error(&error);
+        return RunOutcome::Failed(error);
+    }
+
+    for (request, media) in discovery.tasks {
         let input = request.input.clone();
         diagnostics.begin_task();
-        let result = match &command.operation {
-            Operation::Predict => transcoder.predict_probed(request, media, diagnostics).await,
-            Operation::Transcode => transcoder.run_probed(request, media, diagnostics).await,
+        let (line, outcome) = match &operation {
+            Operation::Predict => {
+                let mut record = PredictRecord::new(&request, transcoder.prediction_options());
+                let result = transcoder
+                    .predict_probed(request, media, diagnostics, &mut record)
+                    .await;
+                let outcome = result.into();
+                let line = finish_record(record, &outcome);
+                (line, outcome)
+            }
+            Operation::Transcode => {
+                let mut record = TranscodeRecord::new(&request);
+                let result = transcoder
+                    .run_probed(request, media, diagnostics, &mut record)
+                    .await;
+                let outcome = result.into();
+                let line = finish_record(record, &outcome);
+                (line, outcome)
+            }
             Operation::Emulate(_) => unreachable!("validated recursive command cannot emulate"),
         };
-        match result {
-            Ok(()) => succeeded += 1,
-            Err(RunError::Failed(error)) => {
+        report.write(&line, diagnostics);
+        match outcome {
+            TaskOutcome::Success => succeeded += 1,
+            TaskOutcome::Failed(error) => {
                 diagnostics.task_error(&input, &error);
                 failures.push(TaskFailure { input, error });
             }
-            Err(RunError::Cancelled) => break,
+            TaskOutcome::Cancelled => break,
         }
     }
 

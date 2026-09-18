@@ -1,15 +1,26 @@
 use crate::{diagnostics::Diagnostics, error::RunError, transcode::Transcoder};
 use anyhow::Context;
 use std::collections::HashSet;
+use std::path::PathBuf;
 use walkdir::WalkDir;
 use yog_core::{ffmpeg::plan::TranscodeRequest, ffprobe::types::MediaInfo};
+
+pub struct Discovery {
+    pub tasks: Vec<(TranscodeRequest, MediaInfo)>,
+    pub skipped: Vec<SkippedInput>,
+}
+
+pub struct SkippedInput {
+    pub input: PathBuf,
+    pub error: anyhow::Error,
+}
 
 pub async fn discover(
     template: TranscodeRequest,
     transcoder: &Transcoder,
     diagnostics: &Diagnostics,
     predict: bool,
-) -> Result<Vec<(TranscodeRequest, MediaInfo)>, RunError> {
+) -> Result<Discovery, RunError> {
     if !template.input.is_dir() {
         return Err(RunError::Failed(anyhow::anyhow!(
             "recursive input is not a directory: {}",
@@ -24,6 +35,7 @@ pub async fn discover(
     }
 
     let mut tasks = Vec::new();
+    let mut skipped = Vec::new();
     let mut outputs = HashSet::new();
     for entry in WalkDir::new(&template.input) {
         let entry = entry
@@ -39,6 +51,7 @@ pub async fn discover(
             Err(RunError::Cancelled) => return Err(RunError::Cancelled),
             Err(RunError::Failed(error)) => {
                 diagnostics.skipped_probe(&input, &error);
+                skipped.push(SkippedInput { input, error });
                 continue;
             }
         };
@@ -77,11 +90,5 @@ pub async fn discover(
         tasks.push((request, media));
     }
 
-    if tasks.is_empty() {
-        return Err(RunError::Failed(anyhow::anyhow!(
-            "no video files found in {}",
-            template.input.display()
-        )));
-    }
-    Ok(tasks)
+    Ok(Discovery { tasks, skipped })
 }

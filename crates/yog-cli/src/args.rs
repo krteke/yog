@@ -1,5 +1,5 @@
 use clap::{ArgGroup, CommandFactory, Parser, Subcommand};
-use std::{num::NonZeroU32, ops::RangeInclusive, path::PathBuf, str::FromStr, time::Duration};
+use std::{num::NonZeroU32, path::PathBuf, str::FromStr, time::Duration};
 use yog_core::ffmpeg::{
     encoding::VideoEncoding,
     plan::{Container, TranscodeRequest, VideoAction},
@@ -80,8 +80,9 @@ struct EmulateArgs {
     png: Option<PathBuf>,
     #[arg(long, group = "emulation_output", value_name = "PATH")]
     svg: Option<PathBuf>,
-    #[arg(long, value_parser = parse_quality_range, value_name = "MIN,MAX")]
-    range: Option<RangeInclusive<u8>>,
+    /// e.g. --range=20,25,30-35
+    #[arg(long, value_parser = parse_quality_points, global = true, value_name = "POINTS")]
+    range: Vec<QualityPoints>,
     #[arg(short = 'O', long, global = true)]
     overwrite: bool,
     #[command(subcommand)]
@@ -133,23 +134,44 @@ impl From<VmafMode> for VmafOptions {
     }
 }
 
-fn parse_quality_range(value: &str) -> Result<RangeInclusive<u8>, String> {
-    let Some((start, end)) = value.split_once(',') else {
-        return Err("expected MIN,MAX".to_owned());
-    };
-    let start = start
-        .trim()
-        .parse::<u8>()
-        .map_err(|_| "MIN must be an integer from 0 to 255".to_owned())?;
-    let end = end
-        .trim()
-        .parse::<u8>()
-        .map_err(|_| "MAX must be an integer from 0 to 255".to_owned())?;
-    if start > end {
-        return Err("MIN must not exceed MAX".to_owned());
+#[derive(Debug, Clone)]
+struct QualityPoints(Vec<u8>);
+
+fn parse_quality_points(value: &str) -> Result<QualityPoints, String> {
+    let mut points = Vec::with_capacity(64);
+
+    for segment in value.split(',') {
+        let segment = segment.trim();
+        if segment.is_empty() {
+            return Err("expected a quality value or range".to_owned());
+        }
+        match segment.split_once('-') {
+            Some((start, end)) => {
+                let start = parse_quality(start, segment)?;
+                let end = parse_quality(end, segment)?;
+                if start > end {
+                    return Err(format!("quality range {segment} must be ascending"));
+                }
+                points.extend(start..=end);
+            }
+            None => points.push(parse_quality(segment, segment)?),
+        }
     }
 
-    Ok(start..=end)
+    Ok(QualityPoints(sorted(points)))
+}
+
+fn parse_quality(value: &str, segment: &str) -> Result<u8, String> {
+    value
+        .trim()
+        .parse::<u8>()
+        .map_err(|_| format!("quality {segment} must be an integer from 0 to 255"))
+}
+
+fn sorted(mut points: Vec<u8>) -> Vec<u8> {
+    points.sort_unstable();
+    points.dedup();
+    points
 }
 
 impl Args {
@@ -203,7 +225,12 @@ impl Args {
                 Operation::Emulate(EmulationOptions {
                     png: args.png,
                     svg: args.svg,
-                    qualities: args.range,
+                    qualities: sorted(
+                        args.range
+                            .into_iter()
+                            .flat_map(|QualityPoints(points)| points)
+                            .collect(),
+                    ),
                 }),
                 TranscodeRequest::new(input, PathBuf::new())
                     .with_video(VideoAction::Encode(args.video))
@@ -475,7 +502,7 @@ mod tests {
             "--svg",
             "quality.svg",
             "--range",
-            "20,22",
+            "20-22",
             "--overwrite",
             "--encode-x264",
         ]);
@@ -483,12 +510,65 @@ mod tests {
         assert!(emulation.request.output.as_os_str().is_empty());
         assert!(emulation.request.overwrite);
         assert!(matches!(
-            emulation.operation,
-            Operation::Emulate(EmulationOptions {
-                qualities: Some(ref range),
-                ..
-            }) if range == &(20..=22)
+            &emulation.operation,
+            Operation::Emulate(EmulationOptions { qualities, .. }) if qualities == &vec![20, 21, 22]
         ));
+    }
+
+    #[test]
+    fn quality_points_expand_merge_sort_and_deduplicate() {
+        for (range, expected) in [
+            ("20", vec![20]),
+            ("20,22", vec![20, 22]),
+            ("20-22", vec![20, 21, 22]),
+            ("20-22,25", vec![20, 21, 22, 25]),
+            ("20-25,23-30", (20..=30).collect::<Vec<u8>>()),
+            ("30,10-12,30", vec![10, 11, 12, 30]),
+            ("20-20", vec![20]),
+            (" 20 - 22 , 25 ", vec![20, 21, 22, 25]),
+            ("0-255", (0..=255).collect::<Vec<u8>>()),
+        ] {
+            assert_eq!(qualities(["--range", range]), expected, "{range}");
+        }
+
+        // Repeating the flag accumulates every occurrence.
+        assert_eq!(
+            qualities(["--range", "18-20", "--range", "25,20"]),
+            vec![18, 19, 20, 25],
+        );
+    }
+
+    #[test]
+    fn quality_points_reject_malformed_ranges() {
+        for range in [
+            "", "-", "20-", "-20", "20-22-24", "20,,25", "  ", "256", "20,256", "30-20", "20-20-21",
+        ] {
+            assert!(
+                Args::try_parse_from([
+                    "yog",
+                    "-i",
+                    "input",
+                    "emulate",
+                    "--png",
+                    "plot.png",
+                    format!("--range={range}").as_str(),
+                    "--encode-x264",
+                ])
+                .is_err(),
+                "{range:?} must be rejected"
+            );
+        }
+    }
+
+    fn qualities<const N: usize>(range: [&str; N]) -> Vec<u8> {
+        let mut args = vec!["yog", "-i", "input", "emulate", "--png", "plot.png"];
+        args.extend(range);
+        args.push("--encode-x264");
+        let (_, command, _) = Args::try_parse_from(args).unwrap().into_runtime().unwrap();
+        match command.operation {
+            Operation::Emulate(EmulationOptions { qualities, .. }) => qualities,
+            operation => panic!("expected emulation, got {operation:?}"),
+        }
     }
 
     #[test]
@@ -511,7 +591,7 @@ mod tests {
                 "--png",
                 "plot.png",
                 "--range",
-                "30,20",
+                "30-20",
                 "--encode-x264",
             ],
             vec![
@@ -522,7 +602,7 @@ mod tests {
                 "--png",
                 "plot.png",
                 "--range",
-                "256,257",
+                "256",
                 "--encode-x264",
             ],
         ] {
@@ -539,10 +619,10 @@ mod tests {
                     "--png",
                     "plot.png",
                     "--range",
-                    "50,52",
+                    "50-52",
                     "--encode-x264",
                 ],
-                "libx264 quality range must be within 0..=51, got 50..=52",
+                "libx264 quality must be within 0..=51",
             ),
             (
                 vec![

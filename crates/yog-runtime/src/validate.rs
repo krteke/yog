@@ -57,17 +57,18 @@ impl Validate for Command {
                     "emulation does not accept a fixed quality or bitrate"
                 );
 
-                if let Some(range) = &options.qualities {
-                    anyhow::ensure!(range.start() <= range.end(), "MIN must not exceed MAX");
-                    let supported = encoding.quality_range();
+                let supported = encoding.quality_range();
+                if !options.qualities.is_empty() {
+                    let start = *supported.start();
+                    let end = *supported.end();
+                    let qualities = options.qualities.as_slice();
+
                     anyhow::ensure!(
-                        supported.contains(range.start()) && supported.contains(range.end()),
-                        "{} quality range must be within {}..={}, got {}..={}",
+                        qualities[0] >= start && qualities[qualities.len() - 1] <= end,
+                        "{} quality must be within {}..={}",
                         encoding.name(),
-                        supported.start(),
-                        supported.end(),
-                        range.start(),
-                        range.end(),
+                        start,
+                        end,
                     );
                 }
             }

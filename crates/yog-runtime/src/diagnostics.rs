@@ -1,6 +1,5 @@
 use std::{
     fmt::Write,
-    ops::RangeInclusive,
     path::Path,
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -165,7 +164,7 @@ impl Diagnostics {
         &self,
         input: &Path,
         parameter: &str,
-        qualities: &RangeInclusive<u8>,
+        qualities: &[u8],
         options: &EmulationOptions,
     ) {
         if !self.terminal_output {
@@ -173,10 +172,9 @@ impl Diagnostics {
         }
 
         let mut report = format!(
-            "emulation: {} | {parameter} {}..={}",
+            "emulation: {} | {parameter} {}",
             input.display(),
-            qualities.start(),
-            qualities.end(),
+            format_qualities(qualities),
         );
         if let Some(path) = &options.png {
             write!(report, " | PNG {}", path.display()).unwrap();
@@ -316,6 +314,54 @@ impl Diagnostics {
         eprint!("{}", String::from_utf8_lossy(&error.stderr));
         if !error.stderr.ends_with(b"\n") {
             eprintln!();
+        }
+    }
+}
+
+fn format_qualities(qualities: &[u8]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut run: Option<(u8, u8)> = None;
+
+    for &quality in qualities {
+        run = Some(match run {
+            Some((start, end)) if quality == end.saturating_add(1) => (start, quality),
+            Some((start, end)) => {
+                parts.push(format_run(start, end));
+                (quality, quality)
+            }
+            None => (quality, quality),
+        });
+    }
+    if let Some((start, end)) = run {
+        parts.push(format_run(start, end));
+    }
+
+    parts.join(",")
+}
+
+fn format_run(start: u8, end: u8) -> String {
+    if start == end {
+        start.to_string()
+    } else {
+        format!("{start}-{end}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_qualities;
+
+    #[test]
+    fn quality_points_collapse_into_ascending_runs() {
+        for (qualities, expected) in [
+            (vec![20], "20"),
+            (vec![20, 21, 22], "20-22"),
+            (vec![18, 19, 20, 25], "18-20,25"),
+            (vec![0, 255], "0,255"),
+            (vec![254, 255], "254-255"),
+            (Vec::new(), ""),
+        ] {
+            assert_eq!(format_qualities(&qualities), expected, "{qualities:?}");
         }
     }
 }

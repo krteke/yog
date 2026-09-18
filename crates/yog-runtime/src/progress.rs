@@ -23,9 +23,10 @@ impl Display {
         Self::with_template(visible, tick_interval, "{spinner} {msg}")
     }
 
-    pub fn emulate_quality(&self, parameter: &str, quality: u8, maximum: u8) {
-        self.bar
-            .set_message(format!("Emulating {parameter} {quality}/{maximum}..."));
+    pub fn emulate_quality(&self, parameter: &str, quality: u8, index: usize, total: usize) {
+        self.bar.set_message(format!(
+            "Emulating {parameter} {quality} ({index}/{total})..."
+        ));
     }
 
     pub fn calculating_vmaf(visible: bool, tick_interval: Duration) -> Self {

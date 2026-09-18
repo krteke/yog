@@ -154,13 +154,14 @@ where
     DB: DrawingBackend,
     DB::ErrorType: 'static,
 {
-    let first = points
-        .first()
-        .expect("emulation quality range always produces at least one point");
-    let last = points
-        .last()
-        .expect("emulation quality range always produces at least one point");
-    let quality_values = [first.quality as f64, last.quality as f64];
+    if points.is_empty() {
+        anyhow::bail!("cannot render an emulation chart without quality points");
+    }
+
+    let minimum = points[0].quality;
+    let maximum = points[points.len() - 1].quality;
+
+    let quality_values = [f64::from(minimum), f64::from(maximum)];
     let quality_bounds = axis_bounds(quality_values[0], quality_values[1], 0.5);
     let (vmaf_minimum, vmaf_maximum) = value_bounds(points, |point| point.vmaf);
     let vmaf_bounds = axis_bounds(vmaf_minimum, vmaf_maximum, 0.5);
@@ -270,7 +271,7 @@ fn value_bounds(points: &[EmulationPoint], value: impl Fn(&EmulationPoint) -> f6
     let mut values = points.iter().map(value);
     let first = values
         .next()
-        .expect("emulation quality range always produces at least one point");
+        .expect("emulation charts are rendered with at least one point");
     values.fold((first, first), |(minimum, maximum), value| {
         (minimum.min(value), maximum.max(value))
     })

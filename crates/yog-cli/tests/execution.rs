@@ -363,7 +363,7 @@ fi"#,
             "--svg",
             "quality.svg",
             "--range",
-            "20,22",
+            "20-22",
             "--encode-svt-av1",
             "--preset",
             "6",
@@ -412,7 +412,7 @@ fi"#,
         );
     }
     assert_eq!(stdout.lines().count(), 1, "{stdout}");
-    assert!(stdout.contains("CRF 20..=22"), "{stdout}");
+    assert!(stdout.contains("CRF 20-22"), "{stdout}");
     assert!(stdout.contains("PNG quality.png"), "{stdout}");
     assert!(stdout.contains("SVG quality.svg"), "{stdout}");
 
@@ -436,6 +436,43 @@ fi"#,
     assert!(result.status.success(), "{:?}", result.stderr);
     let svg = fs::read_to_string(fixture.0.join("outside.svg")).unwrap();
     assert!(!svg.contains("Input size:"), "{svg}");
+
+    // Sparse points must not be expanded into the qualities between them.
+    let result = fixture
+        .analysis_command()
+        .args([
+            "--config",
+            "emulation.toml",
+            "emulate",
+            "--png",
+            "sparse.png",
+            "--range",
+            "30-31,35",
+            "--encode-svt-av1",
+            "--preset",
+            "6",
+        ])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(
+        result.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(stdout.contains("CRF 30-31,35"), "{stdout}");
+    let commands = fs::read_to_string(fixture.0.join("ffmpeg-commands")).unwrap();
+    for quality in 30..=35 {
+        let expected = usize::from(matches!(quality, 30 | 31 | 35));
+        assert_eq!(
+            commands
+                .lines()
+                .filter(|command| command.contains(&format!("-crf:v {quality}")))
+                .count(),
+            expected,
+            "{commands}",
+        );
+    }
 }
 
 #[test]

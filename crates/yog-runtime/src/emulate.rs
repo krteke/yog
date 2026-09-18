@@ -9,7 +9,17 @@ use yog_core::ffmpeg::plan::{TranscodeRequest, VideoAction};
 pub struct EmulationOptions {
     pub png: Option<PathBuf>,
     pub svg: Option<PathBuf>,
-    pub qualities: Option<RangeInclusive<u8>>,
+    pub qualities: Vec<u8>,
+}
+
+impl EmulationOptions {
+    fn select_qualities(&self, full: RangeInclusive<u8>) -> Vec<u8> {
+        if self.qualities.is_empty() {
+            return full.collect();
+        }
+
+        self.qualities.clone()
+    }
 }
 
 struct EmulationPoint {
@@ -47,19 +57,16 @@ impl Transcoder {
         let VideoAction::Encode(encoding) = &request.video else {
             unreachable!("emulation arguments require a video encoder");
         };
-        let qualities = options
-            .qualities
-            .clone()
-            .unwrap_or_else(|| encoding.quality_range());
-        let maximum = *qualities.end();
-        let quality_parameter = encoding.quality_parameter();
-        let mut points = Vec::with_capacity(qualities.clone().count());
+        let qualities = options.select_qualities(encoding.quality_range());
 
-        for quality in qualities.clone() {
+        let quality_parameter = encoding.quality_parameter();
+        let mut points = Vec::with_capacity(qualities.len());
+
+        for (index, &quality) in qualities.iter().enumerate() {
             if self.cancelled() {
                 return Err(RunError::Cancelled);
             }
-            progress.emulate_quality(quality_parameter, quality, maximum);
+            progress.emulate_quality(quality_parameter, quality, index + 1, qualities.len());
             let mut sample_request = request.clone();
             let VideoAction::Encode(encoding) = &mut sample_request.video else {
                 unreachable!("emulation arguments require a video encoder");

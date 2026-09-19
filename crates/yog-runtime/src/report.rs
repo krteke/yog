@@ -13,7 +13,7 @@ use yog_core::{ffmpeg::plan::TranscodeRequest, ffprobe::types::MediaInfo};
 
 use crate::{
     diagnostics::Diagnostics,
-    report::record::{PredictRecord, SkippedRecord, TranscodeRecord},
+    report::record::{EmulateRecord, PredictRecord, SkippedRecord, TranscodeRecord},
 };
 
 trait ToAbsolute {
@@ -23,6 +23,7 @@ trait ToAbsolute {
 impl ToAbsolute for Path {
     fn to_absolute(&self) -> String {
         self.canonicalize()
+            .or_else(|_| std::path::absolute(self))
             .unwrap_or_else(|_| self.to_path_buf())
             .to_string_lossy()
             .into_owned()
@@ -34,6 +35,7 @@ impl ToAbsolute for Path {
 pub enum Record {
     Transcode(TranscodeRecord),
     Predict(PredictRecord),
+    Emulate(EmulateRecord),
     Skipped(SkippedRecord),
 }
 
@@ -127,7 +129,9 @@ fn percent(value: u64, total: u64) -> Option<f64> {
 mod tests {
     use std::{num::NonZeroUsize, time::Duration};
 
-    use crate::report::record::{EstimateRecord, PredictRecord, TranscodeRecord};
+    use crate::report::record::{
+        EmulateRecord, EstimateRecord, PredictRecord, TaskRecord, TranscodeRecord,
+    };
 
     use super::*;
     use serde_json::{Value, json};
@@ -301,5 +305,47 @@ mod tests {
             record["skipped"]["reason"],
             "skipping because ffprobe failed: not media"
         );
+    }
+
+    #[test]
+    fn emulate_records_carry_the_quality_point_and_chart_paths() {
+        let request = TranscodeRequest::new("in.mkv", "")
+            .with_video(VideoAction::encode_x264(None, Some(Preset::Medium)));
+        let options = PredictionOptions {
+            samples: NonZeroUsize::new(5).unwrap(),
+            sample_duration: Duration::from_secs_f64(2.0),
+        };
+        let record =
+            EmulateRecord::new(&request, 23, Some(Path::new("quality.png")), None, options);
+        let record = value(&Record::Emulate(record));
+
+        let record = &record["emulate"];
+        assert!(record.get("predict").is_none(), "{record}");
+        assert!(record["input"].as_str().unwrap().starts_with('/'));
+        assert_eq!(record["status"], "success");
+        assert_eq!(record["error"], Value::Null);
+        assert_eq!(record["decoding"], "software");
+        assert_eq!(
+            record["video"]["rate"],
+            json!({"kind":"quality","parameter":"CRF","value":23})
+        );
+        assert_eq!(record["video"]["preset"], "medium");
+        let png = record["outputs"]["png"].as_str().unwrap();
+        assert!(png.starts_with('/'), "{png}");
+        assert!(png.ends_with("quality.png"), "{png}");
+        assert_eq!(record["outputs"]["svg"], Value::Null);
+        assert_eq!(record["sampling"]["requested_samples"], 5);
+        assert_eq!(record["quality"], Value::Null);
+        assert_eq!(record["samples"], json!([]));
+
+        let failed =
+            EmulateRecord::new(&request, 30, None, Some(Path::new("quality.svg")), options)
+                .finish(Status::Failure, Some("boom".to_owned()));
+        let failed = value(&failed);
+        let failed = &failed["emulate"];
+        assert_eq!(failed["status"], "failure");
+        assert_eq!(failed["error"], "boom");
+        assert_eq!(failed["video"]["rate"]["value"], 30);
+        assert_eq!(failed["outputs"]["png"], Value::Null);
     }
 }

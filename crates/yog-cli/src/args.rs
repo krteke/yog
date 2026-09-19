@@ -76,15 +76,23 @@ struct PredictArgs {
         .multiple(true)
 ))]
 struct EmulateArgs {
+    #[command(flatten)]
+    video: VideoArgs,
     #[arg(long, group = "emulation_output", value_name = "PATH")]
     png: Option<PathBuf>,
     #[arg(long, group = "emulation_output", value_name = "PATH")]
     svg: Option<PathBuf>,
+    #[arg(long, global = true, value_name = "PATH")]
+    report: Option<PathBuf>,
+    #[arg(short = 'O', long, global = true)]
+    overwrite: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct VideoArgs {
     /// e.g. --range=20,25,30-35
     #[arg(long, value_parser = parse_quality_points, global = true, value_name = "POINTS")]
     range: Vec<QualityPoints>,
-    #[arg(short = 'O', long, global = true)]
-    overwrite: bool,
     #[command(subcommand)]
     video: VideoEncoding,
 }
@@ -221,22 +229,26 @@ impl Args {
                     args.recursive,
                 )
             }
-            CliCommand::Emulate(args) => (
-                Operation::Emulate(EmulationOptions {
-                    png: args.png,
-                    svg: args.svg,
-                    qualities: sorted(
-                        args.range
-                            .into_iter()
-                            .flat_map(|QualityPoints(points)| points)
-                            .collect(),
-                    ),
-                }),
-                TranscodeRequest::new(input, PathBuf::new())
-                    .with_video(VideoAction::Encode(args.video))
-                    .with_overwrite(args.overwrite),
-                false,
-            ),
+            CliCommand::Emulate(args) => {
+                options.report = args.report;
+                (
+                    Operation::Emulate(EmulationOptions {
+                        png: args.png,
+                        svg: args.svg,
+                        qualities: sorted(
+                            args.video
+                                .range
+                                .into_iter()
+                                .flat_map(|QualityPoints(points)| points)
+                                .collect(),
+                        ),
+                    }),
+                    TranscodeRequest::new(input, PathBuf::new())
+                        .with_video(VideoAction::Encode(args.video.video))
+                        .with_overwrite(args.overwrite),
+                    false,
+                )
+            }
         };
         request = request.with_decoding(decoding);
         if let Some(container) = container {
@@ -323,20 +335,6 @@ mod tests {
                 vec!["yog", "-i", "input", "--predict", "--encode-x264"],
                 ErrorKind::UnknownArgument,
             ),
-            (
-                vec![
-                    "yog",
-                    "-i",
-                    "input",
-                    "emulate",
-                    "--png",
-                    "plot.png",
-                    "--encode-x264",
-                    "--report",
-                    "report.jsonl",
-                ],
-                ErrorKind::UnknownArgument,
-            ),
         ] {
             let error = Args::try_parse_from(args).unwrap_err();
             assert_eq!(error.kind(), kind, "{error}");
@@ -344,7 +342,7 @@ mod tests {
     }
 
     #[test]
-    fn reports_are_only_available_to_transcode_and_predict() {
+    fn reports_are_available_to_every_operation() {
         for (_, _, options) in [
             parse([
                 "yog",
@@ -372,6 +370,17 @@ mod tests {
                 "input",
                 "predict",
                 "--recursive",
+                "--report",
+                "report.jsonl",
+                "--encode-x264",
+            ]),
+            parse([
+                "yog",
+                "-i",
+                "input",
+                "emulate",
+                "--png",
+                "plot.png",
                 "--report",
                 "report.jsonl",
                 "--encode-x264",
@@ -682,6 +691,7 @@ mod tests {
         let emulate = emulate.to_string();
         assert!(emulate.contains("--png"));
         assert!(emulate.contains("--range"));
+        assert!(emulate.contains("--report"));
         assert!(!emulate.contains("--recursive"));
 
         let encoder =

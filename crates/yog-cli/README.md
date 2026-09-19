@@ -12,7 +12,7 @@ cargo run -p yog-cli -- transcode -i input.mkv -o output.mkv --verify --encode-x
 cargo run -p yog-cli -- transcode -i input.mkv -o output.mkv --vmaf --encode-x264
 cargo run -p yog-cli -- transcode -i input.mkv -o output.mkv --vmaf=5 --encode-x264
 cargo run -p yog-cli -- predict -i input.mkv --encode-x264 --quality 23
-cargo run -p yog-cli -- emulate -i input.mkv --png quality.png --svg quality.svg --range 18,30 --encode-x264 --preset medium
+cargo run -p yog-cli -- emulate -i input.mkv --png quality.png --svg quality.svg --range 18-30 --encode-x264 --preset medium
 cargo run -p yog-cli -- transcode -i input.mp4 -o output.mp4 -C mp4 -v --copy
 cargo run -p yog-cli -- transcode -i input.mkv -o output.mkv --quiet --copy
 ```
@@ -22,6 +22,7 @@ cargo run -p yog-cli -- transcode -i input.mkv -o output.mkv --quiet --copy
 ```sh
 cargo run -p yog-cli -- -i input.mkv transcode -o output.mkv --encode-x265 --quality 23 --vmaf --report run.jsonl
 cargo run -p yog-cli -- -i media/ predict --recursive --encode-svt-av1 --quality 30 --report estimates.jsonl
+cargo run -p yog-cli -- -i input.mkv emulate --png quality.png --range 18-30 --encode-x264 --report curve.jsonl
 ```
 
 ### File format
@@ -33,7 +34,11 @@ JSONL
 ```
 
 ```json
-{"predict":{"input":"/media/in.mkv","status":"success","container":"mkv","video":{"action":"encode","encoder":"libx264","rate":{"kind":"quality","parameter":"crf","value":23},"preset":null,"multipass":null},"decoding":"software","sampling":{"requested_samples":5,"sample_seconds":2.0,"measured_samples":2,"sampled_seconds":4.0},"source":{"bytes":734003200,"duration_seconds":3661.5,"streams":{"video":1,"audio":2,"subtitle":1,"attachment":1,"cover":0,"other":0},"video":{"codec":"h264","width":1920,"height":1080,"frame_rate":"24000/1001","bit_rate":"1500000"},"audio":[{"codec":"aac","channels":2,"sample_rate":"48000"}]},"speed":{"value":2.667,"low":2.0,"high":4.0},"transcode_seconds":{"value":1372.7,"low":915.4,"high":1830.8},"output_bytes":{"value":61712345670,"low":50000000000,"high":70000000000},"size_percent":840.0,"quality":{"frames":240,"source_stream_index":0,"vmaf":{"value":96.5,"low":96.5,"high":96.5},"ssim":{"value":0.99,"low":0.99,"high":0.99},"psnr_y_db":{"value":42.0,"low":42.0,"high":42.0}},"samples":[{"start_seconds":0.0,"duration_seconds":2.0,"encode_seconds":0.75,"speed":2.667,"timed_payload_bytes":3000000,"scored_frames":120,"vmaf":96.5,"ssim":0.99,"psnr_y_db":42.0}],"error":null}}
+{"predict":{"input":"/media/in.mkv","status":"success","container":"mkv","video":{"action":"encode","encoder":"libx264","rate":{"kind":"quality","parameter":"CRF","value":23},"preset":null,"multipass":null},"decoding":"software","sampling":{"requested_samples":5,"sample_seconds":2.0,"measured_samples":2,"sampled_seconds":4.0},"source":{"bytes":734003200,"duration_seconds":3661.5,"streams":{"video":1,"audio":2,"subtitle":1,"attachment":1,"cover":0,"other":0},"video":{"codec":"h264","width":1920,"height":1080,"frame_rate":"24000/1001","bit_rate":"1500000"},"audio":[{"codec":"aac","channels":2,"sample_rate":"48000"}]},"speed":{"value":2.667,"low":2.0,"high":4.0},"transcode_seconds":{"value":1372.7,"low":915.4,"high":1830.8},"output_bytes":{"value":61712345670,"low":50000000000,"high":70000000000},"size_percent":840.0,"quality":{"frames":240,"source_stream_index":0,"vmaf":{"value":96.5,"low":96.5,"high":96.5},"ssim":{"value":0.99,"low":0.99,"high":0.99},"psnr_y_db":{"value":42.0,"low":42.0,"high":42.0}},"samples":[{"start_seconds":0.0,"duration_seconds":2.0,"encode_seconds":0.75,"speed":2.667,"timed_payload_bytes":3000000,"scored_frames":120,"vmaf":96.5,"ssim":0.99,"psnr_y_db":42.0}],"error":null}}
+```
+
+```json
+{"emulate":{"input":"/media/in.mkv","status":"success","container":"mkv","video":{"action":"encode","encoder":"libx264","rate":{"kind":"quality","parameter":"CRF","value":20},"preset":"medium","multipass":null},"decoding":"software","outputs":{"png":"/media/quality.png","svg":null},"source":{"bytes":734003200,"duration_seconds":3661.5,"streams":{"video":1,"audio":2,"subtitle":1,"attachment":1,"cover":0,"other":0},"video":{"codec":"h264","width":1920,"height":1080,"frame_rate":"24000/1001","bit_rate":"1500000"},"audio":[{"codec":"aac","channels":2,"sample_rate":"48000"}]},"sampling":{"requested_samples":5,"sample_seconds":2.0,"measured_samples":2,"sampled_seconds":4.0},"speed":{"value":2.667,"low":2.0,"high":4.0},"transcode_seconds":{"value":1372.7,"low":915.4,"high":1830.8},"output_bytes":{"value":6171234567,"low":5000000000,"high":7000000000},"size_percent":840.0,"quality":{"frames":240,"source_stream_index":0,"vmaf":{"value":96.5,"low":96.5,"high":96.5},"ssim":null,"psnr_y_db":null},"samples":[{"start_seconds":0.0,"duration_seconds":2.0,"encode_seconds":0.75,"speed":2.667,"timed_payload_bytes":3000000,"scored_frames":120,"vmaf":96.5,"ssim":null,"psnr_y_db":null}],"error":null}}
 ```
 
 ```json
@@ -49,6 +54,13 @@ JSONL
 - **Nulls.** Every field is always present. Unknown values are `null`, and
   optional objects such as `verify`, `vmaf`, `result`, and `source` are `null`
   as a whole. Array fields are `[]`.
+- **Writing.** The report is truncated when the run starts, and every record is
+  appended and flushed as soon as it is produced, so a cancelled or failed run
+  keeps what it already measured. Failures are reported inside the record
+  (`status` and `error`), never by deleting or rewriting lines. `emulate` writes
+  one line per quality point, in ascending point order; a run that fails before
+  its first point (for example an unreadable input or a chart path that already
+  exists) writes no line at all.
 
 ### Field reference
 
@@ -84,6 +96,18 @@ JSONL
 | `quality` | Aggregated `vmaf`/`ssim`/`psnr_y_db` estimates over all scored `frames`, and the `source_stream_index` they were scored against. |
 | `samples` | Per-sample measurements: window `start_seconds` and `duration_seconds`, `encode_seconds`, `speed`, `timed_payload_bytes`, `scored_frames`, and the quality metrics. |
 
+`emulate` records are `predict` records measured at a single quality point: one
+line per point, in ascending point order. `video.rate` is the point that was
+measured rather than a requested rate, and `outputs` names the charts the run
+was asked to write. Because the charts are rendered only after every point has
+succeeded, `outputs` can name files that do not exist when the run failed.
+
+| Field | Description |
+| --- | --- |
+| `video.rate` | The quality point of this line: `{"kind":"quality","parameter":"CRF","value":20}`. `parameter` is the ffmpeg option of the encoder, such as `CRF`, `CQ`, `QP`, or `global_quality`. |
+| `outputs.png`, `outputs.svg` | Requested chart paths, or `null` when that chart was not asked for. |
+| everything else | Identical to a `predict` record, including `sampling`, `speed`, `output_bytes`, `size_percent`, `quality`, and `samples`. |
+
 `skipped` records describe inputs that were discovered but never processed
 because `ffprobe` failed; files that probe successfully but contain no video
-stream are ignored. Every other line is `transcode` or `predict`.
+stream are ignored. Every other line is `transcode`, `predict`, or `emulate`.

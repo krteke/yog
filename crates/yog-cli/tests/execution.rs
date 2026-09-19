@@ -476,6 +476,218 @@ fi"#,
 }
 
 #[test]
+fn emulated_points_are_reported_one_line_each() {
+    use serde_json::Value;
+
+    let fixture = Fixture::new(
+        r#"printf '%s\n' "$*" >> ffmpeg-commands
+filter=''
+for argument do
+    case "$argument" in
+        encoder=libsvtav1)
+            printf '%s\n' 'Encoder libsvtav1 [test]' '    Supported pixel formats: yuv420p'
+            exit 0
+            ;;
+        *libvmaf=*) filter=$argument ;;
+    esac
+done
+if test -n "$filter"; then
+    metrics=${filter#*log_path=\'}
+    metrics=${metrics%%\':shortest=*}
+    printf '%s' '{"frames":[{"frameNum":0,"metrics":{"vmaf":96.5,"float_ssim":0.99,"psnr_y":42.0}}]}' > "$metrics"
+    exit 0
+fi
+for last do :; done
+printf 12345678901234567890 > "$last"
+printf 'out_time_us=1000000\nspeed=1x\nprogress=end\n'"#,
+    );
+    fs::write(fixture.0.join("input.mkv"), b"12345678901234567890").unwrap();
+    fixture.tool(
+        "ffprobe",
+        r#"packets=false
+for argument do
+    test "$argument" = -show_packets && packets=true
+done
+for last do :; done
+if test "$packets" = true; then
+    printf '%s' '{"packets":[{"stream_index":0,"size":"10"}]}'
+elif test "$last" = input.mkv; then
+    printf '%s' '{"streams":[{"index":0,"codec_type":"video","width":320,"height":180,"pix_fmt":"yuv420p"}],"format":{"format_name":"matroska,webm","duration":"1"},"pixel_formats":[{"name":"yuv420p","nb_components":3,"log2_chroma_w":1,"log2_chroma_h":1,"flags":{"rgb":0,"alpha":0,"palette":0,"hwaccel":0},"components":[{"bit_depth":8},{"bit_depth":8},{"bit_depth":8}]}]}'
+else
+    printf '%s' '{"streams":[{"index":0,"codec_type":"video"}],"format":{"duration":"1"}}'
+fi"#,
+    );
+
+    let result = fixture
+        .analysis_command()
+        .args([
+            "emulate",
+            "--png",
+            "quality.png",
+            "--svg",
+            "quality.svg",
+            "--range",
+            "20-22",
+            "--report",
+            "report.jsonl",
+            "--encode-svt-av1",
+            "--preset",
+            "6",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(result.status.success(), "{stderr}");
+
+    let records = read_report(&fixture, "report.jsonl");
+    assert_eq!(records.len(), 3, "{records:?}");
+    assert_eq!(
+        records
+            .iter()
+            .map(|row| row["emulate"]["video"]["rate"]["value"].clone())
+            .collect::<Vec<_>>(),
+        vec![
+            serde_json::json!(20),
+            serde_json::json!(21),
+            serde_json::json!(22)
+        ],
+    );
+
+    for row in &records {
+        let record = &row["emulate"];
+        assert!(record.get("predict").is_none(), "{record}");
+        assert_eq!(record["status"], "success");
+        assert_eq!(record["error"], Value::Null);
+        assert_eq!(record["container"], "mkv");
+        assert_eq!(record["video"]["action"], "encode");
+        assert_eq!(record["video"]["encoder"], "libsvtav1");
+        assert_eq!(record["video"]["rate"]["kind"], "quality");
+        assert_eq!(record["video"]["rate"]["parameter"], "CRF");
+        assert_eq!(record["video"]["preset"], "6");
+        assert_eq!(record["video"]["multipass"], Value::Null);
+        assert_eq!(record["decoding"], "software");
+        assert!(record["input"].as_str().unwrap().ends_with("input.mkv"));
+        assert_eq!(record["source"]["bytes"], 20);
+        assert_eq!(record["source"]["duration_seconds"], 1.0);
+        assert_eq!(record["source"]["streams"]["video"], 1);
+        assert_eq!(
+            record["sampling"],
+            serde_json::json!({
+                "requested_samples": 5,
+                "sample_seconds": 2.0,
+                "measured_samples": 1,
+                "sampled_seconds": 1.0
+            })
+        );
+        assert_eq!(
+            record["speed"],
+            serde_json::json!({"value": 1.0, "low": 1.0, "high": 1.0})
+        );
+        assert_eq!(
+            record["transcode_seconds"],
+            serde_json::json!({"value": 1.0, "low": 1.0, "high": 1.0})
+        );
+        assert_eq!(
+            record["output_bytes"],
+            serde_json::json!({"value": 20, "low": 20, "high": 20})
+        );
+        assert_eq!(record["size_percent"], 100.0);
+        assert_eq!(record["quality"]["frames"], 1);
+        assert_eq!(record["quality"]["source_stream_index"], 0);
+        assert_eq!(record["quality"]["vmaf"]["value"], 96.5);
+        assert_eq!(record["quality"]["ssim"]["value"], 0.99);
+        assert_eq!(record["quality"]["psnr_y_db"]["value"], 42.0);
+        assert_eq!(record["samples"].as_array().unwrap().len(), 1);
+        assert_eq!(record["samples"][0]["vmaf"], 96.5);
+
+        for (key, name) in [("png", "quality.png"), ("svg", "quality.svg")] {
+            let path = record["outputs"][key].as_str().unwrap();
+            assert!(path.starts_with('/'), "{path}");
+            assert!(path.ends_with(name), "{path}");
+        }
+    }
+}
+
+#[test]
+fn failed_emulation_points_are_reported_and_abort_the_run() {
+    let fixture = Fixture::new(
+        r#"printf '%s\n' "$*" >> ffmpeg-commands
+filter=''
+previous=''
+for argument do
+    case "$argument" in
+        encoder=libsvtav1)
+            printf '%s\n' 'Encoder libsvtav1 [test]' '    Supported pixel formats: yuv420p'
+            exit 0
+            ;;
+        *libvmaf=*) filter=$argument ;;
+    esac
+    if test "$previous" = -crf:v && test "$argument" = 21; then
+        printf 'BAD-ENCODE\n' >&2
+        exit 9
+    fi
+    previous=$argument
+done
+if test -n "$filter"; then
+    metrics=${filter#*log_path=\'}
+    metrics=${metrics%%\':shortest=*}
+    printf '%s' '{"frames":[{"frameNum":0,"metrics":{"vmaf":96.5}}]}' > "$metrics"
+    exit 0
+fi
+for last do :; done
+printf 12345678901234567890 > "$last"
+printf 'out_time_us=1000000\nspeed=1x\nprogress=end\n'"#,
+    );
+    fs::write(fixture.0.join("input.mkv"), b"12345678901234567890").unwrap();
+    fixture.tool(
+        "ffprobe",
+        r#"packets=false
+for argument do
+    test "$argument" = -show_packets && packets=true
+done
+for last do :; done
+if test "$packets" = true; then
+    printf '%s' '{"packets":[{"stream_index":0,"size":"10"}]}'
+elif test "$last" = input.mkv; then
+    printf '%s' '{"streams":[{"index":0,"codec_type":"video","width":320,"height":180,"pix_fmt":"yuv420p"}],"format":{"format_name":"matroska,webm","duration":"1"},"pixel_formats":[{"name":"yuv420p","nb_components":3,"log2_chroma_w":1,"log2_chroma_h":1,"flags":{"rgb":0,"alpha":0,"palette":0,"hwaccel":0},"components":[{"bit_depth":8},{"bit_depth":8},{"bit_depth":8}]}]}'
+else
+    printf '%s' '{"streams":[{"index":0,"codec_type":"video"}],"format":{"duration":"1"}}'
+fi"#,
+    );
+
+    let result = fixture
+        .analysis_command()
+        .args([
+            "emulate",
+            "--png",
+            "quality.png",
+            "--range",
+            "20-22",
+            "--report",
+            "report.jsonl",
+            "--encode-svt-av1",
+            "--preset",
+            "6",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert_eq!(result.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("prediction failed at CRF 21"), "{stderr}");
+    assert!(!fixture.0.join("quality.png").exists());
+
+    let records = read_report(&fixture, "report.jsonl");
+    assert_eq!(records.len(), 2, "{records:?}");
+    assert_eq!(records[0]["emulate"]["status"], "success");
+    assert_eq!(records[0]["emulate"]["video"]["rate"]["value"], 20);
+    assert_eq!(records[1]["emulate"]["status"], "failure");
+    assert_eq!(records[1]["emulate"]["video"]["rate"]["value"], 21);
+    let error = records[1]["emulate"]["error"].as_str().unwrap();
+    assert!(error.contains("prediction failed at CRF 21"), "{error}");
+    assert_eq!(records[1]["emulate"]["quality"], serde_json::Value::Null);
+}
+
+#[test]
 fn published_transcode_calculates_full_or_subsampled_vmaf() {
     for (vmaf_args, expected_mode) in [
         (vec!["--vmaf"], "full"),

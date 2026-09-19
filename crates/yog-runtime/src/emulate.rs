@@ -1,6 +1,14 @@
 mod chart;
 
-use crate::{diagnostics::Diagnostics, error::RunError, progress::Display, transcode::Transcoder};
+use crate::{
+    TaskOutcome,
+    diagnostics::Diagnostics,
+    error::RunError,
+    progress::Display,
+    record_task,
+    report::{Report, record::EmulateRecord},
+    transcode::Transcoder,
+};
 use anyhow::Context;
 use std::{ops::RangeInclusive, path::PathBuf};
 use yog_core::ffmpeg::plan::{TranscodeRequest, VideoAction};
@@ -34,6 +42,7 @@ impl Transcoder {
         request: TranscodeRequest,
         options: &EmulationOptions,
         diagnostics: &Diagnostics,
+        report: &mut Report,
     ) -> Result<(), RunError> {
         if self.cancelled() {
             return Err(RunError::Cancelled);
@@ -72,15 +81,41 @@ impl Transcoder {
                 unreachable!("emulation arguments require a video encoder");
             };
             encoding.set_quality(quality);
-            let prediction = self
-                .predict_result(&sample_request, &media, prediction_options, diagnostics)
-                .await
-                .with_context(|| format!("prediction failed at {quality_parameter} {quality}"))?;
-            points.push(EmulationPoint {
+
+            let mut record = EmulateRecord::new(
+                &sample_request,
                 quality,
-                vmaf: prediction.quality.vmaf.value,
-                size_bytes: prediction.output_bytes.value,
-            });
+                options.png.as_deref(),
+                options.svg.as_deref(),
+                prediction_options,
+            );
+            record.fill_source(&sample_request, &media);
+            let result = self
+                .predict_result(&sample_request, &media, prediction_options, diagnostics)
+                .await;
+            let outcome = match result {
+                Ok(prediction) => {
+                    record.fill_prediction(&prediction);
+                    points.push(EmulationPoint {
+                        quality,
+                        vmaf: prediction.quality.vmaf.value,
+                        size_bytes: prediction.output_bytes.value,
+                    });
+                    TaskOutcome::Success
+                }
+                Err(error) => error
+                    .context(format!(
+                        "prediction failed at {quality_parameter} {quality}"
+                    ))
+                    .into(),
+            };
+            record_task(record, &outcome, report, diagnostics);
+
+            match outcome {
+                TaskOutcome::Success => {}
+                TaskOutcome::Failed(error) => return Err(RunError::Failed(error)),
+                TaskOutcome::Cancelled => return Err(RunError::Cancelled),
+            }
         }
         drop(progress);
 

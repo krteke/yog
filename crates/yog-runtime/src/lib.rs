@@ -145,7 +145,7 @@ pub async fn run(
     outcome
 }
 
-enum TaskOutcome {
+pub(crate) enum TaskOutcome {
     Success,
     Failed(anyhow::Error),
     Cancelled,
@@ -161,6 +161,12 @@ impl From<Result<(), RunError>> for TaskOutcome {
     }
 }
 
+impl From<anyhow::Error> for TaskOutcome {
+    fn from(error: anyhow::Error) -> Self {
+        Err(RunError::from(error)).into()
+    }
+}
+
 fn finish_record<R: TaskRecord>(record: R, outcome: &TaskOutcome) -> Record {
     match outcome {
         TaskOutcome::Success => record.finish(Status::Success, None),
@@ -169,7 +175,7 @@ fn finish_record<R: TaskRecord>(record: R, outcome: &TaskOutcome) -> Record {
     }
 }
 
-fn record_task<R: TaskRecord>(
+pub(crate) fn record_task<R: TaskRecord>(
     record: R,
     outcome: &TaskOutcome,
     report: &mut Report,
@@ -218,7 +224,9 @@ async fn run_single(
             finish(outcome, diagnostics)
         }
         Operation::Emulate(options) => {
-            let result = transcoder.emulate(request, &options, diagnostics).await;
+            let result = transcoder
+                .emulate(request, &options, diagnostics, report)
+                .await;
             finish(result.into(), diagnostics)
         }
     }

@@ -302,13 +302,82 @@ impl PredictRecord {
         });
         self.samples = prediction.samples.iter().map(SampleRecord::from).collect();
     }
+
+    pub fn set_rate(&mut self, parameter: &'static str, value: u8) {
+        self.video.rate = Some(RateRecord {
+            kind: "quality",
+            parameter,
+            value: value.into(),
+        });
+    }
+
+    pub fn set_outcome(&mut self, status: Status, error: Option<String>) {
+        self.status = status;
+        self.error = error;
+    }
 }
 
 impl TaskRecord for PredictRecord {
     fn finish(mut self, status: Status, error: Option<String>) -> Record {
-        self.status = status;
-        self.error = error;
+        self.set_outcome(status, error);
         Record::Predict(self)
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct OutputsRecord {
+    png: Option<String>,
+    svg: Option<String>,
+}
+
+impl OutputsRecord {
+    fn new(png: Option<&Path>, svg: Option<&Path>) -> Self {
+        Self {
+            png: png.map(ToAbsolute::to_absolute),
+            svg: svg.map(ToAbsolute::to_absolute),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct EmulateRecord {
+    #[serde(flatten)]
+    predict: PredictRecord,
+    outputs: OutputsRecord,
+}
+
+impl EmulateRecord {
+    pub fn new(
+        request: &TranscodeRequest,
+        quality: u8,
+        png: Option<&Path>,
+        svg: Option<&Path>,
+        prediction_options: PredictionOptions,
+    ) -> Self {
+        let mut predict = PredictRecord::new(request, prediction_options);
+        if let VideoAction::Encode(encoding) = &request.video {
+            predict.set_rate(encoding.quality_parameter(), quality);
+        }
+
+        Self {
+            predict,
+            outputs: OutputsRecord::new(png, svg),
+        }
+    }
+
+    pub fn fill_source(&mut self, request: &TranscodeRequest, media: &MediaInfo) {
+        self.predict.fill_source(request, media);
+    }
+
+    pub fn fill_prediction(&mut self, prediction: &Prediction) {
+        self.predict.fill_prediction(prediction);
+    }
+}
+
+impl TaskRecord for EmulateRecord {
+    fn finish(mut self, status: Status, error: Option<String>) -> Record {
+        self.predict.set_outcome(status, error);
+        Record::Emulate(self)
     }
 }
 

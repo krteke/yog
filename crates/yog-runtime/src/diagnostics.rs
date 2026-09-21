@@ -9,21 +9,30 @@ use yog_core::ffmpeg::{
     vmaf::{VmafOptions, VmafScore},
 };
 
-use crate::emulate::{EmulationJob, EmulationOptions};
+use crate::{
+    emulate::{EmulationJob, EmulationOptions},
+    event::{EventSink, RunEvent},
+};
 
-pub struct Diagnostics {
+pub struct Diagnostics<'a> {
     verbose: bool,
     terminal_output: bool,
     stderr_logged: AtomicBool,
+    events: &'a EventSink<'a>,
 }
 
-impl Diagnostics {
-    pub fn new(verbose: bool, terminal_output: bool) -> Self {
+impl<'a> Diagnostics<'a> {
+    pub fn new(verbose: bool, terminal_output: bool, events: &'a EventSink<'a>) -> Self {
         Self {
             verbose,
             terminal_output,
             stderr_logged: AtomicBool::new(false),
+            events,
         }
+    }
+
+    pub fn event(&self, event: RunEvent) {
+        (self.events)(event);
     }
 
     pub fn ffmpeg(&self, bytes: &[u8]) -> bool {
@@ -219,6 +228,9 @@ impl Diagnostics {
     }
 
     pub fn vmaf_warning(&self, error: &anyhow::Error, stderr_logged: bool) {
+        self.event(RunEvent::Warning {
+            message: format!("vmaf: {error:#}"),
+        });
         if !self.terminal_output {
             return;
         }
@@ -229,7 +241,19 @@ impl Diagnostics {
         }
     }
 
+    pub fn vmaf_cancelled(&self, output: &Path) {
+        self.event(RunEvent::Warning {
+            message: format!("vmaf cancelled for {}", output.display()),
+        });
+        if self.terminal_output {
+            eprintln!("warning: vmaf cancelled for {}", output.display());
+        }
+    }
+
     pub fn error(&self, error: &anyhow::Error) {
+        self.event(RunEvent::Error {
+            message: format!("{error:#}"),
+        });
         if !self.terminal_output {
             return;
         }
@@ -274,12 +298,20 @@ impl Diagnostics {
     }
 
     pub fn verify_warning(&self, warning: &str) {
+        self.event(RunEvent::Warning {
+            message: format!("verify: {warning}"),
+        });
         if self.terminal_output {
             eprintln!("warning: verify: {warning}");
         }
     }
 
     pub fn report_error(&self, path: Option<&Path>, error: &std::io::Error) {
+        let message = match path {
+            Some(path) => format!("cannot write report {}: {error}", path.display()),
+            None => format!("cannot write report: {error}"),
+        };
+        self.event(RunEvent::Warning { message });
         if !self.terminal_output {
             return;
         }
@@ -291,6 +323,10 @@ impl Diagnostics {
     }
 
     pub fn skipped_probe(&self, input: &Path, error: &anyhow::Error) {
+        self.event(RunEvent::InputSkipped {
+            input: input.to_path_buf(),
+            error: format!("{error:#}"),
+        });
         if !self.terminal_output {
             return;
         }

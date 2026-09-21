@@ -18,7 +18,7 @@ pub struct SkippedInput {
 pub async fn discover(
     template: TranscodeRequest,
     transcoder: &Transcoder,
-    diagnostics: &Diagnostics,
+    diagnostics: &Diagnostics<'_>,
     predict: bool,
 ) -> Result<Discovery, RunError> {
     if !template.input.is_dir() {

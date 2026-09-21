@@ -5,6 +5,7 @@ pub mod dev_tools;
 mod diagnostics;
 mod emulate;
 mod error;
+pub mod event;
 mod output;
 mod progress;
 mod recursive;
@@ -15,6 +16,7 @@ mod verify;
 
 use diagnostics::Diagnostics;
 use error::RunError;
+use event::{RunEvent, TaskStatus};
 use report::{Record, Report, Status};
 use std::{path::PathBuf, time::Duration};
 use tokio_util::sync::CancellationToken;
@@ -122,7 +124,19 @@ pub async fn run(
     config: Config,
     cancellation: CancellationToken,
 ) -> RunOutcome {
-    let diagnostics = Diagnostics::new(options.verbose, options.terminal_output);
+    run_with_events(command, options, config, cancellation, |_| {}).await
+}
+
+/// Executes a command and forwards structured lifecycle and progress events to
+/// the caller. Event delivery is synchronous; handlers must return promptly.
+pub async fn run_with_events(
+    command: Command,
+    options: Options,
+    config: Config,
+    cancellation: CancellationToken,
+    on_event: impl Fn(RunEvent) + Send + Sync,
+) -> RunOutcome {
+    let diagnostics = Diagnostics::new(options.verbose, options.terminal_output, &on_event);
     let mut report = match Report::try_from(options.report.as_deref()) {
         Ok(report) => report,
         Err(error) => {
@@ -155,6 +169,23 @@ pub(crate) enum TaskOutcome {
     Cancelled,
 }
 
+impl TaskOutcome {
+    fn status(&self) -> TaskStatus {
+        match self {
+            Self::Success => TaskStatus::Success,
+            Self::Failed(_) => TaskStatus::Failure,
+            Self::Cancelled => TaskStatus::Cancelled,
+        }
+    }
+
+    fn error(&self) -> Option<String> {
+        match self {
+            Self::Failed(error) => Some(format!("{error:#}")),
+            Self::Success | Self::Cancelled => None,
+        }
+    }
+}
+
 impl From<Result<(), RunError>> for TaskOutcome {
     fn from(value: Result<(), RunError>) -> Self {
         match value {
@@ -183,12 +214,12 @@ pub(crate) fn record_task<R: TaskRecord>(
     record: R,
     outcome: &TaskOutcome,
     report: &mut Report,
-    diagnostics: &Diagnostics,
+    diagnostics: &Diagnostics<'_>,
 ) {
     report.write(&finish_record(record, outcome), diagnostics);
 }
 
-fn finish(outcome: TaskOutcome, diagnostics: &Diagnostics) -> RunOutcome {
+fn finish(outcome: TaskOutcome, diagnostics: &Diagnostics<'_>) -> RunOutcome {
     match outcome {
         TaskOutcome::Success => RunOutcome::Completed,
         TaskOutcome::Cancelled => {
@@ -205,41 +236,58 @@ fn finish(outcome: TaskOutcome, diagnostics: &Diagnostics) -> RunOutcome {
 async fn run_single(
     command: Command,
     transcoder: &Transcoder,
-    diagnostics: &Diagnostics,
+    diagnostics: &Diagnostics<'_>,
     report: &mut Report,
 ) -> RunOutcome {
     let Command {
         request, operation, ..
     } = command;
 
-    match operation {
+    let input = request.input.clone();
+    let output = (!request.output.as_os_str().is_empty()).then(|| request.output.clone());
+    diagnostics.event(RunEvent::TaskStarted {
+        index: 1,
+        total: 1,
+        input: input.clone(),
+        output,
+    });
+
+    let outcome = match operation {
         Operation::Transcode => {
             let mut record = TranscodeRecord::new(&request);
             let result = transcoder.run(request, diagnostics, &mut record).await;
             let outcome = result.into();
             record_task(record, &outcome, report, diagnostics);
-            finish(outcome, diagnostics)
+            outcome
         }
         Operation::Predict => {
             let mut record = PredictRecord::new(&request, transcoder.prediction_options());
             let result = transcoder.predict(request, diagnostics, &mut record).await;
             let outcome = result.into();
             record_task(record, &outcome, report, diagnostics);
-            finish(outcome, diagnostics)
+            outcome
         }
         Operation::Emulate(options) => {
             let result = transcoder
                 .emulate(request, &options, diagnostics, report)
                 .await;
-            finish(result.into(), diagnostics)
+            result.into()
         }
-    }
+    };
+    diagnostics.event(RunEvent::TaskFinished {
+        index: 1,
+        total: 1,
+        input,
+        status: outcome.status(),
+        error: outcome.error(),
+    });
+    finish(outcome, diagnostics)
 }
 
 async fn run_batch(
     command: Command,
     transcoder: &Transcoder,
-    diagnostics: &Diagnostics,
+    diagnostics: &Diagnostics<'_>,
     cancellation: &CancellationToken,
     report: &mut Report,
 ) -> RunOutcome {
@@ -248,6 +296,7 @@ async fn run_batch(
     } = command;
     let predict = matches!(operation, Operation::Predict);
     let input_root = request.input.clone();
+    diagnostics.event(RunEvent::PhaseChanged(event::RunPhase::Discovering));
     let discovery = match recursive::discover(request, transcoder, diagnostics, predict).await {
         Ok(discovery) => discovery,
         Err(RunError::Cancelled) => {
@@ -260,6 +309,10 @@ async fn run_batch(
         }
     };
     let total = discovery.tasks.len();
+    diagnostics.event(RunEvent::BatchDiscovered {
+        total,
+        skipped: discovery.skipped.len(),
+    });
     let mut succeeded = 0;
     let mut failures = Vec::new();
 
@@ -276,8 +329,16 @@ async fn run_batch(
         return RunOutcome::Failed(error);
     }
 
-    for (request, media) in discovery.tasks {
+    for (offset, (request, media)) in discovery.tasks.into_iter().enumerate() {
+        let index = offset + 1;
         let input = request.input.clone();
+        let output = (!request.output.as_os_str().is_empty()).then(|| request.output.clone());
+        diagnostics.event(RunEvent::TaskStarted {
+            index,
+            total,
+            input: input.clone(),
+            output,
+        });
         diagnostics.begin_task();
         let (line, outcome) = match &operation {
             Operation::Predict => {
@@ -301,6 +362,13 @@ async fn run_batch(
             Operation::Emulate(_) => unreachable!("recursive emulation is unsupported"),
         };
         report.write(&line, diagnostics);
+        diagnostics.event(RunEvent::TaskFinished {
+            index,
+            total,
+            input: input.clone(),
+            status: outcome.status(),
+            error: outcome.error(),
+        });
         match outcome {
             TaskOutcome::Success => succeeded += 1,
             TaskOutcome::Failed(error) => {
@@ -308,6 +376,9 @@ async fn run_batch(
                 failures.push(TaskFailure { input, error });
             }
             TaskOutcome::Cancelled => break,
+        }
+        if cancellation.is_cancelled() {
+            break;
         }
     }
 
@@ -324,6 +395,7 @@ async fn run_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     #[tokio::test]
     async fn run_does_not_apply_optional_validation() {
@@ -345,5 +417,46 @@ mod tests {
         .await;
 
         assert!(matches!(outcome, RunOutcome::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn run_with_events_reports_single_task_lifecycle() {
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let event_log = Arc::clone(&received);
+
+        let outcome = run_with_events(
+            Command {
+                request: TranscodeRequest::new("input.mkv", "output.mkv"),
+                operation: Operation::Transcode,
+                recursive: false,
+            },
+            Options {
+                terminal_output: false,
+                ..Options::default()
+            },
+            Config::default(),
+            cancellation,
+            move |event| {
+                let name = match event {
+                    RunEvent::TaskStarted {
+                        index: 1, total: 1, ..
+                    } => "started",
+                    RunEvent::TaskFinished {
+                        index: 1,
+                        total: 1,
+                        status: TaskStatus::Cancelled,
+                        ..
+                    } => "cancelled",
+                    _ => return,
+                };
+                event_log.lock().unwrap().push(name);
+            },
+        )
+        .await;
+
+        assert!(matches!(outcome, RunOutcome::Cancelled));
+        assert_eq!(*received.lock().unwrap(), ["started", "cancelled"]);
     }
 }

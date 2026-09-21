@@ -4,10 +4,12 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-yog-core.workspace = true
 yog-cli = { workspace = true, optional = true }
+yog-core.workspace = true
 yog-runtime.workspace = true
 
+crossterm = { workspace = true, features = ["event-stream"] }
+futures-util = { workspace = true, features = ["std"] }
 ratatui.workspace = true
 tokio.workspace = true
 

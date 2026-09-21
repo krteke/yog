@@ -4,6 +4,7 @@ use crate::{
     TaskOutcome,
     diagnostics::Diagnostics,
     error::RunError,
+    event::{RunEvent, RunPhase},
     progress::Display,
     record_task,
     report::{
@@ -156,7 +157,7 @@ impl Transcoder {
         &self,
         request: TranscodeRequest,
         options: &EmulationOptions,
-        diagnostics: &Diagnostics,
+        diagnostics: &Diagnostics<'_>,
         report: &mut Report,
     ) -> Result<(), RunError> {
         if self.cancelled() {
@@ -179,6 +180,7 @@ impl Transcoder {
             request.overwrite,
         )
         .context("cannot prepare emulation chart output")?;
+        diagnostics.event(RunEvent::PhaseChanged(RunPhase::Probing));
         let media = self.probe(&request.input).await?;
         let prediction_options = self.config.prediction.into();
         let jobs = jobs(&request, options);
@@ -204,6 +206,15 @@ impl Transcoder {
                 }
                 visited += 1;
                 progress.emulate_quality(&label, parameter, quality, visited, total);
+                diagnostics.event(RunEvent::EmulationPointStarted {
+                    index: visited,
+                    total,
+                    candidate: job.index,
+                    label: label.clone(),
+                    parameter,
+                    quality,
+                });
+                diagnostics.event(RunEvent::PhaseChanged(RunPhase::Predicting));
 
                 let VideoAction::Encode(encoding) = &mut sample_request.video else {
                     unreachable!("emulation arguments require a video encoder");
@@ -221,22 +232,38 @@ impl Transcoder {
                 let result = self
                     .predict_result(&sample_request, &media, prediction_options, diagnostics)
                     .await;
-                let outcome = match result {
+                let (outcome, vmaf, output_bytes) = match result {
                     Ok(prediction) => {
                         record.fill_prediction(&prediction);
+                        let vmaf = prediction.quality.vmaf.value;
+                        let output_bytes = prediction.output_bytes.value;
                         points.push(chart::Point {
                             quality,
-                            vmaf: prediction.quality.vmaf.value,
-                            size_bytes: prediction.output_bytes.value,
+                            vmaf,
+                            size_bytes: output_bytes,
                         });
                         succeeded += 1;
-                        TaskOutcome::Success
+                        (TaskOutcome::Success, Some(vmaf), Some(output_bytes))
                     }
-                    Err(error) => error
-                        .context(format!("prediction failed at {parameter} {quality}"))
-                        .into(),
+                    Err(error) => (
+                        error
+                            .context(format!("prediction failed at {parameter} {quality}"))
+                            .into(),
+                        None,
+                        None,
+                    ),
                 };
                 record_task(record, &outcome, report, diagnostics);
+                diagnostics.event(RunEvent::EmulationPointFinished {
+                    index: visited,
+                    total,
+                    candidate: job.index,
+                    quality,
+                    status: outcome.status(),
+                    vmaf,
+                    output_bytes,
+                    error: outcome.error(),
+                });
 
                 match outcome {
                     TaskOutcome::Success => {}
@@ -266,6 +293,7 @@ impl Transcoder {
             return Err(RunError::Failed(error));
         }
 
+        diagnostics.event(RunEvent::PhaseChanged(RunPhase::RenderingChart));
         chart::render(
             options.png.as_deref(),
             options.svg.as_deref(),

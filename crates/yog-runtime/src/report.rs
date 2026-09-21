@@ -77,7 +77,7 @@ impl TryFrom<Option<&Path>> for Report {
 }
 
 impl Report {
-    pub fn write(&mut self, record: &Record, diagnostics: &Diagnostics) {
+    pub fn write(&mut self, record: &Record, diagnostics: &Diagnostics<'_>) {
         let error = match self.file.as_mut() {
             Some(file) => file.write_line(record).err(),
             None => None,
@@ -87,7 +87,7 @@ impl Report {
         }
     }
 
-    pub fn finish(&mut self, diagnostics: &Diagnostics) {
+    pub fn finish(&mut self, diagnostics: &Diagnostics<'_>) {
         let error = match self.file.as_mut() {
             Some(file) => file.flush().err(),
             None => None,
@@ -97,7 +97,7 @@ impl Report {
         }
     }
 
-    fn warn(&mut self, diagnostics: &Diagnostics, error: &io::Error) {
+    fn warn(&mut self, diagnostics: &Diagnostics<'_>, error: &io::Error) {
         diagnostics.report_error(self.path.as_deref(), error);
     }
 }

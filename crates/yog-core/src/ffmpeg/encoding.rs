@@ -1,8 +1,15 @@
 use super::args::{Arg, ArgsExt, VideoOption};
-use std::{borrow::Cow, ffi::OsString, num::NonZeroU64, ops::RangeInclusive, path::PathBuf};
+use std::{
+    borrow::Cow, ffi::OsString, fmt::Display, num::NonZeroU64, ops::RangeInclusive, path::PathBuf,
+    str::FromStr,
+};
 
 #[cfg(feature = "clap")]
 mod cli;
+#[cfg(test)]
+mod tests;
+
+const DEFAULT_VAAPI_DEVICE: &str = "/dev/dri/renderD128";
 
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
@@ -10,6 +17,29 @@ pub enum VideoCodec {
     H264,
     Hevc,
     Av1,
+}
+
+impl Display for VideoCodec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VideoCodec::H264 => write!(f, "H.264"),
+            VideoCodec::Hevc => write!(f, "HEVC"),
+            VideoCodec::Av1 => write!(f, "AV1"),
+        }
+    }
+}
+
+impl FromStr for VideoCodec {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "h264" => Ok(Self::H264),
+            "hevc" => Ok(Self::Hevc),
+            "av1" => Ok(Self::Av1),
+            _ => Err(format!("unknown video codec {s}")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -48,6 +78,25 @@ impl Preset {
     }
 }
 
+impl FromStr for Preset {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "ultrafast" => Ok(Self::Ultrafast),
+            "superfast" => Ok(Self::Superfast),
+            "veryfast" => Ok(Self::Veryfast),
+            "faster" => Ok(Self::Faster),
+            "fast" => Ok(Self::Fast),
+            "medium" => Ok(Self::Medium),
+            "slow" => Ok(Self::Slow),
+            "slower" => Ok(Self::Slower),
+            "veryslow" => Ok(Self::Veryslow),
+            _ => Err(format!("unknown x264/x265 preset {s}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 pub enum QsvPreset {
@@ -70,6 +119,23 @@ impl QsvPreset {
             Self::Slow => "slow",
             Self::Slower => "slower",
             Self::Veryslow => "veryslow",
+        }
+    }
+}
+
+impl FromStr for QsvPreset {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "veryfast" => Ok(Self::Veryfast),
+            "faster" => Ok(Self::Faster),
+            "fast" => Ok(Self::Fast),
+            "medium" => Ok(Self::Medium),
+            "slow" => Ok(Self::Slow),
+            "slower" => Ok(Self::Slower),
+            "veryslow" => Ok(Self::Veryslow),
+            _ => Err(format!("unknown QSV preset {s}")),
         }
     }
 }
@@ -100,6 +166,23 @@ impl NvencPreset {
     }
 }
 
+impl FromStr for NvencPreset {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "p1" => Ok(Self::P1),
+            "p2" => Ok(Self::P2),
+            "p3" => Ok(Self::P3),
+            "p4" => Ok(Self::P4),
+            "p5" => Ok(Self::P5),
+            "p6" => Ok(Self::P6),
+            "p7" => Ok(Self::P7),
+            _ => Err(format!("unknown NVENC preset {s}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 pub enum NvencMultipass {
@@ -108,6 +191,19 @@ pub enum NvencMultipass {
     QuarterResolution,
     #[cfg_attr(feature = "clap", value(name = "fullres"))]
     FullResolution,
+}
+
+impl FromStr for NvencMultipass {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "disabled" => Ok(Self::Disabled),
+            "qres" => Ok(Self::QuarterResolution),
+            "fullres" => Ok(Self::FullResolution),
+            _ => Err(format!("unknown NVENC multipass mode {value}")),
+        }
+    }
 }
 
 impl NvencMultipass {
@@ -186,7 +282,7 @@ pub enum VideoEncoding {
         rate: Option<RateControl>,
         #[cfg_attr(
             feature = "clap",
-            arg(long, short, default_value = "/dev/dri/renderD128")
+            arg(long, short, default_value = DEFAULT_VAAPI_DEVICE)
         )]
         device: PathBuf,
     },
@@ -197,6 +293,87 @@ impl Default for VideoEncoding {
         Self::X264 {
             rate: None,
             preset: None,
+        }
+    }
+}
+
+impl FromStr for VideoEncoding {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (name, device) = match value.split_once('=') {
+            Some((name, device)) => (name, Some(device)),
+            None => (value, None),
+        };
+
+        if let Some((codec, backend)) = name.split_once('_') {
+            let codec = codec.parse()?;
+            return match backend {
+                "nvenc" if device.is_none() => Ok(Self::Nvenc {
+                    codec,
+                    rate: None,
+                    preset: None,
+                    multipass: None,
+                }),
+                "qsv" if device.is_none() => Ok(Self::Qsv {
+                    codec,
+                    rate: None,
+                    preset: None,
+                }),
+                "vaapi" => Ok(Self::Vaapi {
+                    codec,
+                    rate: None,
+                    device: device
+                        .filter(|device| !device.is_empty())
+                        .unwrap_or(DEFAULT_VAAPI_DEVICE)
+                        .into(),
+                }),
+                "nvenc" | "qsv" => Err(format!("{backend} encoding does not accept a device")),
+                _ => Err(format!("unknown encoder {name}")),
+            };
+        }
+
+        if device.is_some() {
+            return Err(format!("{name} encoding does not accept a device"));
+        }
+
+        match name {
+            "libx264" => Ok(Self::X264 {
+                rate: None,
+                preset: None,
+            }),
+            "libx265" => Ok(Self::X265 {
+                rate: None,
+                preset: None,
+            }),
+            "libsvtav1" => Ok(Self::SvtAv1 {
+                rate: None,
+                preset: None,
+            }),
+            "libaom-av1" => Ok(Self::AomAv1 {
+                rate: None,
+                cpu_used: None,
+            }),
+            "librav1e" => Ok(Self::Rav1e {
+                rate: None,
+                speed: None,
+            }),
+            _ => Err(format!("unknown encoder {name}")),
+        }
+    }
+}
+
+impl Display for VideoEncoding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VideoEncoding::X264 { .. } => write!(f, "x264"),
+            VideoEncoding::X265 { .. } => write!(f, "x265"),
+            VideoEncoding::SvtAv1 { .. } => write!(f, "SVT-AV1"),
+            VideoEncoding::AomAv1 { .. } => write!(f, "AOM-AV1"),
+            VideoEncoding::Rav1e { .. } => write!(f, "rav1e"),
+            VideoEncoding::Nvenc { codec, .. } => write!(f, "{} NVENC", codec),
+            VideoEncoding::Qsv { codec, .. } => write!(f, "{} QSV", codec),
+            VideoEncoding::Vaapi { codec, .. } => write!(f, "{} VAAPI", codec),
         }
     }
 }
@@ -223,6 +400,27 @@ impl VideoEncoding {
             VideoEncoding::Nvenc { multipass, .. } => multipass.map(|value| value.as_str()),
             _ => None,
         }
+    }
+
+    pub fn try_set_preset(&mut self, value: &str) -> Result<(), String> {
+        if value.is_empty() {
+            return Ok(());
+        }
+        let number = || value.parse::<u8>().map_err(|error| error.to_string());
+
+        match self {
+            Self::X264 { preset, .. } | Self::X265 { preset, .. } => {
+                *preset = Some(value.parse()?);
+            }
+            Self::SvtAv1 { preset, .. } => *preset = Some(number()?),
+            Self::AomAv1 { cpu_used, .. } => *cpu_used = Some(number()?),
+            Self::Rav1e { speed, .. } => *speed = Some(number()?),
+            Self::Nvenc { preset, .. } => *preset = Some(value.parse()?),
+            Self::Qsv { preset, .. } => *preset = Some(value.parse()?),
+            Self::Vaapi { .. } => return Err("VAAPI does not support preset".to_owned()),
+        }
+
+        Ok(())
     }
 
     pub fn name(&self) -> &'static str {
@@ -395,159 +593,6 @@ impl VideoEncoding {
                 }
             }
             Self::Vaapi { .. } => {}
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn quality_parameter_names_match_the_ffmpeg_options() {
-        let cases = [
-            (
-                VideoEncoding::X264 {
-                    rate: None,
-                    preset: None,
-                },
-                "CRF",
-            ),
-            (
-                VideoEncoding::SvtAv1 {
-                    rate: None,
-                    preset: None,
-                },
-                "CRF",
-            ),
-            (
-                VideoEncoding::Rav1e {
-                    rate: None,
-                    speed: None,
-                },
-                "QP",
-            ),
-            (
-                VideoEncoding::Nvenc {
-                    codec: VideoCodec::Av1,
-                    rate: None,
-                    preset: None,
-                    multipass: None,
-                },
-                "CQ",
-            ),
-            (
-                VideoEncoding::Qsv {
-                    codec: VideoCodec::Hevc,
-                    rate: None,
-                    preset: None,
-                },
-                "global_quality",
-            ),
-            (
-                VideoEncoding::Vaapi {
-                    codec: VideoCodec::H264,
-                    rate: None,
-                    device: PathBuf::new(),
-                },
-                "QP",
-            ),
-            (
-                VideoEncoding::Vaapi {
-                    codec: VideoCodec::Av1,
-                    rate: None,
-                    device: PathBuf::new(),
-                },
-                "global_quality",
-            ),
-        ];
-
-        for (encoding, expected) in cases {
-            assert_eq!(encoding.quality_parameter(), expected, "{encoding:?}");
-        }
-    }
-
-    #[test]
-    fn quality_controls_are_encoder_specific_and_bitrate_does_not_add_limits() {
-        let quality = Some(RateControl::Quality(30));
-        let cases = [
-            (
-                VideoEncoding::X264 {
-                    rate: quality,
-                    preset: None,
-                },
-                vec!["-crf:v", "30"],
-            ),
-            (
-                VideoEncoding::X265 {
-                    rate: quality,
-                    preset: None,
-                },
-                vec!["-crf:v", "30"],
-            ),
-            (
-                VideoEncoding::SvtAv1 {
-                    rate: quality,
-                    preset: None,
-                },
-                vec!["-crf:v", "30"],
-            ),
-            (
-                VideoEncoding::AomAv1 {
-                    rate: quality,
-                    cpu_used: None,
-                },
-                vec!["-b:v", "0", "-crf:v", "30"],
-            ),
-            (
-                VideoEncoding::Rav1e {
-                    rate: quality,
-                    speed: None,
-                },
-                vec!["-qp:v", "30"],
-            ),
-            (
-                VideoEncoding::Qsv {
-                    codec: VideoCodec::H264,
-                    rate: quality,
-                    preset: None,
-                },
-                vec!["-global_quality:v", "30"],
-            ),
-            (
-                VideoEncoding::Vaapi {
-                    codec: VideoCodec::Hevc,
-                    rate: quality,
-                    device: "/dev/dri/renderD128".into(),
-                },
-                vec!["-rc_mode:v", "CQP", "-qp:v", "30"],
-            ),
-            (
-                VideoEncoding::Vaapi {
-                    codec: VideoCodec::Av1,
-                    rate: quality,
-                    device: "/dev/dri/renderD128".into(),
-                },
-                vec!["-rc_mode:v", "CQP", "-global_quality:v", "30"],
-            ),
-            (
-                VideoEncoding::Nvenc {
-                    codec: VideoCodec::Av1,
-                    rate: Some(RateControl::Bitrate(NonZeroU64::new(4_000_000).unwrap())),
-                    preset: None,
-                    multipass: None,
-                },
-                vec!["-b:v", "4000000"],
-            ),
-        ];
-        for (encoding, expected) in cases {
-            let mut args = Vec::new();
-            encoding.append_options(&mut args);
-            assert_eq!(
-                args,
-                expected.into_iter().map(OsString::from).collect::<Vec<_>>(),
-                "{encoding:?}"
-            );
         }
     }
 }

@@ -72,6 +72,87 @@ impl Drop for Tool {
     }
 }
 
+async fn assert_invalid_packet_trailer(trailer: &str) {
+    let tool = Tool::new(&format!(
+        "printf '%s' '{{\"packets\":[{{\"stream_index\":0}}{trailer}'"
+    ))
+    .await;
+    let count = Arc::new(AtomicUsize::new(0));
+    let seen = count.clone();
+    let error = tool
+        .probe()
+        .with_timeout(Some(Duration::from_secs(5)))
+        .packets(Path::new("ignored"), None, "%+1", move |_| {
+            seen.fetch_add(1, Ordering::Relaxed);
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(
+        count.load(Ordering::Relaxed),
+        1,
+        "trailer={trailer}, error={error:?}"
+    );
+    assert!(matches!(error.reason, Failure::Json(_)));
+}
+
+async fn assert_ffmpeg_callback_cancellation(cancel_from_stderr: bool) {
+    let tool = Tool::new(
+        "printf 'diagnostic' >&2; printf 'frame=1\nprogress=continue\n'; while :; do :; done",
+    )
+    .await;
+    let cancelled = CancellationToken::new();
+    let ffmpeg =
+        Ffmpeg::new(&tool.path, Some(Duration::from_secs(5))).with_cancellation(cancelled.clone());
+    let plan = tool.plan().await;
+    let error = ffmpeg
+        .build(&plan)
+        .unwrap()
+        .run(
+            |_| {
+                if !cancel_from_stderr {
+                    cancelled.cancel();
+                }
+            },
+            |_| {
+                if cancel_from_stderr {
+                    cancelled.cancel();
+                }
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error.reason, Failure::Cancelled));
+    assert!(error.status.is_some());
+    assert_eq!(error.stderr, b"diagnostic");
+}
+
+async fn assert_ffmpeg_callback_panic(panic_from_stderr: bool) {
+    let tool =
+        Tool::new("printf 'diagnostic' >&2; printf 'progress=continue\n'; while :; do :; done")
+            .await;
+    let started = Instant::now();
+    let ffmpeg = Ffmpeg::new(&tool.path, Some(Duration::from_secs(5)));
+    let plan = tool.plan().await;
+    let result = AssertUnwindSafe(async {
+        ffmpeg
+            .build(&plan)
+            .unwrap()
+            .run(
+                |_| {
+                    assert!(panic_from_stderr, "progress callback panic");
+                },
+                |_| {
+                    assert!(!panic_from_stderr, "stderr callback panic");
+                },
+            )
+            .await
+    })
+    .catch_unwind()
+    .await;
+    assert!(result.is_err());
+    assert!(started.elapsed() < Duration::from_secs(3));
+}
+
 #[tokio::test]
 async fn packet_fingerprints_separate_stream_order_payload_and_presentation_time() {
     let tool = Tool::new(r#"
@@ -207,29 +288,13 @@ async fn timeout_keeps_diagnostics_and_pre_cancel_does_not_spawn() {
 }
 
 #[tokio::test]
-async fn records_are_provisional_until_final_result_and_trailing_json_is_checked() {
-    for trailer in ["}", "]} trailing"] {
-        let tool = Tool::new(&format!(
-            "printf '%s' '{{\"packets\":[{{\"stream_index\":0}}{trailer}'"
-        ))
-        .await;
-        let count = Arc::new(AtomicUsize::new(0));
-        let seen = count.clone();
-        let error = tool
-            .probe()
-            .with_timeout(Some(Duration::from_secs(5)))
-            .packets(Path::new("ignored"), None, "%+1", move |_| {
-                seen.fetch_add(1, Ordering::Relaxed);
-            })
-            .await
-            .unwrap_err();
-        assert_eq!(
-            count.load(Ordering::Relaxed),
-            1,
-            "trailer={trailer}, error={error:?}"
-        );
-        assert!(matches!(error.reason, Failure::Json(_)));
-    }
+async fn packet_records_remain_provisional_when_the_array_is_unfinished() {
+    assert_invalid_packet_trailer("}").await;
+}
+
+#[tokio::test]
+async fn packet_records_remain_provisional_when_json_has_trailing_data() {
+    assert_invalid_packet_trailer("]} trailing").await;
 }
 
 #[tokio::test]
@@ -280,67 +345,23 @@ async fn ffmpeg_drains_both_pipes_and_end_record_does_not_hide_failure() {
 }
 
 #[tokio::test]
-async fn ffmpeg_callbacks_can_cancel_while_child_is_running() {
-    for cancel_from_stderr in [false, true] {
-        let tool = Tool::new(
-            "printf 'diagnostic' >&2; printf 'frame=1\nprogress=continue\n'; while :; do :; done",
-        )
-        .await;
-        let cancelled = CancellationToken::new();
-        let ffmpeg = Ffmpeg::new(&tool.path, Some(Duration::from_secs(5)))
-            .with_cancellation(cancelled.clone());
-        let plan = tool.plan().await;
-        let error = ffmpeg
-            .build(&plan)
-            .unwrap()
-            .run(
-                |_| {
-                    if !cancel_from_stderr {
-                        cancelled.cancel();
-                    }
-                },
-                |_| {
-                    if cancel_from_stderr {
-                        cancelled.cancel();
-                    }
-                },
-            )
-            .await
-            .unwrap_err();
-        assert!(matches!(error.reason, Failure::Cancelled));
-        assert!(error.status.is_some());
-        assert_eq!(error.stderr, b"diagnostic");
-    }
+async fn ffmpeg_progress_callback_can_cancel_while_child_is_running() {
+    assert_ffmpeg_callback_cancellation(false).await;
 }
 
 #[tokio::test]
-async fn ffmpeg_callback_panics_reap_before_propagation() {
-    for panic_from_stderr in [false, true] {
-        let tool =
-            Tool::new("printf 'diagnostic' >&2; printf 'progress=continue\n'; while :; do :; done")
-                .await;
-        let started = Instant::now();
-        let ffmpeg = Ffmpeg::new(&tool.path, Some(Duration::from_secs(5)));
-        let plan = tool.plan().await;
-        let result = AssertUnwindSafe(async {
-            ffmpeg
-                .build(&plan)
-                .unwrap()
-                .run(
-                    |_| {
-                        assert!(panic_from_stderr, "progress callback panic");
-                    },
-                    |_| {
-                        assert!(!panic_from_stderr, "stderr callback panic");
-                    },
-                )
-                .await
-        })
-        .catch_unwind()
-        .await;
-        assert!(result.is_err());
-        assert!(started.elapsed() < Duration::from_secs(3));
-    }
+async fn ffmpeg_stderr_callback_can_cancel_while_child_is_running() {
+    assert_ffmpeg_callback_cancellation(true).await;
+}
+
+#[tokio::test]
+async fn ffmpeg_progress_callback_panic_reaps_before_propagation() {
+    assert_ffmpeg_callback_panic(false).await;
+}
+
+#[tokio::test]
+async fn ffmpeg_stderr_callback_panic_reaps_before_propagation() {
+    assert_ffmpeg_callback_panic(true).await;
 }
 
 #[tokio::test]

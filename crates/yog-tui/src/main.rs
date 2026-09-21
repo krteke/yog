@@ -17,5 +17,6 @@ async fn main() -> ExitCode {
         return exit;
     }
 
+    #[cfg(not(feature = "cli"))]
     todo!()
 }

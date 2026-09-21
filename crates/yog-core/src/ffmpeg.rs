@@ -1,4 +1,4 @@
-use std::{path::PathBuf, time::Duration};
+use std::{collections::HashMap, path::PathBuf, sync::Mutex, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 use crate::program::Program;
@@ -17,6 +17,7 @@ pub mod vmaf;
 
 pub struct Ffmpeg {
     inner: Program,
+    encoder_help: Mutex<HashMap<String, capabilities::EncoderHelp>>,
 }
 
 impl Ffmpeg {
@@ -27,6 +28,7 @@ impl Ffmpeg {
                 timeout,
                 cancellation: CancellationToken::new(),
             },
+            encoder_help: Mutex::new(HashMap::new()),
         }
     }
 

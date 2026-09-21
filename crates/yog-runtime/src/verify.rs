@@ -483,27 +483,21 @@ mod tests {
         compare_structure(&before, &after, false, &plan, &mut |warning| {
             warnings.push(warning)
         });
-        for expected in [
-            "subtitle stream #1: missing",
-            "cover stream #3: missing",
-            "data stream #3: added",
-            "component bit depths",
-            "chroma",
-            "color_transfer",
-            "extradata_hash",
-            "channels",
-            "sample_rate",
-            "chapters, count",
-            "chapter #0, end_time",
-            "metadata \"title\"",
-            "metadata \"ENCODER\"",
-            "metadata \"comment\"",
-        ] {
-            assert!(
-                warnings.iter().any(|warning| warning.contains(expected)),
-                "{expected}: {warnings:#?}"
-            );
-        }
+        let contains = |expected| warnings.iter().any(|warning| warning.contains(expected));
+        assert!(contains("subtitle stream #1: missing"), "{warnings:#?}");
+        assert!(contains("cover stream #3: missing"), "{warnings:#?}");
+        assert!(contains("data stream #3: added"), "{warnings:#?}");
+        assert!(contains("component bit depths"), "{warnings:#?}");
+        assert!(contains("chroma"), "{warnings:#?}");
+        assert!(contains("color_transfer"), "{warnings:#?}");
+        assert!(contains("extradata_hash"), "{warnings:#?}");
+        assert!(contains("channels"), "{warnings:#?}");
+        assert!(contains("sample_rate"), "{warnings:#?}");
+        assert!(contains("chapters, count"), "{warnings:#?}");
+        assert!(contains("chapter #0, end_time"), "{warnings:#?}");
+        assert!(contains("metadata \"title\""), "{warnings:#?}");
+        assert!(contains("metadata \"ENCODER\""), "{warnings:#?}");
+        assert!(contains("metadata \"comment\""), "{warnings:#?}");
         let unknown = media(json!({"streams":[{"index":0,"codec_type":"video","pix_fmt":"pal8"}]}));
         warnings.clear();
         compare_structure(&unknown, &unknown, false, &plan, &mut |warning| {

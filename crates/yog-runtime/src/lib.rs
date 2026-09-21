@@ -19,7 +19,7 @@ use transcode::Transcoder;
 use yog_core::ffmpeg::{plan::TranscodeRequest, vmaf::VmafOptions};
 
 pub use config::Config;
-pub use emulate::EmulationOptions;
+pub use emulate::{Candidate, EmulationOptions};
 pub use validate::Validate;
 
 use crate::report::record::{PredictRecord, SkippedRecord, TaskRecord, TranscodeRecord};
@@ -107,6 +107,12 @@ pub struct TaskFailure {
     pub error: anyhow::Error,
 }
 
+/// Executes a command as provided by the caller.
+///
+/// Validation is intentionally not implicit. Frontends that accept untrusted or
+/// loosely structured input can call [`Validate::validate`] on the whole
+/// [`Command`] or on individual values before execution. Strongly typed
+/// frontends may execute directly.
 pub async fn run(
     command: Command,
     options: Options,
@@ -114,11 +120,6 @@ pub async fn run(
     cancellation: CancellationToken,
 ) -> RunOutcome {
     let diagnostics = Diagnostics::new(options.verbose, options.terminal_output);
-    if let Err(error) = command.validate() {
-        diagnostics.error(&error);
-        return RunOutcome::Failed(error);
-    }
-
     let mut report = match Report::try_from(options.report.as_deref()) {
         Ok(report) => report,
         Err(error) => {
@@ -294,7 +295,7 @@ async fn run_batch(
                 let line = finish_record(record, &outcome);
                 (line, outcome)
             }
-            Operation::Emulate(_) => unreachable!("validated recursive command cannot emulate"),
+            Operation::Emulate(_) => unreachable!("recursive emulation is unsupported"),
         };
         report.write(&line, diagnostics);
         match outcome {
@@ -315,4 +316,31 @@ async fn run_batch(
         failures,
         cancelled,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn run_does_not_apply_optional_validation() {
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let outcome = run(
+            Command {
+                request: TranscodeRequest::new("", ""),
+                operation: Operation::Transcode,
+                recursive: false,
+            },
+            Options {
+                terminal_output: false,
+                ..Options::default()
+            },
+            Config::default(),
+            cancellation,
+        )
+        .await;
+
+        assert!(matches!(outcome, RunOutcome::Cancelled));
+    }
 }

@@ -8,13 +8,30 @@ use plotters::{
     prelude::*,
 };
 use std::fs;
-use yog_core::ffmpeg::{
-    decoding::DecodingBackend,
-    encoding::{VideoCodec, VideoEncoding},
-    plan::{TranscodeRequest, VideoAction},
-};
 
 const MIB: f64 = 1024.0 * 1024.0;
+
+pub struct Series {
+    pub index: Option<usize>,
+    pub label: String,
+    pub parameter: &'static str,
+    pub points: Vec<EmulationPoint>,
+}
+
+const COLORS: [RGBColor; 8] = [
+    RGBColor(22, 163, 74),
+    RGBColor(37, 99, 235),
+    RGBColor(202, 138, 4),
+    RGBColor(220, 38, 38),
+    RGBColor(147, 51, 234),
+    RGBColor(13, 148, 136),
+    RGBColor(219, 39, 119),
+    RGBColor(101, 163, 13),
+];
+
+fn colors(count: usize) -> impl Iterator<Item = RGBColor> {
+    COLORS.into_iter().cycle().take(count)
+}
 
 pub(super) fn check_paths(options: &EmulationOptions, overwrite: bool) -> anyhow::Result<()> {
     for path in [&options.png, &options.svg].into_iter().flatten() {
@@ -32,23 +49,19 @@ pub(super) fn check_paths(options: &EmulationOptions, overwrite: bool) -> anyhow
 }
 
 pub(super) fn render(
-    request: &TranscodeRequest,
     options: &EmulationOptions,
-    points: &[EmulationPoint],
+    series: &[Series],
     source_bytes: u64,
     image_size: (u32, u32),
 ) -> anyhow::Result<()> {
-    let VideoAction::Encode(encoding) = &request.video else {
-        unreachable!("emulation arguments require a video encoder");
-    };
-    let title = title(encoding, &request.decoding);
-    let quality_parameter = encoding.quality_parameter();
+    let title = title(series);
+    let parameter = parameter(series);
     if let Some(path) = &options.png {
         draw(
             BitMapBackend::new(path, image_size).into_drawing_area(),
             &title,
-            quality_parameter,
-            points,
+            &parameter,
+            series,
             source_bytes,
         )
         .with_context(|| format!("cannot render PNG {}", path.display()))?;
@@ -57,8 +70,8 @@ pub(super) fn render(
         draw(
             SVGBackend::new(path, image_size).into_drawing_area(),
             &title,
-            quality_parameter,
-            points,
+            &parameter,
+            series,
             source_bytes,
         )
         .with_context(|| format!("cannot render SVG {}", path.display()))?;
@@ -66,80 +79,41 @@ pub(super) fn render(
     Ok(())
 }
 
-fn title(encoding: &VideoEncoding, decoding: &DecodingBackend) -> String {
-    let mut parts = vec![
-        match encoding {
-            VideoEncoding::X264 { .. } => "x264".to_owned(),
-            VideoEncoding::X265 { .. } => "x265".to_owned(),
-            VideoEncoding::SvtAv1 { .. } => "SVT-AV1".to_owned(),
-            VideoEncoding::AomAv1 { .. } => "AOM-AV1".to_owned(),
-            VideoEncoding::Rav1e { .. } => "rav1e".to_owned(),
-            VideoEncoding::Nvenc { codec, .. } => {
-                format!("{} NVENC", codec_name(*codec))
-            }
-            VideoEncoding::Qsv { codec, .. } => format!("{} QSV", codec_name(*codec)),
-            VideoEncoding::Vaapi { codec, .. } => format!("{} VAAPI", codec_name(*codec)),
-        },
-        match decoding {
-            DecodingBackend::Software => "Software",
-            DecodingBackend::Vaapi(_) => "VAAPI decode",
-            DecodingBackend::Cuda(_) => "CUDA decode",
-            DecodingBackend::Qsv(_) => "QSV decode",
+fn parameter(series: &[Series]) -> String {
+    let mut parameters = Vec::new();
+    for series in series {
+        if !parameters.contains(&series.parameter) {
+            parameters.push(series.parameter);
         }
-        .to_owned(),
-    ];
-
-    match encoding {
-        VideoEncoding::X264 {
-            preset: Some(preset),
-            ..
-        }
-        | VideoEncoding::X265 {
-            preset: Some(preset),
-            ..
-        } => parts.push(format!("Preset {}", preset.as_str())),
-        VideoEncoding::SvtAv1 {
-            preset: Some(preset),
-            ..
-        } => parts.push(format!("Preset {preset}")),
-        VideoEncoding::AomAv1 {
-            cpu_used: Some(cpu_used),
-            ..
-        } => parts.push(format!("CPU Used {cpu_used}")),
-        VideoEncoding::Rav1e {
-            speed: Some(speed), ..
-        } => parts.push(format!("Speed {speed}")),
-        VideoEncoding::Nvenc {
-            preset, multipass, ..
-        } => {
-            if let Some(preset) = preset {
-                parts.push(format!("Preset {}", preset.as_str()));
-            }
-            if let Some(multipass) = multipass {
-                parts.push(format!("Multipass {}", multipass.as_str()));
-            }
-        }
-        VideoEncoding::Qsv {
-            preset: Some(preset),
-            ..
-        } => parts.push(format!("Preset {}", preset.as_str())),
-        VideoEncoding::Vaapi { .. }
-        | VideoEncoding::X264 { preset: None, .. }
-        | VideoEncoding::X265 { preset: None, .. }
-        | VideoEncoding::SvtAv1 { preset: None, .. }
-        | VideoEncoding::AomAv1 { cpu_used: None, .. }
-        | VideoEncoding::Rav1e { speed: None, .. }
-        | VideoEncoding::Qsv { preset: None, .. } => {}
     }
-
-    parts.join(" / ")
+    parameters.join(" / ")
 }
 
-fn codec_name(codec: VideoCodec) -> &'static str {
-    match codec {
-        VideoCodec::H264 => "H.264",
-        VideoCodec::Hevc => "HEVC",
-        VideoCodec::Av1 => "AV1",
+fn title(series: &[Series]) -> String {
+    let indices = series
+        .iter()
+        .filter_map(|series| series.index)
+        .collect::<Vec<_>>();
+    if !indices.is_empty() && indices.len() == series.len() {
+        let indices = indices
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(" / ");
+        return if series.len() == 1 {
+            format!("Candidate {indices}")
+        } else {
+            format!("Candidates {indices}")
+        };
+    }
+
+    match series {
+        [single] => single.label.clone(),
+        _ => series
+            .iter()
+            .map(|series| series.label.as_str())
+            .collect::<Vec<_>>()
+            .join(" vs "),
     }
 }
 
@@ -147,25 +121,25 @@ fn draw<DB>(
     root: DrawingArea<DB, Shift>,
     title: &str,
     quality_parameter: &str,
-    points: &[EmulationPoint],
+    series: &[Series],
     source_bytes: u64,
 ) -> anyhow::Result<()>
 where
     DB: DrawingBackend,
     DB::ErrorType: 'static,
 {
-    if points.is_empty() {
+    let (Some(minimum), Some(maximum)) = (
+        points(series).map(|point| point.quality).min(),
+        points(series).map(|point| point.quality).max(),
+    ) else {
         anyhow::bail!("cannot render an emulation chart without quality points");
-    }
-
-    let minimum = points[0].quality;
-    let maximum = points[points.len() - 1].quality;
+    };
 
     let quality_values = [f64::from(minimum), f64::from(maximum)];
     let quality_bounds = axis_bounds(quality_values[0], quality_values[1], 0.5);
-    let (vmaf_minimum, vmaf_maximum) = value_bounds(points, |point| point.vmaf);
+    let (vmaf_minimum, vmaf_maximum) = value_bounds(series, |point| point.vmaf);
     let vmaf_bounds = axis_bounds(vmaf_minimum, vmaf_maximum, 0.5);
-    let (size_minimum, size_maximum) = value_bounds(points, |point| point.size_bytes as f64 / MIB);
+    let (size_minimum, size_maximum) = value_bounds(series, |point| point.size_bytes as f64 / MIB);
     let source_size = source_bytes as f64 / MIB;
     let show_source_size = (size_minimum..=size_maximum).contains(&source_size);
     let size_padding = (size_minimum.abs() * 0.05).max(0.001);
@@ -180,8 +154,16 @@ where
     let size_light_points = axis_points(size_bounds, 31);
 
     root.fill(&WHITE)?;
-    let mut chart = ChartBuilder::on(&root)
-        .caption(title, ("sans-serif", 30))
+    let chart_root = root.titled(title, ("sans-serif", 30))?;
+    let description_rows = series
+        .iter()
+        .filter(|series| series.index.is_some())
+        .count();
+    let description_height = 30 + description_rows as u32 * 22;
+    let (descriptions, chart_root) = chart_root.split_vertically(description_height);
+    draw_descriptions(&descriptions, series, show_source_size, source_size)?;
+
+    let mut chart = ChartBuilder::on(&chart_root)
         .margin(20)
         .set_label_area_size(LabelAreaPosition::Left, 70)
         .set_label_area_size(LabelAreaPosition::Right, 105)
@@ -217,58 +199,87 @@ where
         .y_label_formatter(&format_size)
         .draw()?;
 
-    let vmaf_color = RGBColor(22, 163, 74);
-    let size_color = RGBColor(202, 138, 4);
-    chart
-        .draw_series(LineSeries::new(
-            points
+    for (item, color) in series.iter().zip(colors(series.len())) {
+        if item.points.is_empty() {
+            continue;
+        }
+        chart.draw_series(LineSeries::new(
+            item.points
                 .iter()
                 .map(|point| (point.quality as f64, point.vmaf)),
-            &vmaf_color,
-        ))?
-        .label("VMAF score")
-        .legend(move |(x, y)| PathElement::new([(x, y), (x + 28, y)], vmaf_color));
+            color,
+        ))?;
 
-    chart
-        .draw_secondary_series(LineSeries::new(
-            points
+        chart.draw_secondary_series(DashedLineSeries::new(
+            item.points
                 .iter()
                 .map(|point| (point.quality as f64, point.size_bytes as f64 / MIB)),
-            &size_color,
-        ))?
-        .label("Estimated size")
-        .legend(move |(x, y)| PathElement::new([(x, y), (x + 28, y)], size_color));
+            6,
+            4,
+            color.stroke_width(1),
+        ))?;
+    }
 
     if show_source_size {
         let source_color = RGBColor(96, 96, 96).mix(0.7);
-        chart
-            .draw_secondary_series(DashedLineSeries::new(
-                [
-                    (quality_bounds[0], source_size),
-                    (quality_bounds[1], source_size),
-                ],
-                6,
-                4,
-                source_color.stroke_width(1),
-            ))?
-            .label(format!("Input size: {}", format_size(&source_size)))
-            .legend(move |(x, y)| {
-                PathElement::new([(x, y), (x + 28, y)], source_color.stroke_width(1))
-            });
+        chart.draw_secondary_series(DashedLineSeries::new(
+            [
+                (quality_bounds[0], source_size),
+                (quality_bounds[1], source_size),
+            ],
+            6,
+            4,
+            source_color.stroke_width(1),
+        ))?;
     }
 
-    chart
-        .configure_series_labels()
-        .position(SeriesLabelPosition::UpperRight)
-        .background_style(WHITE.mix(0.85))
-        .border_style(BLACK)
-        .draw()?;
     root.present()?;
     Ok(())
 }
 
-fn value_bounds(points: &[EmulationPoint], value: impl Fn(&EmulationPoint) -> f64) -> (f64, f64) {
-    let mut values = points.iter().map(value);
+fn draw_descriptions<DB>(
+    area: &DrawingArea<DB, Shift>,
+    series: &[Series],
+    show_source_size: bool,
+    source_size: f64,
+) -> anyhow::Result<()>
+where
+    DB: DrawingBackend,
+    DB::ErrorType: 'static,
+{
+    let mut row = 0;
+    for (item, color) in series.iter().zip(colors(series.len())) {
+        let Some(index) = item.index else {
+            continue;
+        };
+        let y = 10 + row * 22;
+        area.draw(&Rectangle::new([(20, y - 6), (34, y + 6)], color.filled()))?;
+        area.draw(&Text::new(
+            format!("{index}: {}", item.label),
+            (44, y),
+            ("sans-serif", 16),
+        ))?;
+        row += 1;
+    }
+
+    let guide = if show_source_size {
+        format!(
+            "Solid: VMAF    Dashed: estimated size    Gray dashed: input size ({})",
+            format_size(&source_size)
+        )
+    } else {
+        "Solid: VMAF    Dashed: estimated size".to_owned()
+    };
+    area.draw(&Text::new(guide, (20, 10 + row * 22), ("sans-serif", 15)))?;
+    Ok(())
+}
+
+fn points(series: &[Series]) -> impl Iterator<Item = &EmulationPoint> {
+    series.iter().flat_map(|item| item.points.iter())
+}
+
+fn value_bounds(series: &[Series], value: impl Fn(&EmulationPoint) -> f64) -> (f64, f64) {
+    let mut values = points(series).map(value);
     let first = values
         .next()
         .expect("emulation charts are rendered with at least one point");
@@ -362,5 +373,92 @@ impl Ranged for ExplicitAxis {
 
     fn range(&self) -> std::ops::Range<f64> {
         self.bounds[0]..self.bounds[1]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn size_labels_switch_from_mib_to_gib_at_one_gib() {
+        assert_eq!(format_size(&800.0), "800.0 MiB");
+        assert_eq!(format_size(&1024.0), "1.0 GiB");
+        assert_eq!(format_size(&(1.1 * 1024.0)), "1.1 GiB");
+    }
+
+    #[test]
+    fn candidate_title_uses_only_candidate_numbers() {
+        let series = [
+            Series {
+                index: Some(1),
+                label: "SVT-AV1 / Software / Preset 4".to_owned(),
+                parameter: "CRF",
+                points: Vec::new(),
+            },
+            Series {
+                index: Some(2),
+                label: "x265 / Software / Preset slow".to_owned(),
+                parameter: "CRF",
+                points: Vec::new(),
+            },
+        ];
+
+        assert_eq!(title(&series), "Candidates 1 / 2");
+    }
+
+    #[test]
+    fn candidate_chart_has_color_descriptions_without_point_markers() {
+        let series = [
+            Series {
+                index: Some(1),
+                label: "SVT-AV1 / Software / Preset 4".to_owned(),
+                parameter: "CRF",
+                points: vec![
+                    EmulationPoint {
+                        quality: 20,
+                        vmaf: 95.0,
+                        size_bytes: 800 * 1024 * 1024,
+                    },
+                    EmulationPoint {
+                        quality: 21,
+                        vmaf: 94.0,
+                        size_bytes: 760 * 1024 * 1024,
+                    },
+                ],
+            },
+            Series {
+                index: Some(2),
+                label: "x265 / Software / Preset slow".to_owned(),
+                parameter: "CRF",
+                points: vec![
+                    EmulationPoint {
+                        quality: 20,
+                        vmaf: 96.0,
+                        size_bytes: 820 * 1024 * 1024,
+                    },
+                    EmulationPoint {
+                        quality: 21,
+                        vmaf: 95.0,
+                        size_bytes: 780 * 1024 * 1024,
+                    },
+                ],
+            },
+        ];
+        let mut svg = String::new();
+        draw(
+            SVGBackend::with_string(&mut svg, (800, 600)).into_drawing_area(),
+            &title(&series),
+            "CRF",
+            &series,
+            900 * 1024 * 1024,
+        )
+        .unwrap();
+
+        assert!(svg.contains("Candidates 1 / 2"));
+        assert!(svg.contains("1: SVT-AV1 / Software / Preset 4"));
+        assert!(svg.contains("2: x265 / Software / Preset slow"));
+        assert!(svg.contains("Solid: VMAF    Dashed: estimated size"));
+        assert!(!svg.contains("<circle"));
     }
 }

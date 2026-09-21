@@ -8,7 +8,7 @@ use clap::Parser;
 pub use args::Args;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::sync::CancellationToken;
-use yog_runtime::{Config, RunStatus};
+use yog_runtime::{Config, RunStatus, Validate};
 
 impl Args {
     pub fn parse_from<I, T>(iter: I) -> Self
@@ -22,6 +22,12 @@ impl Args {
     pub async fn run(self) -> ExitCode {
         let (config_path, command, options) =
             self.into_runtime().unwrap_or_else(|error| error.exit());
+        if let Err(error) = command.validate() {
+            if options.terminal_output {
+                eprintln!("{error:#}");
+            }
+            return ExitCode::FAILURE;
+        }
         init_logger(options.verbose, options.terminal_output);
 
         let config = match Config::load(config_path.as_deref()) {

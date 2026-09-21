@@ -13,6 +13,7 @@ cargo run -p yog-cli -- transcode -i input.mkv -o output.mkv --vmaf --encode-x26
 cargo run -p yog-cli -- transcode -i input.mkv -o output.mkv --vmaf=5 --encode-x264
 cargo run -p yog-cli -- predict -i input.mkv --encode-x264 --quality 23
 cargo run -p yog-cli -- emulate -i input.mkv --png quality.png --svg quality.svg --range 18-30 --encode-x264 --preset medium
+cargo run -p yog-cli -- emulate -i input.mkv --svg compare.svg --candidate vaapi:libsvtav1:7:2-40 --candidate software:libx264:medium:18-30
 cargo run -p yog-cli -- transcode -i input.mp4 -o output.mp4 -C mp4 -v --copy
 cargo run -p yog-cli -- transcode -i input.mkv -o output.mkv --quiet --copy
 ```
@@ -30,15 +31,15 @@ cargo run -p yog-cli -- -i input.mkv emulate --png quality.png --range 18-30 --e
 JSONL
 
 ```json
-{"transcode":{"input":"/media/in.mkv","output":"/media/out.mkv","status":"success","container":"mkv","video":{"action":"encode","encoder":"libx265","rate":{"kind":"quality","parameter":"CRF","value":23},"preset":"medium","multipass":null},"decoding":"software","source":{"bytes":734003200,"duration_seconds":3661.5,"streams":{"video":1,"audio":2,"subtitle":1,"attachment":1,"cover":0,"other":0},"video":{"codec":"hevc","width":1920,"height":1080,"frame_rate":"24000/1001","bit_rate":"1500000"},"audio":[{"codec":"aac","channels":2,"sample_rate":"48000"}]},"result":{"bytes":412345678,"duration_seconds":3661.5,"size_percent":56.18,"elapsed_seconds":812.4,"speed":4.507,"frames":87833,"fps":108.1},"verify":{"outcome":"complete","warnings":[]},"vmaf":{"n_subsample":7,"score":95.25,"error":null},"error":null}}
+{"transcode":{"input":"/media/in.mkv","output":"/media/out.mkv","status":"success","container":"mkv","video":{"action":"encode","encoder":"libx265","rate":{"kind":"quality","parameter":"CRF","value":23},"preset":"medium","multipass":null,"device":null},"decoding":"software","source":{"bytes":734003200,"duration_seconds":3661.5,"streams":{"video":1,"audio":2,"subtitle":1,"attachment":1,"cover":0,"other":0},"video":{"codec":"hevc","width":1920,"height":1080,"frame_rate":"24000/1001","bit_rate":"1500000"},"audio":[{"codec":"aac","channels":2,"sample_rate":"48000"}]},"result":{"bytes":412345678,"duration_seconds":3661.5,"size_percent":56.18,"elapsed_seconds":812.4,"speed":4.507,"frames":87833,"fps":108.1},"verify":{"outcome":"complete","warnings":[]},"vmaf":{"n_subsample":7,"score":95.25,"error":null},"error":null}}
 ```
 
 ```json
-{"predict":{"input":"/media/in.mkv","status":"success","container":"mkv","video":{"action":"encode","encoder":"libx264","rate":{"kind":"quality","parameter":"CRF","value":23},"preset":null,"multipass":null},"decoding":"software","sampling":{"requested_samples":5,"sample_seconds":2.0,"measured_samples":2,"sampled_seconds":4.0},"source":{"bytes":734003200,"duration_seconds":3661.5,"streams":{"video":1,"audio":2,"subtitle":1,"attachment":1,"cover":0,"other":0},"video":{"codec":"h264","width":1920,"height":1080,"frame_rate":"24000/1001","bit_rate":"1500000"},"audio":[{"codec":"aac","channels":2,"sample_rate":"48000"}]},"speed":{"value":2.667,"low":2.0,"high":4.0},"transcode_seconds":{"value":1372.7,"low":915.4,"high":1830.8},"output_bytes":{"value":61712345670,"low":50000000000,"high":70000000000},"size_percent":840.0,"quality":{"frames":240,"source_stream_index":0,"vmaf":{"value":96.5,"low":96.5,"high":96.5},"ssim":{"value":0.99,"low":0.99,"high":0.99},"psnr_y_db":{"value":42.0,"low":42.0,"high":42.0}},"samples":[{"start_seconds":0.0,"duration_seconds":2.0,"encode_seconds":0.75,"speed":2.667,"timed_payload_bytes":3000000,"scored_frames":120,"vmaf":96.5,"ssim":0.99,"psnr_y_db":42.0}],"error":null}}
+{"predict":{"input":"/media/in.mkv","status":"success","container":"mkv","video":{"action":"encode","encoder":"libx264","rate":{"kind":"quality","parameter":"CRF","value":23},"preset":null,"multipass":null,"device":null},"decoding":"software","sampling":{"requested_samples":5,"sample_seconds":2.0,"measured_samples":2,"sampled_seconds":4.0},"source":{"bytes":734003200,"duration_seconds":3661.5,"streams":{"video":1,"audio":2,"subtitle":1,"attachment":1,"cover":0,"other":0},"video":{"codec":"h264","width":1920,"height":1080,"frame_rate":"24000/1001","bit_rate":"1500000"},"audio":[{"codec":"aac","channels":2,"sample_rate":"48000"}]},"speed":{"value":2.667,"low":2.0,"high":4.0},"transcode_seconds":{"value":1372.7,"low":915.4,"high":1830.8},"output_bytes":{"value":61712345670,"low":50000000000,"high":70000000000},"size_percent":840.0,"quality":{"frames":240,"source_stream_index":0,"vmaf":{"value":96.5,"low":96.5,"high":96.5},"ssim":{"value":0.99,"low":0.99,"high":0.99},"psnr_y_db":{"value":42.0,"low":42.0,"high":42.0}},"samples":[{"start_seconds":0.0,"duration_seconds":2.0,"encode_seconds":0.75,"speed":2.667,"timed_payload_bytes":3000000,"scored_frames":120,"vmaf":96.5,"ssim":0.99,"psnr_y_db":42.0}],"error":null}}
 ```
 
 ```json
-{"emulate":{"input":"/media/in.mkv","status":"success","container":"mkv","video":{"action":"encode","encoder":"libx264","rate":{"kind":"quality","parameter":"CRF","value":20},"preset":"medium","multipass":null},"decoding":"software","outputs":{"png":"/media/quality.png","svg":null},"source":{"bytes":734003200,"duration_seconds":3661.5,"streams":{"video":1,"audio":2,"subtitle":1,"attachment":1,"cover":0,"other":0},"video":{"codec":"h264","width":1920,"height":1080,"frame_rate":"24000/1001","bit_rate":"1500000"},"audio":[{"codec":"aac","channels":2,"sample_rate":"48000"}]},"sampling":{"requested_samples":5,"sample_seconds":2.0,"measured_samples":2,"sampled_seconds":4.0},"speed":{"value":2.667,"low":2.0,"high":4.0},"transcode_seconds":{"value":1372.7,"low":915.4,"high":1830.8},"output_bytes":{"value":6171234567,"low":5000000000,"high":7000000000},"size_percent":840.0,"quality":{"frames":240,"source_stream_index":0,"vmaf":{"value":96.5,"low":96.5,"high":96.5},"ssim":null,"psnr_y_db":null},"samples":[{"start_seconds":0.0,"duration_seconds":2.0,"encode_seconds":0.75,"speed":2.667,"timed_payload_bytes":3000000,"scored_frames":120,"vmaf":96.5,"ssim":null,"psnr_y_db":null}],"error":null}}
+{"emulate":{"input":"/media/in.mkv","status":"success","container":"mkv","video":{"action":"encode","encoder":"libx264","rate":{"kind":"quality","parameter":"CRF","value":20},"preset":"medium","multipass":null,"device":null},"decoding":"software","source":{"bytes":734003200,"duration_seconds":3661.5,"streams":{"video":1,"audio":2,"subtitle":1,"attachment":1,"cover":0,"other":0},"video":{"codec":"h264","width":1920,"height":1080,"frame_rate":"24000/1001","bit_rate":"1500000"},"audio":[{"codec":"aac","channels":2,"sample_rate":"48000"}]},"sampling":{"requested_samples":5,"sample_seconds":2.0,"measured_samples":2,"sampled_seconds":4.0},"speed":{"value":2.667,"low":2.0,"high":4.0},"transcode_seconds":{"value":1372.7,"low":915.4,"high":1830.8},"output_bytes":{"value":6171234567,"low":5000000000,"high":7000000000},"size_percent":840.0,"quality":{"frames":240,"source_stream_index":0,"vmaf":{"value":96.5,"low":96.5,"high":96.5},"ssim":null,"psnr_y_db":null},"samples":[{"start_seconds":0.0,"duration_seconds":2.0,"encode_seconds":0.75,"speed":2.667,"timed_payload_bytes":3000000,"scored_frames":120,"vmaf":96.5,"ssim":null,"psnr_y_db":null}],"error":null,"candidate_index":null,"outputs":{"png":"/media/quality.png","svg":null}}}
 ```
 
 ```json
@@ -78,6 +79,7 @@ JSONL
 | `video.rate.value` | Quality value or bitrate in bits per second. |
 | `video.preset` | Encoder speed/effort knob: a string for x264/x265/NVENC/QSV (`medium`, `p4`, ...) and a number for SVT-AV1/AOM AV1/rav1e (`cpu-used`/`speed`). |
 | `video.multipass` | NVENC multipass mode (`disabled`, `qres`, `fullres`), otherwise `null`. |
+| `video.device` | VAAPI encoding device, otherwise `null`. |
 | `decoding` | `software`, or `vaapi`, `cuda`, `qsv` with an optional `:<device>`. |
 | `source` | Probed input facts: `bytes`, `duration_seconds`, stream counts, the first regular video stream, and every audio stream. `streams.cover` counts cover art (`attached_pic`), which is excluded from `streams.video`. |
 | `source.video.bit_rate` | Input video bit rate in bits per second. |
@@ -97,14 +99,17 @@ JSONL
 | `samples` | Per-sample measurements: window `start_seconds` and `duration_seconds`, `encode_seconds`, `speed`, `timed_payload_bytes`, `scored_frames`, and the quality metrics. |
 
 `emulate` records are `predict` records measured at a single quality point: one
-line per point, in ascending point order. `video.rate` is the point that was
-measured rather than a requested rate, and `outputs` names the charts the run
-was asked to write. Because the charts are rendered only after every point has
-succeeded, `outputs` can name files that do not exist when the run failed.
+line per point, in ascending point order. `candidate_index` identifies the
+`--candidate` behind the line, while `video` and `decoding` contain its actual
+settings. `video.rate` is the point that was measured rather than a requested
+rate, and `outputs` names the charts the run was asked to write. A run with
+partial point failures still renders the successful points; when every point
+fails, `outputs` can name files that were not created.
 
 | Field | Description |
 | --- | --- |
 | `video.rate` | The quality point of this line: `{"kind":"quality","parameter":"CRF","value":20}`. `parameter` is the ffmpeg option of the encoder, such as `CRF`, `CQ`, `QP`, or `global_quality`. |
+| `candidate_index` | One-based position of the `--candidate` used for this line, or `null` when the encoder subcommand was used. |
 | `outputs.png`, `outputs.svg` | Requested chart paths, or `null` when that chart was not asked for. |
 | everything else | Identical to a `predict` record, including `sampling`, `speed`, `output_bytes`, `size_percent`, `quality`, and `samples`. |
 

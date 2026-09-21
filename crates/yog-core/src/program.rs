@@ -189,3 +189,36 @@ impl Command<'_> {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_display_matches_the_debug_log_format() {
+        let program = Program {
+            path: "ffprobe".into(),
+            timeout: None,
+            cancellation: CancellationToken::new(),
+        };
+        let command = program.build([
+            "-v",
+            "error",
+            "-of",
+            "json",
+            "-show_error",
+            "-show_format",
+            "-show_streams",
+            "-show_chapters",
+            "-show_programs",
+            "-show_pixel_formats",
+            "--",
+            "/tmp/sample-1",
+        ]);
+
+        assert_eq!(
+            command.to_string(),
+            "ffprobe -v error -of json -show_error -show_format -show_streams -show_chapters -show_programs -show_pixel_formats -- /tmp/sample-1"
+        );
+    }
+}

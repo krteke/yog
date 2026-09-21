@@ -32,6 +32,16 @@ pub fn parse_encoder_help(text: &str) -> Result<EncoderHelp, Failure> {
 
 impl Ffmpeg {
     pub async fn encoder_help(&self, encoder: &str) -> Result<EncoderHelp, Error> {
+        if let Some(help) = self
+            .encoder_help
+            .lock()
+            .expect("encoder help cache is not poisoned")
+            .get(encoder)
+            .cloned()
+        {
+            return Ok(help);
+        }
+
         let mut args: Vec<OsString> = Vec::new();
         args.extend([Arg::HideBanner, Arg::EncoderHelp(encoder)]);
         let command = self.inner.build(args);
@@ -60,6 +70,10 @@ impl Ffmpeg {
                 "FFmpeg help returned a different encoder",
             )));
         }
+        self.encoder_help
+            .lock()
+            .expect("encoder help cache is not poisoned")
+            .insert(encoder.to_owned(), help.clone());
         Ok(help)
     }
 }

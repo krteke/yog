@@ -130,7 +130,7 @@ mod tests {
     use std::{num::NonZeroUsize, time::Duration};
 
     use crate::report::record::{
-        EmulateRecord, EstimateRecord, PredictRecord, TaskRecord, TranscodeRecord,
+        EmulateRecord, EstimateRecord, OutputsRecord, PredictRecord, TaskRecord, TranscodeRecord,
     };
 
     use super::*;
@@ -164,36 +164,34 @@ mod tests {
                 .ends_with("in.mkv")
         );
 
-        for (encoding, rate, parameter, preset) in [
-            (
-                VideoEncoding::X264 {
-                    rate: Some(RateControl::Quality(23)),
-                    preset: Some(Preset::Medium),
-                },
-                json!({"kind": "quality", "parameter": "CRF", "value": 23}),
-                "CRF",
-                json!("medium"),
-            ),
-            (
-                VideoEncoding::Vaapi {
-                    codec: VideoCodec::Av1,
-                    rate: Some(RateControl::Bitrate(2_000_000.try_into().unwrap())),
-                    device: "/dev/dri/renderD128".into(),
-                },
-                json!({"kind": "bitrate", "parameter": "b", "value": 2_000_000}),
-                "b",
-                Value::Null,
-            ),
-        ] {
-            let record = TranscodeRecord::new(
-                &TranscodeRequest::mkv("in.mkv", "out.mkv")
-                    .with_video(VideoAction::Encode(encoding)),
-            );
-            let record = value(&Record::Transcode(record));
-            assert_eq!(record["transcode"]["video"]["rate"], rate);
-            assert_eq!(record["transcode"]["video"]["rate"]["parameter"], parameter);
-            assert_eq!(record["transcode"]["video"]["preset"], preset);
-        }
+        let x264 = TranscodeRecord::new(&TranscodeRequest::mkv("in.mkv", "out.mkv").with_video(
+            VideoAction::Encode(VideoEncoding::X264 {
+                rate: Some(RateControl::Quality(23)),
+                preset: Some(Preset::Medium),
+            }),
+        ));
+        let x264 = value(&Record::Transcode(x264));
+        assert_eq!(
+            x264["transcode"]["video"]["rate"],
+            json!({"kind": "quality", "parameter": "CRF", "value": 23})
+        );
+        assert_eq!(x264["transcode"]["video"]["preset"], "medium");
+        assert_eq!(x264["transcode"]["video"]["device"], Value::Null);
+
+        let vaapi = TranscodeRecord::new(&TranscodeRequest::mkv("in.mkv", "out.mkv").with_video(
+            VideoAction::Encode(VideoEncoding::Vaapi {
+                codec: VideoCodec::Av1,
+                rate: Some(RateControl::Bitrate(2_000_000.try_into().unwrap())),
+                device: "/dev/dri/renderD128".into(),
+            }),
+        ));
+        let vaapi = value(&Record::Transcode(vaapi));
+        assert_eq!(
+            vaapi["transcode"]["video"]["rate"],
+            json!({"kind": "bitrate", "parameter": "b", "value": 2_000_000})
+        );
+        assert_eq!(vaapi["transcode"]["video"]["preset"], Value::Null);
+        assert_eq!(vaapi["transcode"]["video"]["device"], "/dev/dri/renderD128");
 
         let nvenc = TranscodeRecord::new(&TranscodeRequest::mkv("in.mkv", "out.mkv").with_video(
             VideoAction::encode_nvenc(
@@ -315,8 +313,8 @@ mod tests {
             samples: NonZeroUsize::new(5).unwrap(),
             sample_duration: Duration::from_secs_f64(2.0),
         };
-        let record =
-            EmulateRecord::new(&request, 23, Some(Path::new("quality.png")), None, options);
+        let outputs = OutputsRecord::new(Some(Path::new("quality.png")), None);
+        let record = EmulateRecord::new(&request, 23, None, outputs.clone(), options);
         let record = value(&Record::Emulate(record));
 
         let record = &record["emulate"];
@@ -324,6 +322,7 @@ mod tests {
         assert!(record["input"].as_str().unwrap().starts_with('/'));
         assert_eq!(record["status"], "success");
         assert_eq!(record["error"], Value::Null);
+        assert_eq!(record["candidate_index"], Value::Null);
         assert_eq!(record["decoding"], "software");
         assert_eq!(
             record["video"]["rate"],
@@ -338,14 +337,23 @@ mod tests {
         assert_eq!(record["quality"], Value::Null);
         assert_eq!(record["samples"], json!([]));
 
-        let failed =
-            EmulateRecord::new(&request, 30, None, Some(Path::new("quality.svg")), options)
-                .finish(Status::Failure, Some("boom".to_owned()));
+        let candidate_request = TranscodeRequest::new("in.mkv", "").with_video(
+            VideoAction::Encode(VideoEncoding::Vaapi {
+                codec: VideoCodec::Hevc,
+                rate: None,
+                device: "/dev/dri/renderD129".into(),
+            }),
+        );
+        let failed = EmulateRecord::new(&candidate_request, 30, Some(2), outputs, options)
+            .finish(Status::Failure, Some("boom".to_owned()));
         let failed = value(&failed);
         let failed = &failed["emulate"];
         assert_eq!(failed["status"], "failure");
         assert_eq!(failed["error"], "boom");
         assert_eq!(failed["video"]["rate"]["value"], 30);
-        assert_eq!(failed["outputs"]["png"], Value::Null);
+        assert_eq!(failed["outputs"]["svg"], Value::Null);
+        assert_eq!(failed["candidate_index"], 2);
+        assert_eq!(failed["video"]["encoder"], "hevc_vaapi");
+        assert_eq!(failed["video"]["device"], "/dev/dri/renderD129");
     }
 }

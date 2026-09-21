@@ -3,7 +3,7 @@ use std::{borrow::Cow, path::Path};
 use serde::Serialize;
 use yog_core::{
     ffmpeg::{
-        encoding::RateControl,
+        encoding::{RateControl, VideoEncoding},
         plan::{TranscodeRequest, VideoAction},
         prediction::{Estimate, Prediction, PredictionOptions, PredictionSample},
         vmaf::VmafOptions,
@@ -102,6 +102,7 @@ pub struct VideoRecord {
     rate: Option<RateRecord>,
     preset: Option<Cow<'static, str>>,
     multipass: Option<&'static str>,
+    device: Option<String>,
 }
 
 impl From<&VideoAction> for VideoRecord {
@@ -113,6 +114,7 @@ impl From<&VideoAction> for VideoRecord {
                 rate: None,
                 preset: None,
                 multipass: None,
+                device: None,
             };
         };
 
@@ -133,6 +135,10 @@ impl From<&VideoAction> for VideoRecord {
             }),
             preset: encoding.preset(),
             multipass: encoding.multipass(),
+            device: match encoding {
+                VideoEncoding::Vaapi { device, .. } => Some(device.to_string_lossy().into_owned()),
+                _ => None,
+            },
         }
     }
 }
@@ -324,14 +330,14 @@ impl TaskRecord for PredictRecord {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct OutputsRecord {
     png: Option<String>,
     svg: Option<String>,
 }
 
 impl OutputsRecord {
-    fn new(png: Option<&Path>, svg: Option<&Path>) -> Self {
+    pub fn new(png: Option<&Path>, svg: Option<&Path>) -> Self {
         Self {
             png: png.map(ToAbsolute::to_absolute),
             svg: svg.map(ToAbsolute::to_absolute),
@@ -343,6 +349,7 @@ impl OutputsRecord {
 pub struct EmulateRecord {
     #[serde(flatten)]
     predict: PredictRecord,
+    candidate_index: Option<usize>,
     outputs: OutputsRecord,
 }
 
@@ -350,8 +357,8 @@ impl EmulateRecord {
     pub fn new(
         request: &TranscodeRequest,
         quality: u8,
-        png: Option<&Path>,
-        svg: Option<&Path>,
+        candidate_index: Option<usize>,
+        outputs: OutputsRecord,
         prediction_options: PredictionOptions,
     ) -> Self {
         let mut predict = PredictRecord::new(request, prediction_options);
@@ -361,7 +368,8 @@ impl EmulateRecord {
 
         Self {
             predict,
-            outputs: OutputsRecord::new(png, svg),
+            candidate_index,
+            outputs,
         }
     }
 

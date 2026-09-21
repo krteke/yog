@@ -55,22 +55,31 @@ fn number(value: &str) -> Option<f64> {
 mod tests {
     use super::*;
 
+    #[track_caller]
+    fn assert_pending(parser: &mut ProgressParser, line: &str) {
+        assert!(parser.push_line(line).is_none());
+    }
+
+    fn progress_with_time(value: &str) -> Progress {
+        let mut parser = ProgressParser::new();
+        parser.push_line(&format!("out_time_us={value}"));
+        parser.push_line("speed=N/A");
+        parser.push_line("fps=N/A");
+        parser.push_line("progress=continue").unwrap()
+    }
+
     #[test]
     fn records_are_delimited_and_missing_fields_do_not_leak() {
         let mut parser = ProgressParser::new();
-        for line in [
-            "frame=23",
-            "fps=24.5",
-            "speed=   2x",
-            "out_time_us=1250000",
-            "out_time_ms=1250000",
-            "out_time=00:00:01.250000",
-            "stream_0_0_q=18.0",
-            "total_size=100",
-            "dup_frames=1",
-        ] {
-            assert!(parser.push_line(line).is_none());
-        }
+        assert_pending(&mut parser, "frame=23");
+        assert_pending(&mut parser, "fps=24.5");
+        assert_pending(&mut parser, "speed=   2x");
+        assert_pending(&mut parser, "out_time_us=1250000");
+        assert_pending(&mut parser, "out_time_ms=1250000");
+        assert_pending(&mut parser, "out_time=00:00:01.250000");
+        assert_pending(&mut parser, "stream_0_0_q=18.0");
+        assert_pending(&mut parser, "total_size=100");
+        assert_pending(&mut parser, "dup_frames=1");
         let first = parser.push_line("progress=continue").unwrap();
         assert_eq!(first.out_time_us, Some(1_250_000));
         assert_eq!(first.speed, Some(2.0));
@@ -86,15 +95,19 @@ mod tests {
 
     #[test]
     fn signed_zero_and_unavailable_times_are_distinct() {
-        let mut parser = ProgressParser::new();
-        for (value, expected) in [("-250000", Some(-250_000)), ("0", Some(0)), ("N/A", None)] {
-            parser.push_line(&format!("out_time_us={value}"));
-            parser.push_line("speed=N/A");
-            parser.push_line("fps=N/A");
-            let progress = parser.push_line("progress=continue").unwrap();
-            assert_eq!(progress.out_time_us, expected);
-            assert_eq!(progress.speed, None);
-            assert_eq!(progress.fps, None);
-        }
+        let negative = progress_with_time("-250000");
+        assert_eq!(negative.out_time_us, Some(-250_000));
+        assert_eq!(negative.speed, None);
+        assert_eq!(negative.fps, None);
+
+        let zero = progress_with_time("0");
+        assert_eq!(zero.out_time_us, Some(0));
+        assert_eq!(zero.speed, None);
+        assert_eq!(zero.fps, None);
+
+        let unavailable = progress_with_time("N/A");
+        assert_eq!(unavailable.out_time_us, None);
+        assert_eq!(unavailable.speed, None);
+        assert_eq!(unavailable.fps, None);
     }
 }

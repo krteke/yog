@@ -23,9 +23,16 @@ impl Display {
         Self::with_template(visible, tick_interval, "{spinner} {msg}")
     }
 
-    pub fn emulate_quality(&self, parameter: &str, quality: u8, index: usize, total: usize) {
+    pub fn emulate_quality(
+        &self,
+        label: &str,
+        parameter: &str,
+        quality: u8,
+        index: usize,
+        total: usize,
+    ) {
         self.bar.set_message(format!(
-            "Emulating {parameter} {quality} ({index}/{total})..."
+            "Emulating {label} {parameter} {quality} ({index}/{total})..."
         ));
     }
 
@@ -105,13 +112,26 @@ mod tests {
         let display = Display::new(false, Duration::from_millis(100));
         display.start(Some(Duration::from_millis(1500)));
         assert_eq!(display.bar.length(), Some(1_500_000));
-        for (time, expected) in [(-250_000, 0), (750_000, 750_000), (2_000_000, 1_500_000)] {
-            display.update(Progress {
-                out_time_us: Some(time),
-                ..Progress::default()
-            });
-            assert_eq!(display.bar.position(), expected);
-            assert!(!display.bar.is_finished());
-        }
+
+        display.update(Progress {
+            out_time_us: Some(-250_000),
+            ..Progress::default()
+        });
+        assert_eq!(display.bar.position(), 0);
+        assert!(!display.bar.is_finished());
+
+        display.update(Progress {
+            out_time_us: Some(750_000),
+            ..Progress::default()
+        });
+        assert_eq!(display.bar.position(), 750_000);
+        assert!(!display.bar.is_finished());
+
+        display.update(Progress {
+            out_time_us: Some(2_000_000),
+            ..Progress::default()
+        });
+        assert_eq!(display.bar.position(), 1_500_000);
+        assert!(!display.bar.is_finished());
     }
 }

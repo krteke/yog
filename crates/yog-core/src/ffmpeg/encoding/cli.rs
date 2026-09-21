@@ -62,84 +62,108 @@ mod tests {
         video: VideoAction,
     }
 
-    #[test]
-    fn backend_specific_types_reach_encoder_options() {
-        for (flags, expected) in [
-            (
-                vec!["--encode-x265", "--preset", "slow", "--bitrate", "4000000"],
-                vec![
-                    ("-c:v", "libx265"),
-                    ("-preset:v", "slow"),
-                    ("-b:v", "4000000"),
-                ],
-            ),
-            (
-                vec!["--encode-svt-av1", "--preset", "9", "--quality", "30"],
-                vec![("-c:v", "libsvtav1"), ("-preset:v", "9"), ("-crf:v", "30")],
-            ),
-            (
-                vec!["--encode-aom-av1", "--cpu-used", "6", "--quality", "31"],
-                vec![
-                    ("-c:v", "libaom-av1"),
-                    ("-cpu-used:v", "6"),
-                    ("-crf:v", "31"),
-                ],
-            ),
-            (
-                vec!["--encode-rav1e", "--speed", "7", "--quality", "90"],
-                vec![("-c:v", "librav1e"), ("-speed:v", "7"), ("-qp:v", "90")],
-            ),
-            (
-                vec![
-                    "--encode-qsv",
-                    "hevc",
-                    "--preset",
-                    "veryfast",
-                    "--quality",
-                    "27",
-                ],
-                vec![
-                    ("-c:v", "hevc_qsv"),
-                    ("-preset:v", "veryfast"),
-                    ("-global_quality:v", "27"),
-                ],
-            ),
-            (
-                vec![
-                    "--encode-vaapi",
-                    "av1",
-                    "--device",
-                    "/dev/dri/custom",
-                    "--quality",
-                    "28",
-                ],
-                vec![
-                    ("-c:v", "av1_vaapi"),
-                    ("-vaapi_device", "/dev/dri/custom"),
-                    ("-global_quality:v", "28"),
-                ],
-            ),
-        ] {
-            let video = Cli::try_parse_from(["yog"].into_iter().chain(flags.iter().copied()))
-                .unwrap()
-                .video;
-            let VideoAction::Encode(encoding) = video else {
-                panic!("expected encoder")
-            };
-            let mut args = Vec::new();
-            args.add(Arg::VideoCodec(encoding.name()));
-            encoding.append_options(&mut args);
-            if let VideoEncoding::Vaapi { device, .. } = &encoding {
-                args.add(Arg::VaapiDevice(device));
-            }
-            for (option, value) in expected {
-                assert!(
-                    args.windows(2)
-                        .any(|pair| pair[0] == option && pair[1] == value),
-                    "{flags:?}: missing {option} {value} in {:?}",
-                    args
-                );
-            }
+    fn encoder_options(flags: &[&str]) -> Vec<String> {
+        let video = Cli::try_parse_from(["yog"].into_iter().chain(flags.iter().copied()))
+            .unwrap()
+            .video;
+        let VideoAction::Encode(encoding) = video else {
+            panic!("expected encoder")
+        };
+        let mut args = Vec::new();
+        args.add(Arg::VideoCodec(encoding.name()));
+        encoding.append_options(&mut args);
+        if let VideoEncoding::Vaapi { device, .. } = &encoding {
+            args.add(Arg::VaapiDevice(device));
         }
+        args.into_iter()
+            .map(|arg| arg.into_string().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn x265_cli_values_reach_encoder_options() {
+        assert_eq!(
+            encoder_options(&["--encode-x265", "--preset", "slow", "--bitrate", "4000000"]),
+            ["-c:v", "libx265", "-b:v", "4000000", "-preset:v", "slow"]
+        );
+    }
+
+    #[test]
+    fn svt_av1_cli_values_reach_encoder_options() {
+        assert_eq!(
+            encoder_options(&["--encode-svt-av1", "--preset", "9", "--quality", "30"]),
+            ["-c:v", "libsvtav1", "-crf:v", "30", "-preset:v", "9"]
+        );
+    }
+
+    #[test]
+    fn aom_av1_cli_values_reach_encoder_options() {
+        assert_eq!(
+            encoder_options(&["--encode-aom-av1", "--cpu-used", "6", "--quality", "31"]),
+            [
+                "-c:v",
+                "libaom-av1",
+                "-b:v",
+                "0",
+                "-crf:v",
+                "31",
+                "-cpu-used:v",
+                "6"
+            ]
+        );
+    }
+
+    #[test]
+    fn rav1e_cli_values_reach_encoder_options() {
+        assert_eq!(
+            encoder_options(&["--encode-rav1e", "--speed", "7", "--quality", "90"]),
+            ["-c:v", "librav1e", "-qp:v", "90", "-speed:v", "7"]
+        );
+    }
+
+    #[test]
+    fn qsv_cli_values_reach_encoder_options() {
+        assert_eq!(
+            encoder_options(&[
+                "--encode-qsv",
+                "hevc",
+                "--preset",
+                "veryfast",
+                "--quality",
+                "27",
+            ]),
+            [
+                "-c:v",
+                "hevc_qsv",
+                "-global_quality:v",
+                "27",
+                "-preset:v",
+                "veryfast"
+            ]
+        );
+    }
+
+    #[test]
+    fn vaapi_cli_values_reach_encoder_options() {
+        assert_eq!(
+            encoder_options(&[
+                "--encode-vaapi",
+                "av1",
+                "--device",
+                "/dev/dri/custom",
+                "--quality",
+                "28",
+            ]),
+            [
+                "-c:v",
+                "av1_vaapi",
+                "-rc_mode:v",
+                "CQP",
+                "-global_quality:v",
+                "28",
+                "-vaapi_device",
+                "/dev/dri/custom"
+            ]
+        );
     }
 }

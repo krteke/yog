@@ -718,11 +718,21 @@ mod tests {
     fn timestamp_precision_and_output_size_bounds_are_preserved() {
         assert_eq!(format_seconds(0.000_001), "0.000001000");
         assert_eq!(predicted_bytes(1.25, 4.0, 2.0).unwrap(), 7);
-        for value in [f64::NAN, f64::INFINITY, -1.0, u64::MAX as f64] {
-            assert!(matches!(
-                predicted_bytes(0.0, 0.0, value),
-                Err(PredictionError::OutputSizeOverflow)
-            ));
-        }
+        assert!(matches!(
+            predicted_bytes(0.0, 0.0, f64::NAN),
+            Err(PredictionError::OutputSizeOverflow)
+        ));
+        assert!(matches!(
+            predicted_bytes(0.0, 0.0, f64::INFINITY),
+            Err(PredictionError::OutputSizeOverflow)
+        ));
+        assert!(matches!(
+            predicted_bytes(0.0, 0.0, -1.0),
+            Err(PredictionError::OutputSizeOverflow)
+        ));
+        assert!(matches!(
+            predicted_bytes(0.0, 0.0, u64::MAX as f64),
+            Err(PredictionError::OutputSizeOverflow)
+        ));
     }
 }

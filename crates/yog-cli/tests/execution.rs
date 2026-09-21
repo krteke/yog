@@ -112,6 +112,15 @@ impl Drop for Fixture {
     }
 }
 
+fn command_quality_count(commands: &str, encoder: &str, quality: u8) -> usize {
+    commands
+        .lines()
+        .filter(|command| {
+            command.contains(encoder) && command.contains(&format!("-crf:v {quality}"))
+        })
+        .count()
+}
+
 #[test]
 fn invalid_encoder_quality_is_rejected_before_external_tools_start() {
     let fixture = Fixture::new("touch ffmpeg-started");
@@ -133,29 +142,34 @@ fn invalid_encoder_quality_is_rejected_before_external_tools_start() {
 }
 
 #[test]
-fn quiet_disables_runtime_terminal_output_on_success_and_failure() {
-    for (ffmpeg, expected_status, output_exists) in [
-        (
-            "for last do :; done; printf diagnostic >&2; printf encoded > \"$last\"",
-            0,
-            true,
-        ),
-        ("printf diagnostic >&2; exit 9", 1, false),
-    ] {
-        let fixture = Fixture::new(ffmpeg);
-        let result = fixture
-            .command()
-            .env("RUST_LOG", "debug")
-            .args(["--quiet", "--copy"])
-            .output()
-            .unwrap();
+fn quiet_disables_runtime_terminal_output_on_success() {
+    assert_quiet_output(
+        "for last do :; done; printf diagnostic >&2; printf encoded > \"$last\"",
+        0,
+        true,
+    );
+}
 
-        assert_eq!(result.status.code(), Some(expected_status));
-        assert!(result.stdout.is_empty(), "{:?}", result.stdout);
-        assert!(result.stderr.is_empty(), "{:?}", result.stderr);
-        assert_eq!(fixture.0.join("output.mkv").exists(), output_exists);
-        assert!(!fixture.0.join("output.mkv.part").exists());
-    }
+#[test]
+fn quiet_disables_runtime_terminal_output_on_failure() {
+    assert_quiet_output("printf diagnostic >&2; exit 9", 1, false);
+}
+
+#[track_caller]
+fn assert_quiet_output(ffmpeg: &str, expected_status: i32, output_exists: bool) {
+    let fixture = Fixture::new(ffmpeg);
+    let result = fixture
+        .command()
+        .env("RUST_LOG", "debug")
+        .args(["--quiet", "--copy"])
+        .output()
+        .unwrap();
+
+    assert_eq!(result.status.code(), Some(expected_status));
+    assert!(result.stdout.is_empty(), "{:?}", result.stdout);
+    assert!(result.stderr.is_empty(), "{:?}", result.stderr);
+    assert_eq!(fixture.0.join("output.mkv").exists(), output_exists);
+    assert!(!fixture.0.join("output.mkv.part").exists());
 }
 
 #[test]
@@ -379,18 +393,15 @@ fi"#,
             .starts_with(b"\x89PNG\r\n\x1a\n")
     );
     let svg = fs::read_to_string(fixture.0.join("quality.svg")).unwrap();
-    for label in [
-        "<svg",
-        "width=\"900\" height=\"500\"",
-        "SVT-AV1 / Software / Preset 6",
-        "CRF value",
-        "VMAF score",
-        "Estimated size",
-        "MiB",
-        "Input size:",
-    ] {
-        assert!(svg.contains(label), "missing {label:?} in SVG");
-    }
+    assert!(svg.contains("<svg"), "{svg}");
+    assert!(svg.contains("width=\"900\" height=\"500\""), "{svg}");
+    assert!(svg.contains("SVT-AV1 / Software / Preset 6"), "{svg}");
+    assert!(svg.contains("CRF value"), "{svg}");
+    assert!(svg.contains("VMAF score"), "{svg}");
+    assert!(svg.contains("Estimated size"), "{svg}");
+    assert!(svg.contains("MiB"), "{svg}");
+    assert!(svg.contains("Gray dashed: input size ("), "{svg}");
+    assert!(!svg.contains("<circle"), "{svg}");
     assert!(!fixture.0.join("output.mkv").exists());
     assert!(fs::read_dir(&fixture.0).unwrap().all(|entry| {
         !entry
@@ -401,18 +412,24 @@ fi"#,
     }));
 
     let commands = fs::read_to_string(fixture.0.join("ffmpeg-commands")).unwrap();
-    for quality in 20..=22 {
-        assert_eq!(
-            commands
-                .lines()
-                .filter(|command| command.contains(&format!("-crf:v {quality}")))
-                .count(),
-            1,
-            "{commands}",
-        );
-    }
+    assert_eq!(
+        command_quality_count(&commands, "libsvtav1", 20),
+        1,
+        "{commands}"
+    );
+    assert_eq!(
+        command_quality_count(&commands, "libsvtav1", 21),
+        1,
+        "{commands}"
+    );
+    assert_eq!(
+        command_quality_count(&commands, "libsvtav1", 22),
+        1,
+        "{commands}"
+    );
     assert_eq!(stdout.lines().count(), 1, "{stdout}");
-    assert!(stdout.contains("CRF 20-22"), "{stdout}");
+    assert!(stdout.contains("candidates 1"), "{stdout}");
+    assert!(stdout.contains("points 3 succeeded, 0 failed"), "{stdout}");
     assert!(stdout.contains("PNG quality.png"), "{stdout}");
     assert!(stdout.contains("SVG quality.svg"), "{stdout}");
 
@@ -435,7 +452,7 @@ fi"#,
         .unwrap();
     assert!(result.status.success(), "{:?}", result.stderr);
     let svg = fs::read_to_string(fixture.0.join("outside.svg")).unwrap();
-    assert!(!svg.contains("Input size:"), "{svg}");
+    assert!(!svg.contains("Gray dashed: input size ("), "{svg}");
 
     // Sparse points must not be expanded into the qualities between them.
     let result = fixture
@@ -460,19 +477,203 @@ fi"#,
         "{stdout}{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert!(stdout.contains("CRF 30-31,35"), "{stdout}");
+    assert!(stdout.contains("points 3 succeeded, 0 failed"), "{stdout}");
     let commands = fs::read_to_string(fixture.0.join("ffmpeg-commands")).unwrap();
-    for quality in 30..=35 {
-        let expected = usize::from(matches!(quality, 30 | 31 | 35));
-        assert_eq!(
-            commands
-                .lines()
-                .filter(|command| command.contains(&format!("-crf:v {quality}")))
-                .count(),
-            expected,
-            "{commands}",
-        );
+    assert_eq!(
+        command_quality_count(&commands, "libsvtav1", 30),
+        1,
+        "{commands}"
+    );
+    assert_eq!(
+        command_quality_count(&commands, "libsvtav1", 31),
+        1,
+        "{commands}"
+    );
+    assert_eq!(
+        command_quality_count(&commands, "libsvtav1", 32),
+        0,
+        "{commands}"
+    );
+    assert_eq!(
+        command_quality_count(&commands, "libsvtav1", 33),
+        0,
+        "{commands}"
+    );
+    assert_eq!(
+        command_quality_count(&commands, "libsvtav1", 34),
+        0,
+        "{commands}"
+    );
+    assert_eq!(
+        command_quality_count(&commands, "libsvtav1", 35),
+        1,
+        "{commands}"
+    );
+}
+
+#[test]
+fn emulation_candidates_are_measured_and_reported_individually() {
+    use serde_json::Value;
+
+    #[track_caller]
+    fn assert_point(row: &Value, candidate_index: u64, encoder: &str, preset: &str, quality: u64) {
+        let record = &row["emulate"];
+        assert_eq!(record["status"], "success");
+        assert_eq!(record["error"], Value::Null);
+        assert_eq!(record["candidate_index"], candidate_index);
+        assert_eq!(record["decoding"], "software");
+        assert_eq!(record["source"]["bytes"], 20);
+        assert_eq!(record["quality"]["vmaf"]["value"], 96.5);
+        assert_eq!(record["video"]["encoder"], encoder);
+        assert_eq!(record["video"]["preset"], preset);
+        assert_eq!(record["video"]["rate"]["value"], quality);
+        assert_eq!(record["video"]["device"], Value::Null);
+        let png = record["outputs"]["png"].as_str().unwrap();
+        assert!(png.starts_with('/'), "{png}");
+        assert!(png.ends_with("candidates.png"), "{png}");
     }
+
+    let fixture = Fixture::new(
+        r#"printf '%s\n' "$*" >> ffmpeg-commands
+filter=''
+for argument do
+    case "$argument" in
+        encoder=*)
+            printf '%s\n' "Encoder ${argument#encoder=} [test]" '    Supported pixel formats: yuv420p'
+            exit 0
+            ;;
+        *libvmaf=*) filter=$argument ;;
+    esac
+done
+if test -n "$filter"; then
+    metrics=${filter#*log_path=\'}
+    metrics=${metrics%%\':shortest=*}
+    printf '%s' '{"frames":[{"frameNum":0,"metrics":{"vmaf":96.5,"float_ssim":0.99,"psnr_y":42.0}}]}' > "$metrics"
+    exit 0
+fi
+for last do :; done
+printf 12345678901234567890 > "$last"
+printf 'out_time_us=1000000\nspeed=1x\nprogress=end\n'"#,
+    );
+    fs::write(fixture.0.join("input.mkv"), b"12345678901234567890").unwrap();
+    fixture.tool(
+        "ffprobe",
+        r#"packets=false
+for argument do
+    test "$argument" = -show_packets && packets=true
+done
+for last do :; done
+if test "$packets" = true; then
+    printf '%s' '{"packets":[{"stream_index":0,"size":"10"}]}'
+elif test "$last" = input.mkv; then
+    printf '%s' '{"streams":[{"index":0,"codec_type":"video","width":320,"height":180,"pix_fmt":"yuv420p"}],"format":{"format_name":"matroska,webm","duration":"1"},"pixel_formats":[{"name":"yuv420p","nb_components":3,"log2_chroma_w":1,"log2_chroma_h":1,"flags":{"rgb":0,"alpha":0,"palette":0,"hwaccel":0},"components":[{"bit_depth":8},{"bit_depth":8},{"bit_depth":8}]}]}'
+else
+    printf '%s' '{"streams":[{"index":0,"codec_type":"video"}],"format":{"duration":"1"}}'
+fi"#,
+    );
+
+    let result = fixture
+        .analysis_command()
+        .args([
+            "emulate",
+            "--png",
+            "candidates.png",
+            "--svg",
+            "candidates.svg",
+            "--candidate",
+            "software:libx264:medium:20-21",
+            "--candidate",
+            "software:libsvtav1:7:30-31",
+            "--report",
+            "report.jsonl",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(result.status.success(), "{stderr}");
+
+    let records = read_report(&fixture, "report.jsonl");
+    assert_eq!(records.len(), 4, "{records:?}");
+    assert_point(&records[0], 1, "libx264", "medium", 20);
+    assert_point(&records[1], 1, "libx264", "medium", 21);
+    assert_point(&records[2], 2, "libsvtav1", "7", 30);
+    assert_point(&records[3], 2, "libsvtav1", "7", 31);
+
+    let commands = fs::read_to_string(fixture.0.join("ffmpeg-commands")).unwrap();
+    assert_eq!(
+        command_quality_count(&commands, "libx264", 20),
+        1,
+        "{commands}"
+    );
+    assert_eq!(
+        command_quality_count(&commands, "libx264", 21),
+        1,
+        "{commands}"
+    );
+    assert_eq!(
+        command_quality_count(&commands, "libx264", 30),
+        0,
+        "{commands}"
+    );
+    assert_eq!(
+        command_quality_count(&commands, "libsvtav1", 20),
+        0,
+        "{commands}"
+    );
+    assert_eq!(
+        command_quality_count(&commands, "libsvtav1", 30),
+        1,
+        "{commands}"
+    );
+    assert_eq!(
+        command_quality_count(&commands, "libsvtav1", 31),
+        1,
+        "{commands}"
+    );
+
+    let svg = fs::read_to_string(fixture.0.join("candidates.svg")).unwrap();
+    assert!(svg.contains("Candidates 1 / 2"), "{svg}");
+    assert!(svg.contains("CRF value"), "{svg}");
+    assert!(svg.contains("1: x264 / Software / Preset medium"), "{svg}");
+    assert!(svg.contains("2: SVT-AV1 / Software / Preset 7"), "{svg}");
+    assert_eq!(
+        svg.matches("x264 / Software / Preset medium").count(),
+        1,
+        "{svg}"
+    );
+    assert_eq!(
+        svg.matches("SVT-AV1 / Software / Preset 7").count(),
+        1,
+        "{svg}"
+    );
+    assert!(
+        svg.contains("Solid: VMAF    Dashed: estimated size"),
+        "{svg}"
+    );
+    assert!(!svg.contains("<circle"), "{svg}");
+    assert!(svg.contains("stroke=\"#16A34A\""), "{svg}");
+    assert!(svg.contains("stroke=\"#2563EB\""), "{svg}");
+
+    let result = fixture
+        .analysis_command()
+        .args([
+            "emulate",
+            "--svg",
+            "mixed.svg",
+            "--candidate",
+            "software:libx264:medium:20",
+            "--candidate",
+            "software:hevc_nvenc:p5:25",
+        ])
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{:?}", result.stderr);
+    let svg = fs::read_to_string(fixture.0.join("mixed.svg")).unwrap();
+    assert!(svg.contains("CRF / CQ value"), "{svg}");
+    assert!(
+        svg.contains("2: HEVC NVENC / Software / Preset p5"),
+        "{svg}"
+    );
 }
 
 #[test]
@@ -553,63 +754,74 @@ fi"#,
         ],
     );
 
-    for row in &records {
-        let record = &row["emulate"];
-        assert!(record.get("predict").is_none(), "{record}");
-        assert_eq!(record["status"], "success");
-        assert_eq!(record["error"], Value::Null);
-        assert_eq!(record["container"], "mkv");
-        assert_eq!(record["video"]["action"], "encode");
-        assert_eq!(record["video"]["encoder"], "libsvtav1");
-        assert_eq!(record["video"]["rate"]["kind"], "quality");
-        assert_eq!(record["video"]["rate"]["parameter"], "CRF");
-        assert_eq!(record["video"]["preset"], "6");
-        assert_eq!(record["video"]["multipass"], Value::Null);
-        assert_eq!(record["decoding"], "software");
-        assert!(record["input"].as_str().unwrap().ends_with("input.mkv"));
-        assert_eq!(record["source"]["bytes"], 20);
-        assert_eq!(record["source"]["duration_seconds"], 1.0);
-        assert_eq!(record["source"]["streams"]["video"], 1);
-        assert_eq!(
-            record["sampling"],
-            serde_json::json!({
-                "requested_samples": 5,
-                "sample_seconds": 2.0,
-                "measured_samples": 1,
-                "sampled_seconds": 1.0
-            })
-        );
-        assert_eq!(
-            record["speed"],
-            serde_json::json!({"value": 1.0, "low": 1.0, "high": 1.0})
-        );
-        assert_eq!(
-            record["transcode_seconds"],
-            serde_json::json!({"value": 1.0, "low": 1.0, "high": 1.0})
-        );
-        assert_eq!(
-            record["output_bytes"],
-            serde_json::json!({"value": 20, "low": 20, "high": 20})
-        );
-        assert_eq!(record["size_percent"], 100.0);
-        assert_eq!(record["quality"]["frames"], 1);
-        assert_eq!(record["quality"]["source_stream_index"], 0);
-        assert_eq!(record["quality"]["vmaf"]["value"], 96.5);
-        assert_eq!(record["quality"]["ssim"]["value"], 0.99);
-        assert_eq!(record["quality"]["psnr_y_db"]["value"], 42.0);
-        assert_eq!(record["samples"].as_array().unwrap().len(), 1);
-        assert_eq!(record["samples"][0]["vmaf"], 96.5);
+    assert_eq!(
+        records
+            .iter()
+            .map(|row| row["emulate"]["status"].clone())
+            .collect::<Vec<_>>(),
+        vec![
+            serde_json::json!("success"),
+            serde_json::json!("success"),
+            serde_json::json!("success")
+        ]
+    );
 
-        for (key, name) in [("png", "quality.png"), ("svg", "quality.svg")] {
-            let path = record["outputs"][key].as_str().unwrap();
-            assert!(path.starts_with('/'), "{path}");
-            assert!(path.ends_with(name), "{path}");
-        }
-    }
+    let record = &records[0]["emulate"];
+    assert!(record.get("predict").is_none(), "{record}");
+    assert_eq!(record["error"], Value::Null);
+    assert_eq!(record["container"], "mkv");
+    assert_eq!(record["video"]["action"], "encode");
+    assert_eq!(record["video"]["encoder"], "libsvtav1");
+    assert_eq!(record["video"]["rate"]["kind"], "quality");
+    assert_eq!(record["video"]["rate"]["parameter"], "CRF");
+    assert_eq!(record["video"]["preset"], "6");
+    assert_eq!(record["video"]["multipass"], Value::Null);
+    assert_eq!(record["video"]["device"], Value::Null);
+    assert_eq!(record["decoding"], "software");
+    assert!(record["input"].as_str().unwrap().ends_with("input.mkv"));
+    assert_eq!(record["source"]["bytes"], 20);
+    assert_eq!(record["source"]["duration_seconds"], 1.0);
+    assert_eq!(record["source"]["streams"]["video"], 1);
+    assert_eq!(
+        record["sampling"],
+        serde_json::json!({
+            "requested_samples": 5,
+            "sample_seconds": 2.0,
+            "measured_samples": 1,
+            "sampled_seconds": 1.0
+        })
+    );
+    assert_eq!(
+        record["speed"],
+        serde_json::json!({"value": 1.0, "low": 1.0, "high": 1.0})
+    );
+    assert_eq!(
+        record["transcode_seconds"],
+        serde_json::json!({"value": 1.0, "low": 1.0, "high": 1.0})
+    );
+    assert_eq!(
+        record["output_bytes"],
+        serde_json::json!({"value": 20, "low": 20, "high": 20})
+    );
+    assert_eq!(record["size_percent"], 100.0);
+    assert_eq!(record["quality"]["frames"], 1);
+    assert_eq!(record["quality"]["source_stream_index"], 0);
+    assert_eq!(record["quality"]["vmaf"]["value"], 96.5);
+    assert_eq!(record["quality"]["ssim"]["value"], 0.99);
+    assert_eq!(record["quality"]["psnr_y_db"]["value"], 42.0);
+    assert_eq!(record["samples"].as_array().unwrap().len(), 1);
+    assert_eq!(record["samples"][0]["vmaf"], 96.5);
+
+    let png = record["outputs"]["png"].as_str().unwrap();
+    assert!(png.starts_with('/'), "{png}");
+    assert!(png.ends_with("quality.png"), "{png}");
+    let svg = record["outputs"]["svg"].as_str().unwrap();
+    assert!(svg.starts_with('/'), "{svg}");
+    assert!(svg.ends_with("quality.svg"), "{svg}");
 }
 
 #[test]
-fn failed_emulation_points_are_reported_and_abort_the_run() {
+fn failed_emulation_points_do_not_discard_successful_points() {
     let fixture = Fixture::new(
         r#"printf '%s\n' "$*" >> ffmpeg-commands
 filter=''
@@ -674,10 +886,12 @@ fi"#,
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert_eq!(result.status.code(), Some(1), "{stderr}");
     assert!(stderr.contains("prediction failed at CRF 21"), "{stderr}");
-    assert!(!fixture.0.join("quality.png").exists());
+    assert!(fixture.0.join("quality.png").exists());
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("points 2 succeeded, 1 failed"), "{stdout}");
 
     let records = read_report(&fixture, "report.jsonl");
-    assert_eq!(records.len(), 2, "{records:?}");
+    assert_eq!(records.len(), 3, "{records:?}");
     assert_eq!(records[0]["emulate"]["status"], "success");
     assert_eq!(records[0]["emulate"]["video"]["rate"]["value"], 20);
     assert_eq!(records[1]["emulate"]["status"], "failure");
@@ -685,16 +899,14 @@ fi"#,
     let error = records[1]["emulate"]["error"].as_str().unwrap();
     assert!(error.contains("prediction failed at CRF 21"), "{error}");
     assert_eq!(records[1]["emulate"]["quality"], serde_json::Value::Null);
+    assert_eq!(records[2]["emulate"]["status"], "success");
+    assert_eq!(records[2]["emulate"]["video"]["rate"]["value"], 22);
 }
 
-#[test]
-fn published_transcode_calculates_full_or_subsampled_vmaf() {
-    for (vmaf_args, expected_mode) in [
-        (vec!["--vmaf"], "full"),
-        (vec!["--vmaf=7"], "n_subsample=7"),
-    ] {
-        let fixture = Fixture::new(
-            r#"printf '%s\n' "$*" >> ffmpeg-commands
+#[track_caller]
+fn assert_published_vmaf(vmaf_args: &[&str], expected_mode: &str, subsampled: bool) {
+    let fixture = Fixture::new(
+        r#"printf '%s\n' "$*" >> ffmpeg-commands
 filter=''
 for argument do
     case "$argument" in *libvmaf=*) filter=$argument ;; esac
@@ -709,10 +921,10 @@ if test -n "$filter"; then
 fi
 for last do :; done
 printf encoded > "$last""#,
-        );
-        fixture.tool(
-            "ffprobe",
-            r#"for last do :; done
+    );
+    fixture.tool(
+        "ffprobe",
+        r#"for last do :; done
 case "$last" in
     input.mkv)
         printf '%s' '{"streams":[{"index":2,"codec_type":"video","width":320,"height":180}],"format":{"format_name":"matroska,webm","duration":"1"}}'
@@ -722,45 +934,50 @@ case "$last" in
         ;;
     *) exit 22 ;;
 esac"#,
-        );
+    );
 
-        let result = fixture
-            .command()
-            .args(vmaf_args)
-            .arg("--copy")
-            .output()
-            .unwrap();
-        let stdout = String::from_utf8_lossy(&result.stdout);
-        let stderr = String::from_utf8_lossy(&result.stderr);
-        assert!(result.status.success(), "{stderr}");
-        assert_eq!(fs::read(fixture.0.join("output.mkv")).unwrap(), b"encoded");
-        assert!(!fixture.0.join("output.mkv.part").exists());
-        assert!(
-            stdout.contains(&format!(
-                "vmaf: output.mkv | score 95.250 | {expected_mode}"
-            )),
-            "{stdout}"
-        );
-        assert!(stdout.find("complete:").unwrap() < stdout.find("vmaf:").unwrap());
+    let result = fixture
+        .command()
+        .args(vmaf_args.iter().copied())
+        .arg("--copy")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(result.status.success(), "{stderr}");
+    assert_eq!(fs::read(fixture.0.join("output.mkv")).unwrap(), b"encoded");
+    assert!(!fixture.0.join("output.mkv.part").exists());
+    assert!(
+        stdout.contains(&format!(
+            "vmaf: output.mkv | score 95.250 | {expected_mode}"
+        )),
+        "{stdout}"
+    );
+    assert!(stdout.find("complete:").unwrap() < stdout.find("vmaf:").unwrap());
 
-        let commands = fs::read_to_string(fixture.0.join("ffmpeg-commands")).unwrap();
-        let vmaf = commands
-            .lines()
-            .find(|command| command.contains("libvmaf="))
-            .unwrap();
-        assert!(vmaf.contains("[0:4]crop=w=320:h=180"), "{vmaf}");
-        assert!(vmaf.contains("[1:2]setpts=PTS-STARTPTS"), "{vmaf}");
-        assert!(vmaf.contains(":n_threads="), "{vmaf}");
-        if expected_mode == "full" {
-            assert!(!vmaf.contains("n_subsample="), "{vmaf}");
-        } else {
-            assert!(vmaf.contains(":n_subsample=7"), "{vmaf}");
-        }
-    }
+    let commands = fs::read_to_string(fixture.0.join("ffmpeg-commands")).unwrap();
+    let vmaf = commands
+        .lines()
+        .find(|command| command.contains("libvmaf="))
+        .unwrap();
+    assert!(vmaf.contains("[0:4]crop=w=320:h=180"), "{vmaf}");
+    assert!(vmaf.contains("[1:2]setpts=PTS-STARTPTS"), "{vmaf}");
+    assert!(vmaf.contains(":n_threads="), "{vmaf}");
+    assert_eq!(vmaf.contains(":n_subsample=7"), subsampled, "{vmaf}");
 }
 
 #[test]
-fn requested_vmaf_failure_does_not_fail_or_roll_back_the_transcode() {
+fn published_transcode_calculates_full_vmaf() {
+    assert_published_vmaf(&["--vmaf"], "full", false);
+}
+
+#[test]
+fn published_transcode_calculates_subsampled_vmaf() {
+    assert_published_vmaf(&["--vmaf=7"], "n_subsample=7", true);
+}
+
+#[track_caller]
+fn assert_requested_vmaf_failure(verbose: bool) {
     let fixture = Fixture::new(
         r#"case "$*" in
     *libvmaf=*) printf 'cannot score' >&2; exit 12 ;;
@@ -780,25 +997,33 @@ esac"#,
     );
 
     fs::write(fixture.0.join("output.mkv"), b"previous").unwrap();
-    for verbose in [false, true] {
-        let mut command = fixture.command();
-        command.args(["--vmaf", "--copy", "-O"]);
-        if verbose {
-            command.arg("--verbose");
-        }
-        let result = command.output().unwrap();
-        let stdout = String::from_utf8_lossy(&result.stdout);
-        let stderr = String::from_utf8_lossy(&result.stderr);
-        assert!(result.status.success(), "{stderr}");
-        assert!(stdout.contains("complete: output.mkv"), "{stdout}");
-        assert!(
-            stderr.contains("warning: vmaf: VMAF calculation failed"),
-            "{stderr}"
-        );
-        assert_eq!(stderr.matches("cannot score").count(), 1, "{stderr}");
-        assert_eq!(fs::read(fixture.0.join("output.mkv")).unwrap(), b"encoded");
-        assert!(!fixture.0.join("output.mkv.part").exists());
+    let mut command = fixture.command();
+    command.args(["--vmaf", "--copy", "-O"]);
+    if verbose {
+        command.arg("--verbose");
     }
+    let result = command.output().unwrap();
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(result.status.success(), "{stderr}");
+    assert!(stdout.contains("complete: output.mkv"), "{stdout}");
+    assert!(
+        stderr.contains("warning: vmaf: VMAF calculation failed"),
+        "{stderr}"
+    );
+    assert_eq!(stderr.matches("cannot score").count(), 1, "{stderr}");
+    assert_eq!(fs::read(fixture.0.join("output.mkv")).unwrap(), b"encoded");
+    assert!(!fixture.0.join("output.mkv.part").exists());
+}
+
+#[test]
+fn requested_vmaf_failure_does_not_fail_or_roll_back_the_transcode() {
+    assert_requested_vmaf_failure(false);
+}
+
+#[test]
+fn verbose_vmaf_failure_does_not_fail_or_roll_back_the_transcode() {
+    assert_requested_vmaf_failure(true);
 }
 
 #[test]
@@ -1069,47 +1294,65 @@ printf '{"streams":[{"index":0,"codec_type":"video"}],"format":{"format_name":"%
         .unwrap();
     assert!(result.status.success(), "{:?}", result.stderr);
 
-    for extension in [
-        "mkv", "webm", "mp4", "mov", "m4a", "3gp", "3g2", "f4v", "ismv", "psp", "ts", "m2ts",
-        "avi", "flv", "asf", "wmv", "mpg", "mpeg", "vob", "ogg", "ogv",
-    ] {
+    let assert_output = |extension| {
         assert_eq!(
             fs::read(fixture.0.join(format!("output/video.{extension}"))).unwrap(),
             b"encoded",
             "{extension}"
         );
-    }
+    };
+    assert_output("mkv");
+    assert_output("webm");
+    assert_output("mp4");
+    assert_output("mov");
+    assert_output("m4a");
+    assert_output("3gp");
+    assert_output("3g2");
+    assert_output("f4v");
+    assert_output("ismv");
+    assert_output("psp");
+    assert_output("ts");
+    assert_output("m2ts");
+    assert_output("avi");
+    assert_output("flv");
+    assert_output("asf");
+    assert_output("wmv");
+    assert_output("mpg");
+    assert_output("mpeg");
+    assert_output("vob");
+    assert_output("ogg");
+    assert_output("ogv");
+
     let commands = fs::read_to_string(fixture.0.join("commands")).unwrap();
-    for (muxer, extension) in [
-        ("matroska", "mkv"),
-        ("webm", "webm"),
-        ("mp4", "mp4"),
-        ("mov", "mov"),
-        ("ipod", "m4a"),
-        ("3gp", "3gp"),
-        ("3g2", "3g2"),
-        ("f4v", "f4v"),
-        ("ismv", "ismv"),
-        ("psp", "psp"),
-        ("mpegts", "ts"),
-        ("mpegts", "m2ts"),
-        ("avi", "avi"),
-        ("flv", "flv"),
-        ("asf", "asf"),
-        ("asf", "wmv"),
-        ("mpeg", "mpg"),
-        ("mpeg", "mpeg"),
-        ("vob", "vob"),
-        ("ogg", "ogg"),
-        ("ogv", "ogv"),
-    ] {
+    let assert_muxer = |muxer, extension| {
         assert!(
             commands
                 .lines()
                 .any(|line| line == format!("{muxer} output/video.{extension}.part")),
             "missing {muxer} mapping for {extension}:\n{commands}"
         );
-    }
+    };
+    assert_muxer("matroska", "mkv");
+    assert_muxer("webm", "webm");
+    assert_muxer("mp4", "mp4");
+    assert_muxer("mov", "mov");
+    assert_muxer("ipod", "m4a");
+    assert_muxer("3gp", "3gp");
+    assert_muxer("3g2", "3g2");
+    assert_muxer("f4v", "f4v");
+    assert_muxer("ismv", "ismv");
+    assert_muxer("psp", "psp");
+    assert_muxer("mpegts", "ts");
+    assert_muxer("mpegts", "m2ts");
+    assert_muxer("avi", "avi");
+    assert_muxer("flv", "flv");
+    assert_muxer("asf", "asf");
+    assert_muxer("asf", "wmv");
+    assert_muxer("mpeg", "mpg");
+    assert_muxer("mpeg", "mpeg");
+    assert_muxer("vob", "vob");
+    assert_muxer("ogg", "ogg");
+    assert_muxer("ogv", "ogv");
 }
 
 #[test]
@@ -1208,16 +1451,7 @@ printf encoded > "$arg"
     fixture.tool("ffprobe", r#"printf '%s' '{"streams":[{"index":1,"codec_type":"video","codec_name":"png","disposition":{"attached_pic":1}},{"index":2,"codec_type":"audio"},{"index":3,"codec_type":"video","codec_name":"mjpeg","disposition":{"attached_pic":1}}],"format":{"format_name":"matroska,webm"}}'"#);
     let temporary = fixture.0.join("temporary covers");
     fs::create_dir(&temporary).unwrap();
-    for failure in [
-        "none",
-        "empty",
-        "extraction",
-        "second",
-        "encoding",
-        "extraction-timeout",
-        "encoding-timeout",
-        "tempdir",
-    ] {
+    let assert_case = |failure: &str| {
         fs::write(fixture.0.join("output.mkv"), b"original").unwrap();
         fs::write(fixture.0.join("cover-paths"), b"").unwrap();
         let result = fixture
@@ -1263,12 +1497,13 @@ printf encoded > "$arg"
             .collect();
         if matches!(failure, "none" | "encoding" | "encoding-timeout") {
             assert_eq!(paths.len(), 2, "{failure}");
-            assert_eq!(paths[0].parent(), paths[1].parent());
-            assert_ne!(paths[0], paths[1]);
+            assert_eq!(paths[0].parent(), paths[1].parent(), "{failure}");
+            assert_ne!(paths[0], paths[1], "{failure}");
             assert!(
                 paths
                     .iter()
-                    .all(|path| path.starts_with(&temporary) && !path.exists())
+                    .all(|path| path.starts_with(&temporary) && !path.exists()),
+                "{failure}: {paths:?}"
             );
         } else {
             assert!(
@@ -1282,7 +1517,15 @@ printf encoded > "$arg"
                 "{stderr}"
             );
         }
-    }
+    };
+    assert_case("none");
+    assert_case("empty");
+    assert_case("extraction");
+    assert_case("second");
+    assert_case("encoding");
+    assert_case("extraction-timeout");
+    assert_case("encoding-timeout");
+    assert_case("tempdir");
 }
 
 #[test]
@@ -1306,26 +1549,39 @@ esac
     assert_eq!(calls.lines().count(), 1);
     assert!(!calls.contains("-show_data_hash"));
     assert!(!String::from_utf8_lossy(&result.stderr).contains("warning: verify:"));
-    for flags in [["-v", "--copy"], ["--copy", "--verify"]] {
+    let assert_verification = |flags: [&str; 2]| {
         fs::remove_file(fixture.0.join("output.mkv")).unwrap();
         fs::write(fixture.0.join("probe-calls"), "").unwrap();
         let result = fixture.command().args(flags).output().unwrap();
         let stdout = String::from_utf8_lossy(&result.stdout);
         let stderr = String::from_utf8_lossy(&result.stderr);
-        assert!(result.status.success(), "{stderr}");
-        assert!(stderr.contains("audio stream #8: missing"), "{stderr}");
-        assert!(stderr.contains("metadata \"title\""), "{stderr}");
-        assert!(stdout.contains("complete: output.mkv"), "{stdout}");
-        assert!(!fixture.0.join("output.mkv.part").exists());
-        assert_eq!(fs::read(fixture.0.join("output.mkv")).unwrap(), b"encoded");
+        assert!(result.status.success(), "{flags:?}: {stderr}");
+        assert!(
+            stderr.contains("audio stream #8: missing"),
+            "{flags:?}: {stderr}"
+        );
+        assert!(stderr.contains("metadata \"title\""), "{flags:?}: {stderr}");
+        assert!(
+            stdout.contains("complete: output.mkv"),
+            "{flags:?}: {stdout}"
+        );
+        assert!(!fixture.0.join("output.mkv.part").exists(), "{flags:?}");
+        assert_eq!(
+            fs::read(fixture.0.join("output.mkv")).unwrap(),
+            b"encoded",
+            "{flags:?}"
+        );
         let calls = fs::read_to_string(fixture.0.join("probe-calls")).unwrap();
-        assert_eq!(calls.lines().count(), 2);
+        assert_eq!(calls.lines().count(), 2, "{flags:?}");
         assert!(
             calls
                 .lines()
-                .all(|line| line.contains("-show_data_hash sha256"))
+                .all(|line| line.contains("-show_data_hash sha256")),
+            "{flags:?}: {calls}"
         );
-    }
+    };
+    assert_verification(["-v", "--copy"]);
+    assert_verification(["--copy", "--verify"]);
 }
 
 #[test]
@@ -1368,21 +1624,7 @@ case "$*" in *-show_packets*) cat "$prefix-packets.json" ;; *) cat "$prefix.json
     )
     .unwrap();
 
-    for (case, expected) in [
-        ("ok", None),
-        ("missing filename", Some("metadata \"filename\"")),
-        ("wrong mime", Some("metadata \"mimetype\"")),
-        ("changed original title", Some("metadata \"title\"")),
-        ("unplanned tag", Some("metadata \"extra\"")),
-        ("changed image", Some("cover stream #8 -> #1: packet data")),
-        ("lost cover", Some("cover stream #5: missing")),
-        ("cover as video", Some("video stream #2: added")),
-        (
-            "audio timing",
-            Some("audio stream #2 -> #0: packet presentation"),
-        ),
-        ("unplanned mp4 tags", Some("metadata \"FILENAME\": added")),
-    ] {
+    let assert_case = |case: &str, expected: Option<&str>| {
         let mut actual = original.clone();
         actual["streams"] = json!([
             original["streams"][1],
@@ -1445,13 +1687,26 @@ case "$*" in *-show_packets*) cat "$prefix-packets.json" ;; *) cat "$prefix.json
             "{case}: {stderr}"
         );
         assert!(!fixture.0.join("output.mkv.part").exists());
-    }
+    };
+    assert_case("ok", None);
+    assert_case("missing filename", Some("metadata \"filename\""));
+    assert_case("wrong mime", Some("metadata \"mimetype\""));
+    assert_case("changed original title", Some("metadata \"title\""));
+    assert_case("unplanned tag", Some("metadata \"extra\""));
+    assert_case("changed image", Some("cover stream #8 -> #1: packet data"));
+    assert_case("lost cover", Some("cover stream #5: missing"));
+    assert_case("cover as video", Some("video stream #2: added"));
+    assert_case(
+        "audio timing",
+        Some("audio stream #2 -> #0: packet presentation"),
+    );
+    assert_case("unplanned mp4 tags", Some("metadata \"FILENAME\": added"));
 }
 
 #[test]
 fn verification_probe_and_packet_failures_warn_instead_of_deleting_the_output() {
     let fixture = Fixture::new("for last do :; done; printf encoded > \"$last\"");
-    for failure in ["metadata", "packets"] {
+    let assert_failure = |failure: &str| {
         fixture.tool(
             "ffprobe",
             &format!(
@@ -1473,13 +1728,25 @@ printf '%s' '{{"streams":[{{"index":0,"codec_type":"audio"}}],"format":{{"format
             .unwrap();
         let stdout = String::from_utf8_lossy(&result.stdout);
         let stderr = String::from_utf8_lossy(&result.stderr);
-        assert!(result.status.success(), "{stderr}");
-        assert!(stderr.contains("verification incomplete"), "{stderr}");
-        assert!(stderr.contains("broken"), "{stderr}");
-        assert!(stdout.contains("complete: output.mkv"));
-        assert!(!fixture.0.join("output.mkv.part").exists());
-        assert_eq!(fs::read(fixture.0.join("output.mkv")).unwrap(), b"encoded");
-    }
+        assert!(result.status.success(), "{failure}: {stderr}");
+        assert!(
+            stderr.contains("verification incomplete"),
+            "{failure}: {stderr}"
+        );
+        assert!(stderr.contains("broken"), "{failure}: {stderr}");
+        assert!(
+            stdout.contains("complete: output.mkv"),
+            "{failure}: {stdout}"
+        );
+        assert!(!fixture.0.join("output.mkv.part").exists(), "{failure}");
+        assert_eq!(
+            fs::read(fixture.0.join("output.mkv")).unwrap(),
+            b"encoded",
+            "{failure}"
+        );
+    };
+    assert_failure("metadata");
+    assert_failure("packets");
 }
 
 #[test]
@@ -1546,20 +1813,26 @@ case "$last" in input.mkv) cat input.json ;; *) cat output.json ;; esac
 #[test]
 fn failures_delete_only_our_part_and_preserve_existing_targets() {
     let fixture = Fixture::new("");
-    for body in [
-        "for last do :; done; printf partial > \"$last\"; exit 7",
-        "printf 'progress=end\\n'; exit 7",
-        "exit 0", // The exclusively created part is still empty.
-        "for last do :; done; rm \"$last\"; exit 0",
-    ] {
+    let assert_failure = |body: &str| {
         fixture.tool("ffmpeg", body);
         fs::write(fixture.0.join("output.mkv"), b"original").unwrap();
         let result = fixture.command().args(["-O", "--copy"]).output().unwrap();
         assert_eq!(result.status.code(), Some(1), "{body}");
-        assert_eq!(fs::read(fixture.0.join("output.mkv")).unwrap(), b"original");
-        assert!(!fixture.0.join("output.mkv.part").exists());
-        assert!(!String::from_utf8_lossy(&result.stdout).contains("complete:"));
-    }
+        assert_eq!(
+            fs::read(fixture.0.join("output.mkv")).unwrap(),
+            b"original",
+            "{body}"
+        );
+        assert!(!fixture.0.join("output.mkv.part").exists(), "{body}");
+        assert!(
+            !String::from_utf8_lossy(&result.stdout).contains("complete:"),
+            "{body}"
+        );
+    };
+    assert_failure("for last do :; done; printf partial > \"$last\"; exit 7");
+    assert_failure("printf 'progress=end\\n'; exit 7");
+    assert_failure("exit 0"); // The exclusively created part is still empty.
+    assert_failure("for last do :; done; rm \"$last\"; exit 0");
     fixture.tool(
         "ffmpeg",
         "for last do :; done; printf replacement > \"$last\"",
@@ -1590,23 +1863,30 @@ fn an_existing_part_is_never_overwritten_or_deleted_even_with_overwrite() {
     let fixture = Fixture::new("touch ffmpeg-started");
     fixture.tool("ffprobe", "touch ffprobe-started");
     fs::write(fixture.0.join("output.mkv.part"), b"another attempt").unwrap();
-    for flags in [vec!["--copy"], vec!["-O", "--copy"]] {
-        let result = fixture.command().args(flags).output().unwrap();
-        assert_eq!(result.status.code(), Some(1));
+    let assert_preserved = |flags: &[&str]| {
+        let result = fixture
+            .command()
+            .args(flags.iter().copied())
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(1), "{flags:?}");
         assert_eq!(
             fs::read(fixture.0.join("output.mkv.part")).unwrap(),
-            b"another attempt"
+            b"another attempt",
+            "{flags:?}"
         );
-        assert!(!fixture.0.join("ffprobe-started").exists());
-        assert!(!fixture.0.join("ffmpeg-started").exists());
-    }
+        assert!(!fixture.0.join("ffprobe-started").exists(), "{flags:?}");
+        assert!(!fixture.0.join("ffmpeg-started").exists(), "{flags:?}");
+    };
+    assert_preserved(&["--copy"]);
+    assert_preserved(&["-O", "--copy"]);
 }
 
 #[test]
 fn probe_and_ffmpeg_diagnostics_are_emitted_once_in_both_output_modes() {
     let fixture =
         Fixture::new("printf 'FFMPEG-DIAGNOSTIC\\n' >&2; printf 'progress=end\\n'; exit 7");
-    for verbose in [false, true] {
+    let assert_ffmpeg_diagnostic = |verbose: bool| {
         let mut command = fixture.command();
         if verbose {
             command.arg("--verbose");
@@ -1617,7 +1897,9 @@ fn probe_and_ffmpeg_diagnostics_are_emitted_once_in_both_output_modes() {
         assert_eq!(error.matches("FFMPEG-DIAGNOSTIC").count(), 1, "{error}");
         assert!(error.contains("transcode failed"));
         assert!(!error.contains("complete:"));
-    }
+    };
+    assert_ffmpeg_diagnostic(false);
+    assert_ffmpeg_diagnostic(true);
     // Encoder-help errors are nested in PlanError; retain their diagnostics.
     let result = fixture.command().arg("--encode-x264").output().unwrap();
     let error = String::from_utf8_lossy(&result.stderr);
@@ -1629,7 +1911,7 @@ fn probe_and_ffmpeg_diagnostics_are_emitted_once_in_both_output_modes() {
         "ffprobe",
         "printf 'FFPROBE-DIAGNOSTIC\\n' >&2; printf '{}'; exit 8",
     );
-    for verbose in [false, true] {
+    let assert_ffprobe_diagnostic = |verbose: bool| {
         let mut command = fixture.command();
         if verbose {
             command.arg("--verbose");
@@ -1640,7 +1922,9 @@ fn probe_and_ffmpeg_diagnostics_are_emitted_once_in_both_output_modes() {
         assert_eq!(error.matches("FFPROBE-DIAGNOSTIC").count(), 1, "{error}");
         assert!(error.contains("probe failed"));
         assert!(!fixture.0.join("output.mkv.part").exists());
-    }
+    };
+    assert_ffprobe_diagnostic(false);
+    assert_ffprobe_diagnostic(true);
 
     fixture.tool(
         "ffprobe",
@@ -1739,16 +2023,7 @@ fn cancellation_keeps_the_output_state_owned_by_each_completed_phase() {
     let _serial = PROCESS_CONTROL_TEST
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    for phase in [
-        "ffprobe",
-        "ffmpeg",
-        "encoder-help",
-        "cover-extraction",
-        "cover-encoding",
-        "verify",
-        "verify-packets",
-        "vmaf",
-    ] {
+    let assert_phase = |phase: &str| {
         let fixture = Fixture::new("");
         let temporary = fixture.0.join("temporary covers");
         fs::create_dir(&temporary).unwrap();
@@ -1863,7 +2138,15 @@ esac"#,
         );
         let pid = fs::read_to_string(fixture.0.join("child-pid")).unwrap();
         assert!(!PathBuf::from(format!("/proc/{pid}")).exists());
-    }
+    };
+    assert_phase("ffprobe");
+    assert_phase("ffmpeg");
+    assert_phase("encoder-help");
+    assert_phase("cover-extraction");
+    assert_phase("cover-encoding");
+    assert_phase("verify");
+    assert_phase("verify-packets");
+    assert_phase("vmaf");
 }
 
 fn read_report(fixture: &Fixture, name: &str) -> Vec<serde_json::Value> {
@@ -2129,20 +2412,19 @@ printf '%s' '{"streams":[{"index":0,"codec_type":"video"}],"format":{"format_nam
             .unwrap()
             .contains("transcode failed")
     );
-    for item in items.iter().filter(|item| item["status"] == "success") {
-        assert_eq!(item["result"]["bytes"], 7);
-        assert_eq!(item["source"]["bytes"], 5);
-    }
+    let succeeded: Vec<_> = items
+        .iter()
+        .filter(|item| item["status"] == "success")
+        .collect();
+    assert_eq!(succeeded.len(), 2);
+    assert_eq!(succeeded[0]["result"]["bytes"], 7);
+    assert_eq!(succeeded[0]["source"]["bytes"], 5);
+    assert_eq!(succeeded[1]["result"]["bytes"], 7);
+    assert_eq!(succeeded[1]["source"]["bytes"], 5);
 }
 
 #[test]
-fn reports_survive_failures_and_reject_conflicting_paths() {
-    let fixture = Fixture::new("");
-    fixture.tool("ffprobe", "touch ffprobe-started");
-
-    assert!(!fixture.0.join("ffprobe-started").exists());
-    assert!(!fixture.0.join("output.mkv").exists());
-
+fn reports_survive_task_failures() {
     let fixture = Fixture::new("printf 'BOOM\n' >&2; exit 7");
     fs::write(fixture.0.join("report.jsonl"), b"stale line\n").unwrap();
     let result = fixture

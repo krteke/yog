@@ -9,7 +9,7 @@ use yog_core::ffmpeg::{
     vmaf::{VmafOptions, VmafScore},
 };
 
-use crate::emulate::EmulationOptions;
+use crate::emulate::{EmulationJob, EmulationOptions};
 
 pub struct Diagnostics {
     verbose: bool,
@@ -163,26 +163,43 @@ impl Diagnostics {
     pub fn emulation(
         &self,
         input: &Path,
-        parameter: &str,
-        qualities: &[u8],
+        jobs: &[EmulationJob],
         options: &EmulationOptions,
+        succeeded: usize,
+        failed: usize,
     ) {
         if !self.terminal_output {
             return;
         }
 
-        let mut report = format!(
-            "emulation: {} | {parameter} {}",
-            input.display(),
-            format_qualities(qualities),
-        );
-        if let Some(path) = &options.png {
-            write!(report, " | PNG {}", path.display()).unwrap();
+        if !self.verbose {
+            let mut report = format!(
+                "emulation: {} | candidates {} | points {succeeded} succeeded, {failed} failed",
+                input.display(),
+                jobs.len(),
+            );
+            append_emulation_outputs(&mut report, options);
+            println!("{report}");
+            return;
         }
-        if let Some(path) = &options.svg {
-            write!(report, " | SVG {}", path.display()).unwrap();
+
+        for (index, job) in jobs.iter().enumerate() {
+            let label = if job.is_candidate() {
+                format!("{} | ", job.label())
+            } else {
+                String::new()
+            };
+            let mut report = format!(
+                "emulation: {} | {label}{} {}",
+                input.display(),
+                job.parameter(),
+                format_qualities(job.qualities()),
+            );
+            if index == 0 {
+                append_emulation_outputs(&mut report, options);
+            }
+            println!("{report}");
         }
-        println!("{report}");
     }
 
     pub fn vmaf(&self, output: &Path, score: VmafScore, options: VmafOptions) {
@@ -318,6 +335,15 @@ impl Diagnostics {
     }
 }
 
+fn append_emulation_outputs(report: &mut String, options: &EmulationOptions) {
+    if let Some(path) = &options.png {
+        write!(report, " | PNG {}", path.display()).unwrap();
+    }
+    if let Some(path) = &options.svg {
+        write!(report, " | SVG {}", path.display()).unwrap();
+    }
+}
+
 fn format_qualities(qualities: &[u8]) -> String {
     let mut parts: Vec<String> = Vec::new();
     let mut run: Option<(u8, u8)> = None;
@@ -353,15 +379,11 @@ mod tests {
 
     #[test]
     fn quality_points_collapse_into_ascending_runs() {
-        for (qualities, expected) in [
-            (vec![20], "20"),
-            (vec![20, 21, 22], "20-22"),
-            (vec![18, 19, 20, 25], "18-20,25"),
-            (vec![0, 255], "0,255"),
-            (vec![254, 255], "254-255"),
-            (Vec::new(), ""),
-        ] {
-            assert_eq!(format_qualities(&qualities), expected, "{qualities:?}");
-        }
+        assert_eq!(format_qualities(&[20]), "20");
+        assert_eq!(format_qualities(&[20, 21, 22]), "20-22");
+        assert_eq!(format_qualities(&[18, 19, 20, 25]), "18-20,25");
+        assert_eq!(format_qualities(&[0, 255]), "0,255");
+        assert_eq!(format_qualities(&[254, 255]), "254-255");
+        assert_eq!(format_qualities(&[]), "");
     }
 }

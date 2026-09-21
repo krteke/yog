@@ -637,79 +637,229 @@ mod tests {
             .pixel_formats
     }
 
+    #[track_caller]
+    fn assert_exact_container(
+        extension: &str,
+        format_name: &str,
+        expected: Container,
+        muxer: &str,
+    ) {
+        let path = format!("video.{extension}");
+        let actual = Container::from_input(Path::new(&path), Some(format_name)).unwrap();
+        assert_eq!(actual, expected, "{path}");
+        assert_eq!(actual.muxer(), muxer, "{path}");
+    }
+
+    #[track_caller]
+    fn assert_container_fallback(path: &str, format_name: &str, expected: Container) {
+        assert_eq!(
+            Container::from_input(Path::new(path), Some(format_name)),
+            Some(expected),
+            "{path} {format_name}"
+        );
+    }
+
+    #[track_caller]
+    fn assert_m2ts_mode(
+        media: &MediaInfo,
+        input: &str,
+        explicit: Option<Container>,
+        expected: bool,
+    ) {
+        let mut request = TranscodeRequest::new(input, "output");
+        request.container = explicit;
+        let plan = request.build(media, &[]).unwrap();
+        assert_eq!(
+            plan.args.iter().any(|arg| arg == "-mpegts_m2ts_mode"),
+            expected,
+            "{input} {explicit:?}"
+        );
+    }
+
+    #[track_caller]
+    fn assert_no_attachment_rewrite(media: &MediaInfo, container: Container) {
+        let plan = TranscodeRequest::new("input", "output")
+            .with_container(container)
+            .build(media, &[])
+            .unwrap();
+        assert!(plan.attachments.is_empty());
+        assert_eq!(
+            plan.args.iter().filter(|arg| *arg == "-map").count(),
+            media.streams.len()
+        );
+    }
+
+    #[track_caller]
+    fn assert_vaapi_option_count(streams: &str, expected: usize) {
+        let mut media: MediaInfo =
+            serde_json::from_str(&format!(r#"{{"streams":{streams}}}"#)).unwrap();
+        media.pixel_formats = descriptors();
+        let plan = TranscodeRequest::mkv("input", "output")
+            .with_video(VideoAction::encode_vaapi(
+                VideoCodec::Av1,
+                "/dev/dri/custom",
+                Some(RateControl::Quality(28)),
+            ))
+            .build(&media, &["nv12".into()])
+            .unwrap();
+        assert_eq!(
+            plan.args
+                .windows(2)
+                .filter(|pair| pair[0] == "-vaapi_device" && pair[1] == "/dev/dri/custom")
+                .count(),
+            expected
+        );
+        assert_eq!(
+            plan.args.iter().filter(|arg| *arg == "-c:v").count(),
+            expected
+        );
+        assert_eq!(
+            plan.args.iter().filter(|arg| *arg == "-rc_mode:v").count(),
+            expected
+        );
+        assert_eq!(
+            plan.args
+                .iter()
+                .filter(|arg| *arg == "-global_quality:v")
+                .count(),
+            expected
+        );
+        assert!(!plan.args.iter().any(|arg| arg == "-qp:v"));
+    }
+
+    #[track_caller]
+    fn assert_frame_path(
+        media: &MediaInfo,
+        decoding: DecodingBackend,
+        video: VideoAction,
+        format: &str,
+        expected_pixel_format: &str,
+        expected_filter: Option<&str>,
+        expected_vaapi_device: bool,
+    ) {
+        let plan = TranscodeRequest::mkv("input", "output")
+            .with_video(video)
+            .with_decoding(decoding)
+            .build(media, &[format.into()])
+            .unwrap();
+        let value = |key: &str| {
+            plan.args
+                .windows(2)
+                .find(|pair| pair[0] == key)
+                .map(|pair| pair[1].to_str().unwrap())
+        };
+        assert_eq!(value("-pix_fmt:1"), Some(expected_pixel_format));
+        assert_eq!(value("-filter:1"), expected_filter);
+        assert_eq!(value("-vaapi_device").is_some(), expected_vaapi_device);
+        assert_eq!(value("-c:2"), None);
+        assert_eq!(plan.attachments[0].input_index, 3);
+        assert_eq!(plan.attachments[0].output_index, 2);
+        assert!(value("-pix_fmt:2").is_none());
+        assert!(value("-hwaccel:3").is_none());
+        let input = plan.args.iter().position(|arg| arg == "-i").unwrap();
+        assert!(plan.args[..input].iter().any(|arg| arg == "-hwaccel:9"));
+    }
+
+    #[track_caller]
+    fn assert_vaapi_decode_device(
+        media: &MediaInfo,
+        device: Option<&str>,
+        expected_device: &str,
+        expected_filter: Option<&str>,
+    ) {
+        let plan = TranscodeRequest::mkv("input", "output")
+            .with_video(VideoAction::encode_vaapi(
+                VideoCodec::Hevc,
+                "/dev/dri/renderD128",
+                None,
+            ))
+            .with_decoding(DecodingBackend::Vaapi(device.map(OsString::from)))
+            .build(media, &[])
+            .unwrap();
+        let value = |key: &str| {
+            plan.args
+                .windows(2)
+                .find(|pair| pair[0] == key)
+                .map(|pair| pair[1].to_str().unwrap())
+        };
+        assert_eq!(value("-hwaccel_device:9"), Some(expected_device));
+        assert_eq!(value("-filter:1"), expected_filter);
+    }
+
+    #[track_caller]
+    fn assert_pixel_layout(
+        input: &str,
+        supported: &str,
+        expected_target: &str,
+        expected_filter: Option<&str>,
+    ) {
+        let mut media: MediaInfo = serde_json::from_str(&format!(
+            r#"{{"streams":[{{"index":0,"codec_type":"video","pix_fmt":"{input}"}}]}}"#
+        ))
+        .unwrap();
+        media.pixel_formats = descriptors();
+        let plan = TranscodeRequest::mkv("input", "output")
+            .with_video(VideoAction::encode_x264(None, None))
+            .build(&media, &[supported.into()])
+            .unwrap();
+        let value = |key: &str| {
+            plan.args
+                .windows(2)
+                .find(|pair| pair[0] == key)
+                .map(|pair| pair[1].to_str().unwrap())
+        };
+        assert_eq!(value("-pix_fmt:0"), Some(expected_target));
+        assert_eq!(value("-filter:0"), expected_filter);
+    }
+
     #[test]
     fn input_container_uses_exact_extensions_and_family_fallbacks() {
         const MOV_FAMILY: &str = "mov,mp4,m4a,3gp,3g2,mj2";
-        for (extension, format_name, container, muxer) in [
-            ("mkv", "matroska,webm", Container::Matroska, "matroska"),
-            ("WEBM", "matroska,webm", Container::Webm, "webm"),
-            ("mp4", MOV_FAMILY, Container::Mp4, "mp4"),
-            ("MOV", MOV_FAMILY, Container::Mov, "mov"),
-            ("m4a", MOV_FAMILY, Container::M4a, "ipod"),
-            ("m4b", MOV_FAMILY, Container::M4a, "ipod"),
-            ("m4v", MOV_FAMILY, Container::M4a, "ipod"),
-            ("3gp", MOV_FAMILY, Container::ThreeGp, "3gp"),
-            ("3g2", MOV_FAMILY, Container::ThreeG2, "3g2"),
-            ("f4v", MOV_FAMILY, Container::F4v, "f4v"),
-            ("ISMV", MOV_FAMILY, Container::Ismv, "ismv"),
-            ("isma", MOV_FAMILY, Container::Ismv, "ismv"),
-            ("psp", MOV_FAMILY, Container::Psp, "psp"),
-            ("ts", "mpegts", Container::MpegTs, "mpegts"),
-            ("m2t", "mpegts", Container::M2ts, "mpegts"),
-            ("m2ts", "mpegts", Container::M2ts, "mpegts"),
-            ("mts", "mpegts", Container::M2ts, "mpegts"),
-            ("avi", "avi", Container::Avi, "avi"),
-            ("flv", "flv", Container::Flv, "flv"),
-            ("asf", "asf", Container::Asf, "asf"),
-            ("wmv", "asf", Container::Wmv, "asf"),
-            ("mpg", "mpeg", Container::MpegPs, "mpeg"),
-            ("mpeg", "mpeg", Container::MpegPs, "mpeg"),
-            ("vob", "mpeg", Container::Vob, "vob"),
-            ("ogg", "ogg", Container::Ogg, "ogg"),
-            ("ogv", "ogg", Container::Ogv, "ogv"),
-        ] {
-            let path = format!("video.{extension}");
-            let actual = Container::from_input(Path::new(&path), Some(format_name)).unwrap();
-            assert_eq!(actual, container, "{path}");
-            assert_eq!(actual.muxer(), muxer, "{path}");
-        }
-        for (path, format_name, container) in [
-            ("video.mj2", MOV_FAMILY, Container::Mp4),
-            ("video", MOV_FAMILY, Container::Mp4),
-            ("video.bin", "mpegts", Container::MpegTs),
-            ("video.bin", "matroska,webm", Container::Matroska),
-            ("video.bin", "asf", Container::Asf),
-            ("video.bin", "mpeg", Container::MpegPs),
-            ("video.bin", "ogg", Container::Ogg),
-            ("video.bin", "avi", Container::Avi),
-        ] {
-            assert_eq!(
-                Container::from_input(Path::new(path), Some(format_name)),
-                Some(container),
-                "{path} {format_name}"
-            );
-        }
+        assert_exact_container("mkv", "matroska,webm", Container::Matroska, "matroska");
+        assert_exact_container("WEBM", "matroska,webm", Container::Webm, "webm");
+        assert_exact_container("mp4", MOV_FAMILY, Container::Mp4, "mp4");
+        assert_exact_container("MOV", MOV_FAMILY, Container::Mov, "mov");
+        assert_exact_container("m4a", MOV_FAMILY, Container::M4a, "ipod");
+        assert_exact_container("m4b", MOV_FAMILY, Container::M4a, "ipod");
+        assert_exact_container("m4v", MOV_FAMILY, Container::M4a, "ipod");
+        assert_exact_container("3gp", MOV_FAMILY, Container::ThreeGp, "3gp");
+        assert_exact_container("3g2", MOV_FAMILY, Container::ThreeG2, "3g2");
+        assert_exact_container("f4v", MOV_FAMILY, Container::F4v, "f4v");
+        assert_exact_container("ISMV", MOV_FAMILY, Container::Ismv, "ismv");
+        assert_exact_container("isma", MOV_FAMILY, Container::Ismv, "ismv");
+        assert_exact_container("psp", MOV_FAMILY, Container::Psp, "psp");
+        assert_exact_container("ts", "mpegts", Container::MpegTs, "mpegts");
+        assert_exact_container("m2t", "mpegts", Container::M2ts, "mpegts");
+        assert_exact_container("m2ts", "mpegts", Container::M2ts, "mpegts");
+        assert_exact_container("mts", "mpegts", Container::M2ts, "mpegts");
+        assert_exact_container("avi", "avi", Container::Avi, "avi");
+        assert_exact_container("flv", "flv", Container::Flv, "flv");
+        assert_exact_container("asf", "asf", Container::Asf, "asf");
+        assert_exact_container("wmv", "asf", Container::Wmv, "asf");
+        assert_exact_container("mpg", "mpeg", Container::MpegPs, "mpeg");
+        assert_exact_container("mpeg", "mpeg", Container::MpegPs, "mpeg");
+        assert_exact_container("vob", "mpeg", Container::Vob, "vob");
+        assert_exact_container("ogg", "ogg", Container::Ogg, "ogg");
+        assert_exact_container("ogv", "ogg", Container::Ogv, "ogv");
+
+        assert_container_fallback("video.mj2", MOV_FAMILY, Container::Mp4);
+        assert_container_fallback("video", MOV_FAMILY, Container::Mp4);
+        assert_container_fallback("video.bin", "mpegts", Container::MpegTs);
+        assert_container_fallback("video.bin", "matroska,webm", Container::Matroska);
+        assert_container_fallback("video.bin", "asf", Container::Asf);
+        assert_container_fallback("video.bin", "mpeg", Container::MpegPs);
+        assert_container_fallback("video.bin", "ogg", Container::Ogg);
+        assert_container_fallback("video.bin", "avi", Container::Avi);
         assert!(Container::from_input(Path::new("video.nut"), Some("nut")).is_none());
         assert!(Container::from_input(Path::new("video.avi"), None).is_none());
 
         let media: MediaInfo =
             serde_json::from_str(r#"{"format":{"format_name":"mpegts"}}"#).unwrap();
-        for (input, explicit, m2ts) in [
-            ("video.m2ts", None, true),
-            ("video.MTS", None, true),
-            ("video.ts", None, false),
-            ("video.m2ts", Some(Container::MpegTs), false),
-            ("video.ts", Some(Container::M2ts), true),
-        ] {
-            let mut request = TranscodeRequest::new(input, "output");
-            request.container = explicit;
-            let plan = request.build(&media, &[]).unwrap();
-            assert_eq!(
-                plan.args.iter().any(|arg| arg == "-mpegts_m2ts_mode"),
-                m2ts,
-                "{input} {explicit:?}"
-            );
-        }
+        assert_m2ts_mode(&media, "video.m2ts", None, true);
+        assert_m2ts_mode(&media, "video.MTS", None, true);
+        assert_m2ts_mode(&media, "video.ts", None, false);
+        assert_m2ts_mode(&media, "video.m2ts", Some(Container::MpegTs), false);
+        assert_m2ts_mode(&media, "video.ts", Some(Container::M2ts), true);
     }
 
     #[test]
@@ -862,10 +1012,18 @@ mod tests {
         let input = sample.args.iter().position(|arg| arg == "-i").unwrap();
         assert_eq!(&sample.args[input - 2..input], ["-ss", "12.5"]);
         assert_eq!(&sample.args[sample.args.len() - 2..], ["-t", "2"]);
-        for flag in ["-map_metadata", "-map_chapters"] {
-            let position = sample.args.iter().position(|arg| arg == flag).unwrap();
-            assert_eq!(sample.args[position + 1], "-1");
-        }
+        let metadata = sample
+            .args
+            .iter()
+            .position(|arg| arg == "-map_metadata")
+            .unwrap();
+        assert_eq!(sample.args[metadata + 1], "-1");
+        let chapters = sample
+            .args
+            .iter()
+            .position(|arg| arg == "-map_chapters")
+            .unwrap();
+        assert_eq!(sample.args[chapters + 1], "-1");
         assert_eq!(
             sample
                 .attachments
@@ -904,38 +1062,26 @@ mod tests {
             "unbounded interleaving is only needed when a timed stream is copied"
         );
 
-        // The Matroska-specific rewrite must not add extraction to MP4/MOV/WebM/TS.
-        for container in [
-            Container::Mp4,
-            Container::Mov,
-            Container::M4a,
-            Container::ThreeGp,
-            Container::ThreeG2,
-            Container::F4v,
-            Container::Ismv,
-            Container::Psp,
-            Container::Webm,
-            Container::MpegTs,
-            Container::M2ts,
-            Container::Avi,
-            Container::Flv,
-            Container::Asf,
-            Container::Wmv,
-            Container::MpegPs,
-            Container::Vob,
-            Container::Ogg,
-            Container::Ogv,
-        ] {
-            let plan = TranscodeRequest::new("input", "output")
-                .with_container(container)
-                .build(&media, &[])
-                .unwrap();
-            assert!(plan.attachments.is_empty());
-            assert_eq!(
-                plan.args.iter().filter(|arg| *arg == "-map").count(),
-                media.streams.len()
-            );
-        }
+        // The Matroska-specific rewrite must not add extraction to other containers.
+        assert_no_attachment_rewrite(&media, Container::Mp4);
+        assert_no_attachment_rewrite(&media, Container::Mov);
+        assert_no_attachment_rewrite(&media, Container::M4a);
+        assert_no_attachment_rewrite(&media, Container::ThreeGp);
+        assert_no_attachment_rewrite(&media, Container::ThreeG2);
+        assert_no_attachment_rewrite(&media, Container::F4v);
+        assert_no_attachment_rewrite(&media, Container::Ismv);
+        assert_no_attachment_rewrite(&media, Container::Psp);
+        assert_no_attachment_rewrite(&media, Container::Webm);
+        assert_no_attachment_rewrite(&media, Container::MpegTs);
+        assert_no_attachment_rewrite(&media, Container::M2ts);
+        assert_no_attachment_rewrite(&media, Container::Avi);
+        assert_no_attachment_rewrite(&media, Container::Flv);
+        assert_no_attachment_rewrite(&media, Container::Asf);
+        assert_no_attachment_rewrite(&media, Container::Wmv);
+        assert_no_attachment_rewrite(&media, Container::MpegPs);
+        assert_no_attachment_rewrite(&media, Container::Vob);
+        assert_no_attachment_rewrite(&media, Container::Ogg);
+        assert_no_attachment_rewrite(&media, Container::Ogv);
     }
 
     #[test]
@@ -973,42 +1119,14 @@ mod tests {
 
     #[test]
     fn vaapi_device_is_only_emitted_once_when_encoding_a_video() {
-        for (streams, devices) in [
-            (
-                r#"[{"index":0,"codec_type":"audio"},{"index":1,"codec_type":"video","disposition":{"attached_pic":1}}]"#,
-                0,
-            ),
-            (
-                r#"[{"index":0,"codec_type":"video","pix_fmt":"yuv420p"},{"index":1,"codec_type":"video","pix_fmt":"yuv420p10le"}]"#,
-                1,
-            ),
-        ] {
-            let mut media: MediaInfo =
-                serde_json::from_str(&format!(r#"{{"streams":{streams}}}"#)).unwrap();
-            media.pixel_formats = descriptors();
-            let plan = TranscodeRequest::mkv("input", "output")
-                .with_video(VideoAction::encode_vaapi(
-                    VideoCodec::Av1,
-                    "/dev/dri/custom",
-                    Some(RateControl::Quality(28)),
-                ))
-                .build(&media, &["nv12".into()])
-                .unwrap();
-            assert_eq!(
-                plan.args
-                    .windows(2)
-                    .filter(|pair| pair[0] == "-vaapi_device" && pair[1] == "/dev/dri/custom")
-                    .count(),
-                devices
-            );
-            for option in ["-c:v", "-rc_mode:v", "-global_quality:v"] {
-                assert_eq!(
-                    plan.args.iter().filter(|arg| *arg == option).count(),
-                    devices
-                );
-            }
-            assert!(!plan.args.iter().any(|arg| arg == "-qp:v"));
-        }
+        assert_vaapi_option_count(
+            r#"[{"index":0,"codec_type":"audio"},{"index":1,"codec_type":"video","disposition":{"attached_pic":1}}]"#,
+            0,
+        );
+        assert_vaapi_option_count(
+            r#"[{"index":0,"codec_type":"video","pix_fmt":"yuv420p"},{"index":1,"codec_type":"video","pix_fmt":"yuv420p10le"}]"#,
+            1,
+        );
     }
     #[test]
     fn frame_paths_cover_all_decoder_encoder_pairs_and_device_boundaries() {
@@ -1021,149 +1139,199 @@ mod tests {
         )
         .unwrap();
         media.pixel_formats = descriptors();
-        let decoders = [
+        let x264 = || VideoAction::encode_x264(None, None);
+        let vaapi = || VideoAction::encode_vaapi(VideoCodec::Hevc, "/dev/dri/renderD128", None);
+        let nvenc = || VideoAction::encode_nvenc(VideoCodec::Hevc, None, None, None);
+        let qsv = || VideoAction::encode_qsv(VideoCodec::Hevc, None, None);
+
+        assert_frame_path(
+            &media,
             DecodingBackend::Software,
-            DecodingBackend::Vaapi(None),
-            DecodingBackend::Cuda(None),
-            DecodingBackend::Qsv(None),
-        ];
-        let encoders = [
-            VideoAction::encode_x264(None, None),
-            VideoAction::encode_vaapi(VideoCodec::Hevc, "/dev/dri/renderD128", None),
-            VideoAction::encode_nvenc(VideoCodec::Hevc, None, None, None),
-            VideoAction::encode_qsv(VideoCodec::Hevc, None, None),
-        ];
-        for (d, decoding) in decoders.iter().enumerate() {
-            for (e, video) in encoders.iter().enumerate() {
-                let formats = if e == 0 {
-                    vec!["yuv420p10le".into()]
-                } else {
-                    vec!["p010le".into()]
-                };
-                let plan = TranscodeRequest::mkv("input", "output")
-                    .with_video(video.clone())
-                    .with_decoding(decoding.clone())
-                    .build(&media, &formats)
-                    .unwrap();
-                let value = |key: &str| {
-                    plan.args
-                        .windows(2)
-                        .find(|p| p[0] == key)
-                        .map(|p| p[1].to_str().unwrap())
-                };
-                let direct = d != 0 && d == e;
-                assert_eq!(
-                    value("-pix_fmt:1"),
-                    Some(if direct {
-                        ["", "+vaapi", "+cuda", "+qsv"][d]
-                    } else if e == 1 {
-                        "+vaapi"
-                    } else if e == 0 {
-                        "+yuv420p10le"
-                    } else {
-                        "+p010le"
-                    })
-                );
-                let filter = value("-filter:1").unwrap_or("");
-                assert_eq!(
-                    filter.contains("hwdownload"),
-                    d != 0 && !direct,
-                    "d={d} e={e}: {filter}"
-                );
-                assert_eq!(
-                    filter.contains("hwupload"),
-                    e == 1 && !direct,
-                    "d={d} e={e}: {filter}"
-                );
-                assert_eq!(value("-vaapi_device").is_some(), e == 1 && !direct);
-                if direct {
-                    assert!(filter.is_empty());
-                }
-                assert_eq!(value("-c:2"), None);
-                assert_eq!(plan.attachments[0].input_index, 3);
-                assert_eq!(plan.attachments[0].output_index, 2);
-                assert!(value("-pix_fmt:2").is_none());
-                assert!(value("-hwaccel:3").is_none());
-                let input = plan.args.iter().position(|a| a == "-i").unwrap();
-                assert!(plan.args[..input].iter().any(|a| a == "-hwaccel:9"));
-            }
-        }
-        for device in [
+            x264(),
+            "yuv420p10le",
+            "+yuv420p10le",
             None,
+            false,
+        );
+        assert_frame_path(
+            &media,
+            DecodingBackend::Software,
+            vaapi(),
+            "p010le",
+            "+vaapi",
+            Some("format=yuv420p10le,scale=iw:ih,format=p010le,hwupload"),
+            true,
+        );
+        assert_frame_path(
+            &media,
+            DecodingBackend::Software,
+            nvenc(),
+            "p010le",
+            "+p010le",
+            Some("format=yuv420p10le,scale=iw:ih,format=p010le"),
+            false,
+        );
+        assert_frame_path(
+            &media,
+            DecodingBackend::Software,
+            qsv(),
+            "p010le",
+            "+p010le",
+            Some("format=yuv420p10le,scale=iw:ih,format=p010le"),
+            false,
+        );
+
+        assert_frame_path(
+            &media,
+            DecodingBackend::Vaapi(None),
+            x264(),
+            "yuv420p10le",
+            "+yuv420p10le",
+            Some("hwdownload,format=p010le,scale=iw:ih,format=yuv420p10le"),
+            false,
+        );
+        assert_frame_path(
+            &media,
+            DecodingBackend::Vaapi(None),
+            vaapi(),
+            "p010le",
+            "+vaapi",
+            None,
+            false,
+        );
+        assert_frame_path(
+            &media,
+            DecodingBackend::Vaapi(None),
+            nvenc(),
+            "p010le",
+            "+p010le",
+            Some("hwdownload,format=p010le"),
+            false,
+        );
+        assert_frame_path(
+            &media,
+            DecodingBackend::Vaapi(None),
+            qsv(),
+            "p010le",
+            "+p010le",
+            Some("hwdownload,format=p010le"),
+            false,
+        );
+
+        assert_frame_path(
+            &media,
+            DecodingBackend::Cuda(None),
+            x264(),
+            "yuv420p10le",
+            "+yuv420p10le",
+            Some("hwdownload,format=p010le,scale=iw:ih,format=yuv420p10le"),
+            false,
+        );
+        assert_frame_path(
+            &media,
+            DecodingBackend::Cuda(None),
+            vaapi(),
+            "p010le",
+            "+vaapi",
+            Some("hwdownload,format=p010le,hwupload"),
+            true,
+        );
+        assert_frame_path(
+            &media,
+            DecodingBackend::Cuda(None),
+            nvenc(),
+            "p010le",
+            "+cuda",
+            None,
+            false,
+        );
+        assert_frame_path(
+            &media,
+            DecodingBackend::Cuda(None),
+            qsv(),
+            "p010le",
+            "+p010le",
+            Some("hwdownload,format=p010le"),
+            false,
+        );
+
+        assert_frame_path(
+            &media,
+            DecodingBackend::Qsv(None),
+            x264(),
+            "yuv420p10le",
+            "+yuv420p10le",
+            Some("hwdownload,format=p010le,scale=iw:ih,format=yuv420p10le"),
+            false,
+        );
+        assert_frame_path(
+            &media,
+            DecodingBackend::Qsv(None),
+            vaapi(),
+            "p010le",
+            "+vaapi",
+            Some("hwdownload,format=p010le,hwupload"),
+            true,
+        );
+        assert_frame_path(
+            &media,
+            DecodingBackend::Qsv(None),
+            nvenc(),
+            "p010le",
+            "+p010le",
+            Some("hwdownload,format=p010le"),
+            false,
+        );
+        assert_frame_path(
+            &media,
+            DecodingBackend::Qsv(None),
+            qsv(),
+            "p010le",
+            "+qsv",
+            None,
+            false,
+        );
+
+        assert_vaapi_decode_device(&media, None, "/dev/dri/renderD128", None);
+        assert_vaapi_decode_device(
+            &media,
             Some("/dev/dri/renderD128"),
+            "/dev/dri/renderD128",
+            None,
+        );
+        assert_vaapi_decode_device(
+            &media,
             Some("/dev/dri/renderD129"),
-        ] {
-            let plan = TranscodeRequest::mkv("input", "output")
-                .with_video(encoders[1].clone())
-                .with_decoding(DecodingBackend::Vaapi(device.map(OsString::from)))
-                .build(&media, &[])
-                .unwrap();
-            let value = |key: &str| {
-                plan.args
-                    .windows(2)
-                    .find(|p| p[0] == key)
-                    .map(|p| p[1].to_str().unwrap())
-            };
-            assert_eq!(
-                value("-hwaccel_device:9"),
-                Some(device.unwrap_or("/dev/dri/renderD128"))
-            );
-            assert_eq!(
-                value("-filter:1"),
-                if device == Some("/dev/dri/renderD129") {
-                    Some("hwdownload,format=p010le,hwupload")
-                } else {
-                    None
-                }
-            );
-        }
+            "/dev/dri/renderD129",
+            Some("hwdownload,format=p010le,hwupload"),
+        );
     }
 
     #[test]
     fn only_equivalent_layouts_are_selected_and_ffmpeg_owns_rejection() {
-        for (input, supported, target, filter) in [
-            (
-                "yuv420p10le",
-                "p010le",
-                "+p010le",
-                Some("format=yuv420p10le,scale=iw:ih,format=p010le"),
-            ),
-            ("yuv444p12le", "yuv420p10le", "+yuv444p12le", None),
-            ("rgb24", "yuv444p", "+rgb24", None),
-            (
-                "rgb24",
-                "gbrp",
-                "+gbrp",
-                Some("format=rgb24,scale=iw:ih,format=gbrp"),
-            ),
-            ("rgb565le", "rgb24", "+rgb565le", None),
-            (
-                "rgb565le",
-                "rgb565be",
-                "+rgb565be",
-                Some("format=rgb565le,scale=iw:ih,format=rgb565be"),
-            ),
-            ("pal8", "yuv420p", "+pal8", None),
-            ("yuva420p", "yuv420p", "+yuva420p", None),
-            ("gray", "yuv420p", "+gray", None),
-        ] {
-            let mut media: MediaInfo = serde_json::from_str(&format!(
-                r#"{{"streams":[{{"index":0,"codec_type":"video","pix_fmt":"{input}"}}]}}"#
-            ))
-            .unwrap();
-            media.pixel_formats = descriptors();
-            let plan = TranscodeRequest::mkv("input", "output")
-                .with_video(VideoAction::encode_x264(None, None))
-                .build(&media, &[supported.into()])
-                .unwrap();
-            let value = |key: &str| {
-                plan.args
-                    .windows(2)
-                    .find(|p| p[0] == key)
-                    .map(|p| p[1].to_str().unwrap())
-            };
-            assert_eq!(value("-pix_fmt:0"), Some(target));
-            assert_eq!(value("-filter:0"), filter);
-        }
+        assert_pixel_layout(
+            "yuv420p10le",
+            "p010le",
+            "+p010le",
+            Some("format=yuv420p10le,scale=iw:ih,format=p010le"),
+        );
+        assert_pixel_layout("yuv444p12le", "yuv420p10le", "+yuv444p12le", None);
+        assert_pixel_layout("rgb24", "yuv444p", "+rgb24", None);
+        assert_pixel_layout(
+            "rgb24",
+            "gbrp",
+            "+gbrp",
+            Some("format=rgb24,scale=iw:ih,format=gbrp"),
+        );
+        assert_pixel_layout("rgb565le", "rgb24", "+rgb565le", None);
+        assert_pixel_layout(
+            "rgb565le",
+            "rgb565be",
+            "+rgb565be",
+            Some("format=rgb565le,scale=iw:ih,format=rgb565be"),
+        );
+        assert_pixel_layout("pal8", "yuv420p", "+pal8", None);
+        assert_pixel_layout("yuva420p", "yuv420p", "+yuva420p", None);
+        assert_pixel_layout("gray", "yuv420p", "+gray", None);
     }
 }

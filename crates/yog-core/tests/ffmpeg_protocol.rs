@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -29,6 +29,23 @@ impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
+}
+
+#[track_caller]
+fn copied_payload(path: &Path, selector: &str) -> Vec<u8> {
+    let result = Command::new("ffmpeg")
+        .args(["-v", "error", "-nostdin", "-i"])
+        .arg(path)
+        .args(["-map", selector, "-c", "copy", "-f", "data", "pipe:1"])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(!result.stdout.is_empty());
+    result.stdout
 }
 
 #[tokio::test]
@@ -295,25 +312,12 @@ async fn shared_video_encoding_keeps_reordered_cover_and_audio_as_copy() {
     assert_eq!(cover.codec_name.as_deref(), Some("mjpeg"));
 
     // Compare copied packet payloads, not merely codecs that could also be re-encoded.
-    for selector in ["0:disp:attached_pic", "0:a"] {
-        let mut payloads = Vec::new();
-        for path in [&input, &output] {
-            let result = Command::new("ffmpeg")
-                .args(["-v", "error", "-nostdin", "-i"])
-                .arg(path)
-                .args(["-map", selector, "-c", "copy", "-f", "data", "pipe:1"])
-                .output()
-                .unwrap();
-            assert!(
-                result.status.success(),
-                "{}",
-                String::from_utf8_lossy(&result.stderr)
-            );
-            assert!(!result.stdout.is_empty());
-            payloads.push(result.stdout);
-        }
-        assert_eq!(payloads[0], payloads[1], "{selector}");
-    }
+    let input_cover = copied_payload(&input, "0:disp:attached_pic");
+    let output_cover = copied_payload(&output, "0:disp:attached_pic");
+    assert_eq!(input_cover, output_cover);
+    let input_audio = copied_payload(&input, "0:a");
+    let output_audio = copied_payload(&output, "0:a");
+    assert_eq!(input_audio, output_audio);
 }
 
 #[tokio::test]

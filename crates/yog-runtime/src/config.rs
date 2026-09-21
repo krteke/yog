@@ -125,8 +125,7 @@ mod tests {
 
     #[test]
     fn emulation_dimensions_must_be_positive() {
-        for config in ["[emulation]\nwidth = 0", "[emulation]\nheight = 0"] {
-            assert!(toml::from_str::<Config>(config).is_err(), "{config}");
-        }
+        assert!(toml::from_str::<Config>("[emulation]\nwidth = 0").is_err());
+        assert!(toml::from_str::<Config>("[emulation]\nheight = 0").is_err());
     }
 }

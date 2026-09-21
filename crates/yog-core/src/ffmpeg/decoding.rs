@@ -1,4 +1,5 @@
-use std::{ffi::OsString, fmt::Display};
+use std::fmt::Write;
+use std::{ffi::OsString, fmt::Display, str::FromStr};
 
 use crate::{
     ffmpeg::{
@@ -24,6 +25,27 @@ pub enum DecodingBackend {
     Vaapi(Option<OsString>),
     Cuda(Option<OsString>),
     Qsv(Option<OsString>),
+}
+
+impl FromStr for DecodingBackend {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (name, device, has_device) = match value.split_once('=') {
+            Some((name, "")) => (name, None, true),
+            Some((name, device)) => (name, Some(device.into()), true),
+            None => (value, None, false),
+        };
+
+        match name {
+            "" | "software" if !has_device => Ok(Self::Software),
+            "" | "software" => Err("software decoding does not accept a device".to_owned()),
+            "vaapi" => Ok(Self::Vaapi(device)),
+            "cuda" => Ok(Self::Cuda(device)),
+            "qsv" => Ok(Self::Qsv(device)),
+            _ => Err(format!("unknown decoding backend {name}")),
+        }
+    }
 }
 
 impl Display for DecodingBackend {
@@ -53,6 +75,26 @@ impl Display for DecodingBackend {
 }
 
 impl DecodingBackend {
+    pub fn name(&self) -> String {
+        let mut name = match self {
+            DecodingBackend::Software => return "Software".to_owned(),
+            DecodingBackend::Vaapi(_) => "VAAPI decode".to_owned(),
+            DecodingBackend::Cuda(_) => "CUDA decode".to_owned(),
+            DecodingBackend::Qsv(_) => "QSV decode".to_owned(),
+        };
+        let device = match self {
+            DecodingBackend::Vaapi(device)
+            | DecodingBackend::Cuda(device)
+            | DecodingBackend::Qsv(device) => device,
+            DecodingBackend::Software => unreachable!(),
+        };
+        if let Some(device) = device {
+            write!(name, " ({})", device.display()).unwrap();
+        }
+
+        name
+    }
+
     pub(super) fn plan(
         &self,
         encoding: &VideoEncoding,

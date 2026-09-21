@@ -1,3 +1,5 @@
+mod picker;
+
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
@@ -6,7 +8,10 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Paragraph},
 };
 
-use crate::app::{App, Field};
+use crate::{
+    app::App,
+    form::{Field, TranscodeForm},
+};
 
 const ACCENT: Color = Color::Rgb(125, 195, 255);
 const INACTIVE: Color = Color::DarkGray;
@@ -30,9 +35,10 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
     let content = shell.inner(area);
     frame.render_widget(shell, area);
 
-    let source = app.source_fields();
-    let video = app.video_fields();
-    let options = app.option_fields();
+    let form = app.form();
+    let source = form.source_fields();
+    let video = form.video_fields();
+    let options = form.option_fields();
     let rows = Layout::vertical([
         Constraint::Length(source.len() as u16 + 2),
         Constraint::Length(video.len() as u16 + 2),
@@ -42,14 +48,24 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
     ])
     .split(content);
 
-    render_section(frame, rows[0], " Source ", source, app);
-    render_section(frame, rows[1], " Video ", &video, app);
-    render_section(frame, rows[2], " Options ", &options, app);
-    render_footer(frame, rows[4]);
+    render_section(frame, rows[0], " Source ", source, form);
+    render_section(frame, rows[1], " Video ", &video, form);
+    render_section(frame, rows[2], " Options ", &options, form);
+    render_footer(frame, rows[4], app.error());
+
+    if let Some(file_picker) = app.picker() {
+        picker::draw(frame, area, file_picker);
+    }
 }
 
-fn render_section(frame: &mut Frame<'_>, area: Rect, title: &str, fields: &[Field], app: &App) {
-    let focused = app.focused();
+fn render_section(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    title: &str,
+    fields: &[Field],
+    form: &TranscodeForm,
+) {
+    let focused = form.focused();
     let active = fields.contains(&focused);
     let color = if active { ACCENT } else { INACTIVE };
     let block = Block::new()
@@ -63,12 +79,12 @@ fn render_section(frame: &mut Frame<'_>, area: Rect, title: &str, fields: &[Fiel
     let lines = fields
         .iter()
         .copied()
-        .map(|field| field_line(app, field, focused == field))
+        .map(|field| field_line(form, field, focused == field))
         .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(lines), content);
 }
 
-fn field_line(app: &App, field: Field, focused: bool) -> Line<'static> {
+fn field_line(form: &TranscodeForm, field: Field, focused: bool) -> Line<'static> {
     let marker = if focused { "›" } else { " " };
     let marker_style = Style::default().fg(if focused { ACCENT } else { INACTIVE });
     let value_style = if focused {
@@ -76,7 +92,7 @@ fn field_line(app: &App, field: Field, focused: bool) -> Line<'static> {
     } else {
         Style::default().fg(Color::White)
     };
-    let value_style = if app.is_editing(field) {
+    let value_style = if form.is_editing(field) {
         value_style.add_modifier(Modifier::UNDERLINED)
     } else {
         value_style
@@ -85,21 +101,31 @@ fn field_line(app: &App, field: Field, focused: bool) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!(" {marker} "), marker_style),
         Span::styled(
-            format!("{:<13}", App::label(field)),
+            format!("{:<13}", TranscodeForm::label(field)),
             Style::default().fg(Color::Gray),
         ),
-        Span::styled(app.value(field), value_style),
+        Span::styled(form.value(field), value_style),
     ])
 }
 
-fn render_footer(frame: &mut Frame<'_>, area: Rect) {
+fn render_footer(frame: &mut Frame<'_>, area: Rect, error: Option<&str>) {
+    if let Some(error) = error {
+        frame.render_widget(
+            Paragraph::new(error)
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(Color::LightRed)),
+            area,
+        );
+        return;
+    }
+
     let line = Line::from(vec![
         key("j/k"),
         Span::raw(" Move    "),
         key("h/l"),
         Span::raw(" Change    "),
         key("Enter"),
-        Span::raw(" Edit    "),
+        Span::raw(" Select/Edit    "),
         key("q"),
         Span::raw(" Quit"),
     ])

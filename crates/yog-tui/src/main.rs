@@ -1,4 +1,6 @@
 mod app;
+mod file_picker;
+mod form;
 mod ui;
 
 use std::{io, process::ExitCode};

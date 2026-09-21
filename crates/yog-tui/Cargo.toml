@@ -13,6 +13,9 @@ futures-util = { workspace = true, features = ["std"] }
 ratatui.workspace = true
 tokio.workspace = true
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [features]
 default = ["cli"]
 cli = ["yog-cli"]

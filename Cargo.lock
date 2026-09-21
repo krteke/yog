@@ -2666,6 +2666,7 @@ dependencies = [
  "crossterm",
  "futures-util",
  "ratatui",
+ "tempfile",
  "tokio",
  "yog-cli",
  "yog-core",

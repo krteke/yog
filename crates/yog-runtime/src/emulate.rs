@@ -1,4 +1,4 @@
-mod chart;
+pub(crate) mod chart;
 
 use crate::{
     TaskOutcome,
@@ -151,12 +151,6 @@ fn select(qualities: &[u8], encoding: &VideoEncoding) -> Vec<u8> {
     qualities
 }
 
-struct EmulationPoint {
-    quality: u8,
-    vmaf: f64,
-    size_bytes: u64,
-}
-
 impl Transcoder {
     pub async fn emulate(
         &self,
@@ -179,8 +173,12 @@ impl Transcoder {
             .with_context(|| format!("cannot read input metadata {}", request.input.display()))?
             .len();
 
-        chart::check_paths(options, request.overwrite)
-            .context("cannot prepare emulation chart output")?;
+        chart::check_paths(
+            options.png.as_deref(),
+            options.svg.as_deref(),
+            request.overwrite,
+        )
+        .context("cannot prepare emulation chart output")?;
         let media = self.probe(&request.input).await?;
         let prediction_options = self.config.prediction.into();
         let jobs = jobs(&request, options);
@@ -226,7 +224,7 @@ impl Transcoder {
                 let outcome = match result {
                     Ok(prediction) => {
                         record.fill_prediction(&prediction);
-                        points.push(EmulationPoint {
+                        points.push(chart::Point {
                             quality,
                             vmaf: prediction.quality.vmaf.value,
                             size_bytes: prediction.output_bytes.value,
@@ -269,7 +267,8 @@ impl Transcoder {
         }
 
         chart::render(
-            options,
+            options.png.as_deref(),
+            options.svg.as_deref(),
             &series,
             source_bytes,
             (

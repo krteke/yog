@@ -1,4 +1,3 @@
-use super::{EmulationOptions, EmulationPoint};
 use anyhow::Context;
 use plotters::{
     coord::{
@@ -7,15 +6,21 @@ use plotters::{
     },
     prelude::*,
 };
-use std::fs;
+use std::{fs, path::Path};
 
 const MIB: f64 = 1024.0 * 1024.0;
+
+pub struct Point {
+    pub quality: u8,
+    pub vmaf: f64,
+    pub size_bytes: u64,
+}
 
 pub struct Series {
     pub index: Option<usize>,
     pub label: String,
     pub parameter: &'static str,
-    pub points: Vec<EmulationPoint>,
+    pub points: Vec<Point>,
 }
 
 const COLORS: [RGBColor; 8] = [
@@ -33,8 +38,8 @@ fn colors(count: usize) -> impl Iterator<Item = RGBColor> {
     COLORS.into_iter().cycle().take(count)
 }
 
-pub(super) fn check_paths(options: &EmulationOptions, overwrite: bool) -> anyhow::Result<()> {
-    for path in [&options.png, &options.svg].into_iter().flatten() {
+pub fn check_paths(png: Option<&Path>, svg: Option<&Path>, overwrite: bool) -> anyhow::Result<()> {
+    for path in [png, svg].into_iter().flatten() {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("cannot create directory {}", parent.display()))?;
@@ -48,15 +53,16 @@ pub(super) fn check_paths(options: &EmulationOptions, overwrite: bool) -> anyhow
     Ok(())
 }
 
-pub(super) fn render(
-    options: &EmulationOptions,
+pub fn render(
+    png: Option<&Path>,
+    svg: Option<&Path>,
     series: &[Series],
     source_bytes: u64,
     image_size: (u32, u32),
 ) -> anyhow::Result<()> {
     let title = title(series);
     let parameter = parameter(series);
-    if let Some(path) = &options.png {
+    if let Some(path) = png {
         draw(
             BitMapBackend::new(path, image_size).into_drawing_area(),
             &title,
@@ -66,7 +72,7 @@ pub(super) fn render(
         )
         .with_context(|| format!("cannot render PNG {}", path.display()))?;
     }
-    if let Some(path) = &options.svg {
+    if let Some(path) = svg {
         draw(
             SVGBackend::new(path, image_size).into_drawing_area(),
             &title,
@@ -274,11 +280,11 @@ where
     Ok(())
 }
 
-fn points(series: &[Series]) -> impl Iterator<Item = &EmulationPoint> {
+fn points(series: &[Series]) -> impl Iterator<Item = &Point> {
     series.iter().flat_map(|item| item.points.iter())
 }
 
-fn value_bounds(series: &[Series], value: impl Fn(&EmulationPoint) -> f64) -> (f64, f64) {
+fn value_bounds(series: &[Series], value: impl Fn(&Point) -> f64) -> (f64, f64) {
     let mut values = points(series).map(value);
     let first = values
         .next()
@@ -415,12 +421,12 @@ mod tests {
                 label: "SVT-AV1 / Software / Preset 4".to_owned(),
                 parameter: "CRF",
                 points: vec![
-                    EmulationPoint {
+                    Point {
                         quality: 20,
                         vmaf: 95.0,
                         size_bytes: 800 * 1024 * 1024,
                     },
-                    EmulationPoint {
+                    Point {
                         quality: 21,
                         vmaf: 94.0,
                         size_bytes: 760 * 1024 * 1024,
@@ -432,12 +438,12 @@ mod tests {
                 label: "x265 / Software / Preset slow".to_owned(),
                 parameter: "CRF",
                 points: vec![
-                    EmulationPoint {
+                    Point {
                         quality: 20,
                         vmaf: 96.0,
                         size_bytes: 820 * 1024 * 1024,
                     },
-                    EmulationPoint {
+                    Point {
                         quality: 21,
                         vmaf: 95.0,
                         size_bytes: 780 * 1024 * 1024,

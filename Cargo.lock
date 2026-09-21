@@ -2643,6 +2643,7 @@ name = "yog-runtime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clap",
  "dirs 7.0.0",
  "indicatif",
  "log",

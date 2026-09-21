@@ -3,6 +3,13 @@ name = "yog-runtime"
 version.workspace = true
 edition.workspace = true
 
+[features]
+dev-tools = []
+
+[[example]]
+name = "emulate_chart_preview"
+required-features = ["dev-tools"]
+
 [dependencies]
 anyhow.workspace = true
 dirs.workspace = true
@@ -27,4 +34,5 @@ walkdir.workspace = true
 yog-core.workspace = true
 
 [dev-dependencies]
+clap = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["macros", "rt"] }

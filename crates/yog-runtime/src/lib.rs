@@ -1,4 +1,7 @@
 mod config;
+#[cfg(feature = "dev-tools")]
+#[doc(hidden)]
+pub mod dev_tools;
 mod diagnostics;
 mod emulate;
 mod error;

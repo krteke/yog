@@ -56,8 +56,7 @@ pub enum Field {
     Bitrate,
     Multipass,
     EncodeDevice,
-    RangeStart,
-    RangeEnd,
+    QualityPoints,
     Overwrite,
     Verify,
     Vmaf,
@@ -131,7 +130,7 @@ pub struct CommandForm {
 
 impl Default for CommandForm {
     fn default() -> Self {
-        let encoding = EncodingDraft::new(1, 5, 23, 0, 51);
+        let encoding = EncodingDraft::new(1, 5, 23, "0-51");
         Self {
             mode: Mode::Transcode,
             input: None,
@@ -248,7 +247,7 @@ impl CommandForm {
                 fields.push(Field::EncodeDevice);
             }
             if self.mode == Mode::Emulate {
-                fields.extend([Field::RangeStart, Field::RangeEnd]);
+                fields.push(Field::QualityPoints);
             } else {
                 fields.push(Field::Rate);
                 match self.encoding.rate() {
@@ -295,8 +294,7 @@ impl CommandForm {
             Field::Bitrate => "Bitrate",
             Field::Multipass => "Multipass",
             Field::EncodeDevice => "Encode device",
-            Field::RangeStart => "Range start",
-            Field::RangeEnd => "Range end",
+            Field::QualityPoints => "Quality points",
             Field::Overwrite => "Overwrite",
             Field::Verify => "Verify",
             Field::Vmaf => "VMAF",
@@ -336,8 +334,9 @@ impl CommandForm {
             Field::Bitrate => self.encoding.bitrate(self.editing == Some(field)),
             Field::Multipass => self.encoding.multipass_label().to_owned(),
             Field::EncodeDevice => self.encoding.device(self.editing == Some(field)),
-            Field::RangeStart => self.encoding.range_start_label(),
-            Field::RangeEnd => self.encoding.range_end_label(),
+            Field::QualityPoints => self
+                .encoding
+                .quality_points_label(self.editing == Some(field)),
             Field::Overwrite => state(self.overwrite).to_owned(),
             Field::Verify => state(self.verify).to_owned(),
             Field::Vmaf => match self.vmaf {
@@ -383,7 +382,8 @@ impl CommandForm {
             | Field::Report
             | Field::DecodeDevice
             | Field::Bitrate
-            | Field::EncodeDevice => {
+            | Field::EncodeDevice
+            | Field::QualityPoints => {
                 let field = self.focused();
                 self.text_input_mut(field).begin();
                 self.editing = Some(field);
@@ -407,6 +407,7 @@ impl CommandForm {
             | Field::DecodeDevice
             | Field::Bitrate
             | Field::EncodeDevice
+            | Field::QualityPoints
             | Field::Candidates => {}
             Field::Container => {
                 self.container = cycle(self.container, CONTAINERS.len(), direction);
@@ -439,12 +440,6 @@ impl CommandForm {
             }
             Field::Multipass => {
                 self.encoding.adjust_multipass(direction);
-            }
-            Field::RangeStart => {
-                self.encoding.adjust_range_start(direction);
-            }
-            Field::RangeEnd => {
-                self.encoding.adjust_range_end(direction);
             }
             Field::Overwrite => self.overwrite = direction > 0,
             Field::Verify => self.verify = direction > 0,
@@ -485,6 +480,27 @@ impl CommandForm {
         }
 
         let candidate_mode = self.mode == Mode::Emulate && !self.candidates.is_empty();
+        let (qualities, candidates) = if self.mode != Mode::Emulate {
+            (Vec::new(), Vec::new())
+        } else if candidate_mode {
+            let candidates = self
+                .candidates
+                .iter()
+                .enumerate()
+                .map(|(index, candidate)| {
+                    candidate
+                        .build()
+                        .map_err(|error| format!("Candidate #{}: {error}", index + 1))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            (Vec::new(), candidates)
+        } else {
+            let qualities = self
+                .encoding
+                .qualities()
+                .map_err(|error| format!("Invalid quality points: {error}"))?;
+            (qualities, Vec::new())
+        };
         let video =
             if candidate_mode || self.mode == Mode::Transcode && self.action == VideoAction::Copy {
                 CoreVideoAction::Copy
@@ -518,12 +534,8 @@ impl CommandForm {
                 Mode::Emulate => Operation::Emulate(EmulationOptions {
                     png: (!self.png.value().is_empty()).then(|| PathBuf::from(self.png.value())),
                     svg: (!self.svg.value().is_empty()).then(|| PathBuf::from(self.svg.value())),
-                    qualities: if candidate_mode {
-                        Vec::new()
-                    } else {
-                        self.encoding.qualities()
-                    },
-                    candidates: self.candidates.iter().map(CandidateDraft::build).collect(),
+                    qualities,
+                    candidates,
                 }),
             },
             recursive: self.mode != Mode::Emulate && input.recursive(),
@@ -596,6 +608,7 @@ impl CommandForm {
             Field::DecodeDevice => self.decoder.device_input(),
             Field::Bitrate => self.encoding.bitrate_input(),
             Field::EncodeDevice => self.encoding.device_input(),
+            Field::QualityPoints => self.encoding.quality_points_input(),
             _ => unreachable!("field does not support text editing"),
         }
     }
@@ -673,8 +686,7 @@ mod tests {
                 Field::Candidates,
                 Field::Encoder,
                 Field::Preset,
-                Field::RangeStart,
-                Field::RangeEnd
+                Field::QualityPoints
             ]
         );
         assert_eq!(
@@ -690,7 +702,7 @@ mod tests {
 
         form.set_candidates(vec![CandidateDraft::new(
             DecoderDraft::new(0),
-            EncodingDraft::new(1, 5, 18, 18, 30),
+            EncodingDraft::new(1, 5, 23, "18-30"),
         )]);
         assert_eq!(form.source_fields(), vec![Field::Input, Field::Container]);
         assert_eq!(form.video_fields(), vec![Field::Candidates]);

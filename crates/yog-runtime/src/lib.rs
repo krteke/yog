@@ -24,7 +24,7 @@ use transcode::Transcoder;
 use yog_core::ffmpeg::{plan::TranscodeRequest, vmaf::VmafOptions};
 
 pub use config::Config;
-pub use emulate::{Candidate, EmulationOptions};
+pub use emulate::{Candidate, EmulationOptions, parse_quality_points};
 pub use validate::Validate;
 
 use crate::report::record::{PredictRecord, SkippedRecord, TaskRecord, TranscodeRecord};

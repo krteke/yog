@@ -36,6 +36,43 @@ pub struct EmulationOptions {
     pub candidates: Vec<Candidate>,
 }
 
+pub fn parse_quality_points(value: &str) -> Result<Vec<u8>, String> {
+    if value.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut points = Vec::new();
+    for segment in value.split(',') {
+        let segment = segment.trim();
+        if segment.is_empty() {
+            return Err("expected a quality value or range".to_owned());
+        }
+
+        match segment.split_once('-') {
+            Some((start, end)) => {
+                let start = parse_quality(start, segment)?;
+                let end = parse_quality(end, segment)?;
+                if start > end {
+                    return Err(format!("quality range {segment} must be ascending"));
+                }
+                points.extend(start..=end);
+            }
+            None => points.push(parse_quality(segment, segment)?),
+        }
+    }
+
+    points.sort_unstable();
+    points.dedup();
+    Ok(points)
+}
+
+fn parse_quality(value: &str, segment: &str) -> Result<u8, String> {
+    value
+        .trim()
+        .parse::<u8>()
+        .map_err(|_| format!("quality {segment} must be an integer from 0 to 255"))
+}
+
 pub struct EmulationJob {
     candidate: Candidate,
     index: Option<usize>,

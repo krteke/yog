@@ -14,8 +14,7 @@ pub enum CandidateField {
     Preset,
     Multipass,
     EncodeDevice,
-    RangeStart,
-    RangeEnd,
+    QualityPoints,
 }
 
 impl CandidateField {
@@ -27,8 +26,7 @@ impl CandidateField {
             Self::Preset => "Preset",
             Self::Multipass => "Multipass",
             Self::EncodeDevice => "Encode device",
-            Self::RangeStart => "Range start",
-            Self::RangeEnd => "Range end",
+            Self::QualityPoints => "Quality points",
         }
     }
 }
@@ -50,12 +48,12 @@ impl CandidateDraft {
         Self { decoder, encoding }
     }
 
-    pub fn build(&self) -> Candidate {
-        Candidate {
+    pub fn build(&self) -> Result<Candidate, String> {
+        Ok(Candidate {
             decoding: self.decoder.backend(),
             encoding: self.encoding.build(),
-            qualities: self.encoding.qualities(),
-        }
+            qualities: self.encoding.qualities()?,
+        })
     }
 
     pub fn summary(&self) -> String {
@@ -69,7 +67,7 @@ impl CandidateDraft {
         if self.encoding.is_vaapi() {
             details.push(format!("Device {}", self.encoding.device(false)));
         }
-        details.push(self.encoding.range_label());
+        details.push(self.encoding.quality_points_label(false));
         details.join(" / ")
     }
 
@@ -87,7 +85,7 @@ impl CandidateDraft {
         if self.encoding.is_vaapi() {
             fields.push(CandidateField::EncodeDevice);
         }
-        fields.extend([CandidateField::RangeStart, CandidateField::RangeEnd]);
+        fields.push(CandidateField::QualityPoints);
         fields
     }
 
@@ -99,8 +97,7 @@ impl CandidateDraft {
             CandidateField::Preset => self.encoding.preset_label(),
             CandidateField::Multipass => self.encoding.multipass_label().to_owned(),
             CandidateField::EncodeDevice => self.encoding.device(editing),
-            CandidateField::RangeStart => self.encoding.range_start_label(),
-            CandidateField::RangeEnd => self.encoding.range_end_label(),
+            CandidateField::QualityPoints => self.encoding.quality_points_label(editing),
         }
     }
 
@@ -109,7 +106,9 @@ impl CandidateDraft {
             CandidateField::Decoder => {
                 self.decoder.adjust(direction);
             }
-            CandidateField::DecodeDevice | CandidateField::EncodeDevice => {}
+            CandidateField::DecodeDevice
+            | CandidateField::EncodeDevice
+            | CandidateField::QualityPoints => {}
             CandidateField::Encoder => {
                 self.encoding.adjust_encoder(direction);
             }
@@ -119,12 +118,6 @@ impl CandidateDraft {
             CandidateField::Multipass => {
                 self.encoding.adjust_multipass(direction);
             }
-            CandidateField::RangeStart => {
-                self.encoding.adjust_range_start(direction);
-            }
-            CandidateField::RangeEnd => {
-                self.encoding.adjust_range_end(direction);
-            }
         }
     }
 
@@ -132,6 +125,7 @@ impl CandidateDraft {
         match field {
             CandidateField::DecodeDevice => self.decoder.device_input(),
             CandidateField::EncodeDevice => self.encoding.device_input(),
+            CandidateField::QualityPoints => self.encoding.quality_points_input(),
             _ => unreachable!("candidate field does not support text editing"),
         }
     }
@@ -177,7 +171,11 @@ impl CandidateEditor {
                 KeyCode::Enter => {
                     if matches!(
                         self.focused(),
-                        Some(CandidateField::DecodeDevice | CandidateField::EncodeDevice)
+                        Some(
+                            CandidateField::DecodeDevice
+                                | CandidateField::EncodeDevice
+                                | CandidateField::QualityPoints
+                        )
                     ) {
                         let field = self.focused().unwrap();
                         let editing = self.editing.as_mut().unwrap();
@@ -373,18 +371,17 @@ mod tests {
         decoder: usize,
         encoder: usize,
         preset: usize,
-        range_start: u8,
-        range_end: u8,
+        quality_points: &str,
     ) -> CandidateDraft {
         CandidateDraft::new(
             DecoderDraft::new(decoder),
-            EncodingDraft::new(encoder, preset, range_start, range_start, range_end),
+            EncodingDraft::new(encoder, preset, 23, quality_points),
         )
     }
 
     #[test]
     fn candidates_are_saved_before_they_enter_the_list() {
-        let seed = draft(0, 1, 5, 18, 30);
+        let seed = draft(0, 1, 5, "18-30");
         let mut editor = CandidateEditor::new(Vec::new(), seed.clone());
         assert!(editor.candidates().is_empty());
 
@@ -410,14 +407,14 @@ mod tests {
 
     #[test]
     fn editing_an_existing_candidate_can_be_cancelled_or_saved() {
-        let seed = draft(0, 1, 5, 18, 30);
-        let mut editor = CandidateEditor::new(vec![seed], draft(0, 1, 5, 0, 51));
+        let seed = draft(0, 1, 5, "18-30");
+        let mut editor = CandidateEditor::new(vec![seed], draft(0, 1, 5, "0-51"));
 
         editor.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         editor.handle_key(key('l'));
         editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(matches!(
-            editor.candidates()[0].build().decoding,
+            editor.candidates()[0].build().unwrap().decoding,
             yog_core::ffmpeg::decoding::DecodingBackend::Software
         ));
 
@@ -425,30 +422,30 @@ mod tests {
         editor.handle_key(key('l'));
         editor.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(
-            editor.candidates()[0].build().decoding,
+            editor.candidates()[0].build().unwrap().decoding,
             yog_core::ffmpeg::decoding::DecodingBackend::Vaapi(None)
         ));
     }
 
     #[test]
-    fn nvenc_candidate_carries_its_independent_multipass_and_range() {
-        let mut draft = draft(2, 5, 3, 10, 30);
+    fn nvenc_candidate_carries_its_independent_multipass_and_quality_points() {
+        let mut draft = draft(2, 5, 3, "10,20,25-27");
         draft.encoding.adjust_multipass(-1);
 
-        let candidate = draft.build();
+        let candidate = draft.build().unwrap();
         assert!(matches!(
             candidate.decoding,
             yog_core::ffmpeg::decoding::DecodingBackend::Cuda(None)
         ));
         assert_eq!(candidate.encoding.preset().as_deref(), Some("p4"));
         assert_eq!(candidate.encoding.multipass(), Some("fullres"));
-        assert_eq!(candidate.qualities, (10..=30).collect::<Vec<_>>());
+        assert_eq!(candidate.qualities, vec![10, 20, 25, 26, 27]);
     }
 
     #[test]
     fn hardware_device_text_is_saved_with_the_candidate() {
-        let seed = draft(0, 1, 5, 18, 30);
-        let mut editor = CandidateEditor::new(vec![seed], draft(0, 1, 5, 0, 51));
+        let seed = draft(0, 1, 5, "18-30");
+        let mut editor = CandidateEditor::new(vec![seed], draft(0, 1, 5, "0-51"));
 
         editor.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         editor.handle_key(key('l'));
@@ -459,7 +456,7 @@ mod tests {
         editor.handle_key(key('s'));
 
         assert!(matches!(
-            editor.candidates()[0].build().decoding,
+            editor.candidates()[0].build().unwrap().decoding,
             yog_core::ffmpeg::decoding::DecodingBackend::Vaapi(Some(device)) if device == "0"
         ));
     }

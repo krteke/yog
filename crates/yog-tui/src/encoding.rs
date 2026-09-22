@@ -4,6 +4,7 @@ use yog_core::ffmpeg::{
     decoding::DecodingBackend,
     encoding::{DEFAULT_VAAPI_DEVICE, NvencMultipass, RateControl, VideoEncoding},
 };
+use yog_runtime::parse_quality_points;
 
 use crate::text_input::TextInput;
 
@@ -253,17 +254,19 @@ pub struct EncodingDraft {
     rate: RateMode,
     quality: u8,
     bitrate: TextInput,
-    range_start: u8,
-    range_end: u8,
+    quality_points: TextInput,
     device: TextInput,
 }
 
 impl EncodingDraft {
-    pub fn new(encoder: usize, preset: usize, quality: u8, range_start: u8, range_end: u8) -> Self {
+    pub fn new(
+        encoder: usize,
+        preset: usize,
+        quality: u8,
+        quality_points: impl Into<String>,
+    ) -> Self {
         let choice = ENCODERS[encoder];
         let range = choice.encoding().quality_range();
-        let range_start = range_start.clamp(*range.start(), *range.end());
-        let range_end = range_end.clamp(range_start, *range.end());
         Self {
             encoder,
             preset: preset.min(choice.preset_count().saturating_sub(1)),
@@ -271,8 +274,7 @@ impl EncodingDraft {
             rate: RateMode::Quality,
             quality: quality.clamp(*range.start(), *range.end()),
             bitrate: TextInput::default(),
-            range_start,
-            range_end,
+            quality_points: TextInput::new(quality_points),
             device: TextInput::new(DEFAULT_VAAPI_DEVICE),
         }
     }
@@ -334,33 +336,21 @@ impl EncodingDraft {
         MULTIPASS[self.multipass].0
     }
 
-    pub fn range_start_label(&self) -> String {
-        format!(
-            "{} {}",
-            self.encoder().encoding().quality_parameter(),
-            self.range_start
-        )
+    pub fn quality_points_label(&self, editing: bool) -> String {
+        let parameter = self.encoder().encoding().quality_parameter();
+        if self.quality_points.value().is_empty() && !editing {
+            format!("{parameter} all")
+        } else {
+            format!("{parameter} {}", self.quality_points.display(editing))
+        }
     }
 
-    pub fn range_end_label(&self) -> String {
-        format!(
-            "{} {}",
-            self.encoder().encoding().quality_parameter(),
-            self.range_end
-        )
+    pub fn quality_points_input(&mut self) -> &mut TextInput {
+        &mut self.quality_points
     }
 
-    pub fn range_label(&self) -> String {
-        format!(
-            "{} {}..={}",
-            self.encoder().encoding().quality_parameter(),
-            self.range_start,
-            self.range_end
-        )
-    }
-
-    pub fn qualities(&self) -> Vec<u8> {
-        (self.range_start..=self.range_end).collect()
+    pub fn qualities(&self) -> Result<Vec<u8>, String> {
+        parse_quality_points(self.quality_points.value())
     }
 
     pub fn device(&self, editing: bool) -> String {
@@ -378,8 +368,7 @@ impl EncodingDraft {
         self.multipass = 0;
         let range = encoder.encoding().quality_range();
         self.quality = self.quality.clamp(*range.start(), *range.end());
-        self.range_start = *range.start();
-        self.range_end = *range.end();
+        self.quality_points = TextInput::new(format!("{}-{}", range.start(), range.end()));
     }
 
     pub fn adjust_preset(&mut self, direction: isize) {
@@ -410,24 +399,6 @@ impl EncodingDraft {
 
     pub fn adjust_multipass(&mut self, direction: isize) {
         self.multipass = cycle(self.multipass, MULTIPASS.len(), direction);
-    }
-
-    pub fn adjust_range_start(&mut self, direction: isize) {
-        let minimum = *self.encoder().encoding().quality_range().start();
-        self.range_start = if direction < 0 {
-            self.range_start.saturating_sub(1).max(minimum)
-        } else {
-            self.range_start.saturating_add(1).min(self.range_end)
-        };
-    }
-
-    pub fn adjust_range_end(&mut self, direction: isize) {
-        let maximum = *self.encoder().encoding().quality_range().end();
-        self.range_end = if direction < 0 {
-            self.range_end.saturating_sub(1).max(self.range_start)
-        } else {
-            self.range_end.saturating_add(1).min(maximum)
-        };
     }
 
     pub fn build(&self) -> VideoEncoding {
@@ -476,7 +447,7 @@ mod tests {
 
     #[test]
     fn encoding_draft_builds_bitrate_and_nvenc_multipass() {
-        let mut draft = EncodingDraft::new(5, 3, 23, 10, 30);
+        let mut draft = EncodingDraft::new(5, 3, 23, "10-30");
         draft.rate = RateMode::Bitrate;
         draft.bitrate = TextInput::new("4000000");
         draft.adjust_multipass(-1);
@@ -494,7 +465,7 @@ mod tests {
     fn hardware_devices_reach_the_runtime_types() {
         let mut decoding = DecoderDraft::new(2);
         decoding.device = TextInput::new("1");
-        let mut encoding = EncodingDraft::new(11, 0, 23, 10, 30);
+        let mut encoding = EncodingDraft::new(11, 0, 23, "10-30");
         encoding.device = TextInput::new("/dev/dri/renderD129");
 
         assert!(matches!(
@@ -506,5 +477,12 @@ mod tests {
             VideoEncoding::Vaapi { device, .. }
                 if device == std::path::Path::new("/dev/dri/renderD129")
         ));
+    }
+
+    #[test]
+    fn encoding_draft_expands_discrete_quality_points() {
+        let encoding = EncodingDraft::new(1, 5, 23, "30,10-12,30");
+
+        assert_eq!(encoding.qualities().unwrap(), vec![10, 11, 12, 30]);
     }
 }

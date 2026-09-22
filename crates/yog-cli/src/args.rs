@@ -6,7 +6,7 @@ use yog_core::ffmpeg::{
     plan::{Container, TranscodeRequest, VideoAction},
     vmaf::VmafOptions,
 };
-use yog_runtime::{Candidate, Command, EmulationOptions, Operation, Options};
+use yog_runtime::{Candidate, Command, EmulationOptions, Operation, Options, parse_quality_points};
 
 use crate::decoding::DecodingArgs;
 
@@ -100,7 +100,7 @@ struct EmulateArgs {
 struct VideoArgs {
     /// e.g. --range=20,25,30-35
     #[arg(long, value_parser = parse_quality_points, global = true, value_name = "POINTS")]
-    range: Vec<QualityPoints>,
+    range: Vec<Vec<u8>>,
     #[command(subcommand)]
     encoding: Option<VideoEncoding>,
 }
@@ -122,7 +122,7 @@ fn parse_candidate(value: &str) -> Result<Candidate, String> {
     let decoding = decoding.parse::<DecodingBackend>()?;
     let mut encoding = encoding.parse::<VideoEncoding>()?;
     encoding.try_set_preset(preset)?;
-    let QualityPoints(qualities) = parse_quality_points(range)?;
+    let qualities = parse_quality_points(range)?;
 
     match (&mut encoding, multipass) {
         (VideoEncoding::Nvenc { multipass, .. }, Some(value)) => {
@@ -184,56 +184,6 @@ impl From<VmafMode> for VmafOptions {
     }
 }
 
-#[derive(Debug, Clone)]
-struct QualityPoints(Vec<u8>);
-
-impl QualityPoints {
-    fn empty() -> Self {
-        Self(Vec::new())
-    }
-}
-
-fn parse_quality_points(value: &str) -> Result<QualityPoints, String> {
-    if value.trim().is_empty() {
-        return Ok(QualityPoints::empty());
-    }
-
-    let mut points = Vec::with_capacity(64);
-
-    for segment in value.split(',') {
-        let segment = segment.trim();
-        if segment.is_empty() {
-            return Err("expected a quality value or range".to_owned());
-        }
-        match segment.split_once('-') {
-            Some((start, end)) => {
-                let start = parse_quality(start, segment)?;
-                let end = parse_quality(end, segment)?;
-                if start > end {
-                    return Err(format!("quality range {segment} must be ascending"));
-                }
-                points.extend(start..=end);
-            }
-            None => points.push(parse_quality(segment, segment)?),
-        }
-    }
-
-    Ok(QualityPoints(sorted(points)))
-}
-
-fn parse_quality(value: &str, segment: &str) -> Result<u8, String> {
-    value
-        .trim()
-        .parse::<u8>()
-        .map_err(|_| format!("quality {segment} must be an integer from 0 to 255"))
-}
-
-fn sorted(mut points: Vec<u8>) -> Vec<u8> {
-    points.sort_unstable();
-    points.dedup();
-    points
-}
-
 impl Args {
     pub(super) fn into_runtime(self) -> Result<(Option<PathBuf>, Command, Options), clap::Error> {
         let Self {
@@ -287,17 +237,14 @@ impl Args {
             }
             CliCommand::Emulate(args) => {
                 options.report = args.report;
+                let mut qualities = args.video.range.into_iter().flatten().collect::<Vec<_>>();
+                qualities.sort_unstable();
+                qualities.dedup();
                 (
                     Operation::Emulate(EmulationOptions {
                         png: args.png,
                         svg: args.svg,
-                        qualities: sorted(
-                            args.video
-                                .range
-                                .into_iter()
-                                .flat_map(|QualityPoints(points)| points)
-                                .collect(),
-                        ),
+                        qualities,
                         candidates: args.candidate,
                     }),
                     TranscodeRequest::new(input, PathBuf::new())

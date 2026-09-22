@@ -3,8 +3,8 @@ use yog_runtime::{RunOutcome, event::RunEvent};
 
 use crate::{
     file_picker::{FilePicker, PickerAction},
-    form::{FormAction, RunRequest, TranscodeForm},
-    run::{RunStage, RunState},
+    form::{CommandForm, FormAction, RunRequest},
+    run::{RunKind, RunStage, RunState},
 };
 
 pub enum AppAction {
@@ -16,7 +16,7 @@ pub enum AppAction {
 
 #[derive(Default)]
 pub struct App {
-    form: TranscodeForm,
+    form: CommandForm,
     picker: Option<FilePicker>,
     run: Option<RunState>,
     error: Option<String>,
@@ -75,7 +75,9 @@ impl App {
             }
             FormAction::Submit => match self.form.build_request() {
                 Ok(request) => {
-                    self.run = Some(RunState::new());
+                    self.run = Some(RunState::new(RunKind::from_operation(
+                        &request.command.operation,
+                    )));
                     AppAction::Start(Box::new(request))
                 }
                 Err(error) => {
@@ -86,7 +88,7 @@ impl App {
         }
     }
 
-    pub fn form(&self) -> &TranscodeForm {
+    pub fn form(&self) -> &CommandForm {
         &self.form
     }
 
@@ -141,7 +143,7 @@ mod tests {
     #[test]
     fn running_screen_cancels_once_then_returns_after_completion() {
         let mut app = App {
-            run: Some(RunState::new()),
+            run: Some(RunState::new(RunKind::Transcode)),
             ..App::default()
         };
 

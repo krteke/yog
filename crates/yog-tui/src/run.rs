@@ -4,13 +4,38 @@ use std::{
     time::{Duration, Instant},
 };
 
-use yog_core::ffmpeg::progress::Progress;
+use yog_core::ffmpeg::{prediction::Prediction, progress::Progress};
 use yog_runtime::{
-    RunOutcome, RunStatus,
+    Operation, RunOutcome, RunStatus,
     event::{RunEvent, RunPhase, TaskStatus, VmafOutcome},
 };
 
 const MAX_NOTICES: usize = 100;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunKind {
+    Transcode,
+    Predict,
+    Emulate,
+}
+
+impl RunKind {
+    pub fn from_operation(operation: &Operation) -> Self {
+        match operation {
+            Operation::Transcode => Self::Transcode,
+            Operation::Predict => Self::Predict,
+            Operation::Emulate(_) => Self::Emulate,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Transcode => "Transcode",
+            Self::Predict => "Predict",
+            Self::Emulate => "Emulate",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunStage {
@@ -31,7 +56,32 @@ pub struct Notice {
     pub text: String,
 }
 
+pub struct PredictionSummary {
+    pub vmaf: f64,
+    pub ssim: Option<f64>,
+    pub psnr_y_db: Option<f64>,
+    pub output_bytes: u64,
+    pub transcode_seconds: f64,
+    pub speed: f64,
+    pub samples: usize,
+}
+
+impl From<&Prediction> for PredictionSummary {
+    fn from(prediction: &Prediction) -> Self {
+        Self {
+            vmaf: prediction.quality.vmaf.value,
+            ssim: prediction.quality.ssim.map(|estimate| estimate.value),
+            psnr_y_db: prediction.quality.psnr_y_db.map(|estimate| estimate.value),
+            output_bytes: prediction.output_bytes.value,
+            transcode_seconds: prediction.transcode_seconds.value,
+            speed: prediction.speed.value,
+            samples: prediction.samples.len(),
+        }
+    }
+}
+
 pub struct RunState {
+    pub kind: RunKind,
     pub stage: RunStage,
     pub phase: Option<RunPhase>,
     pub input: Option<PathBuf>,
@@ -43,6 +93,7 @@ pub struct RunState {
     pub skipped: usize,
     pub duration: Option<Duration>,
     pub progress: Progress,
+    pub prediction: Option<PredictionSummary>,
     pub notices: VecDeque<Notice>,
     pub spinner: usize,
     started: Instant,
@@ -50,8 +101,9 @@ pub struct RunState {
 }
 
 impl RunState {
-    pub fn new() -> Self {
+    pub fn new(kind: RunKind) -> Self {
         Self {
+            kind,
             stage: RunStage::Running,
             phase: None,
             input: None,
@@ -63,6 +115,7 @@ impl RunState {
             skipped: 0,
             duration: None,
             progress: Progress::default(),
+            prediction: None,
             notices: VecDeque::new(),
             spinner: 0,
             started: Instant::now(),
@@ -101,14 +154,29 @@ impl RunState {
                 self.output = output;
                 self.duration = None;
                 self.progress = Progress::default();
+                self.prediction = None;
             }
             RunEvent::Progress { duration, progress } => {
                 self.duration = duration;
                 self.progress = progress;
             }
-            RunEvent::PredictionCompleted { .. }
-            | RunEvent::EmulationPointStarted { .. }
-            | RunEvent::EmulationPointFinished { .. } => {}
+            RunEvent::PredictionCompleted { input, prediction } => {
+                let summary = PredictionSummary::from(&prediction);
+                let name = input
+                    .file_name()
+                    .unwrap_or(input.as_os_str())
+                    .to_string_lossy();
+                self.push_notice(
+                    NoticeKind::Info,
+                    format!(
+                        "{name} · VMAF {:.2} · {}",
+                        summary.vmaf,
+                        format_bytes(summary.output_bytes)
+                    ),
+                );
+                self.prediction = Some(summary);
+            }
+            RunEvent::EmulationPointStarted { .. } | RunEvent::EmulationPointFinished { .. } => {}
             RunEvent::VmafFinished {
                 options, outcome, ..
             } => match outcome {
@@ -226,10 +294,11 @@ pub fn format_bytes(bytes: u64) -> String {
 mod tests {
     use super::*;
     use std::time::Duration;
+    use yog_core::ffmpeg::prediction::{Estimate, QualityPrediction};
 
     #[test]
     fn task_progress_combines_completed_tasks_with_the_current_task() {
-        let mut state = RunState::new();
+        let mut state = RunState::new(RunKind::Transcode);
         state.handle_event(RunEvent::TaskStarted {
             index: 2,
             total: 4,
@@ -249,7 +318,7 @@ mod tests {
 
     #[test]
     fn vmaf_failure_is_a_warning_and_does_not_fail_the_task() {
-        let mut state = RunState::new();
+        let mut state = RunState::new(RunKind::Transcode);
         state.handle_event(RunEvent::VmafFinished {
             output: "output.mkv".into(),
             options: Default::default(),
@@ -267,5 +336,50 @@ mod tests {
         assert_eq!(state.failed, 0);
         assert_eq!(state.notices.len(), 1);
         assert_eq!(state.notices[0].kind, NoticeKind::Warning);
+    }
+
+    #[test]
+    fn prediction_event_keeps_the_central_estimates_for_the_result_screen() {
+        let mut state = RunState::new(RunKind::Predict);
+        state.handle_event(RunEvent::PredictionCompleted {
+            input: "movie.mkv".into(),
+            prediction: Prediction {
+                source_bytes: 1_000,
+                source_duration_seconds: 60.0,
+                sampled_seconds: 10.0,
+                speed: estimate(2.5),
+                transcode_seconds: estimate(24.0),
+                output_bytes: Estimate {
+                    value: 838_860_800,
+                    low: 800_000_000,
+                    high: 900_000_000,
+                },
+                quality: QualityPrediction {
+                    frames: 240,
+                    vmaf: estimate(95.25),
+                    ssim: Some(estimate(0.9987)),
+                    psnr_y_db: Some(estimate(42.5)),
+                    source_stream_index: 0,
+                },
+                samples: Vec::new(),
+            },
+        });
+
+        let prediction = state.prediction.as_ref().unwrap();
+        assert_eq!(prediction.vmaf, 95.25);
+        assert_eq!(prediction.output_bytes, 838_860_800);
+        assert_eq!(prediction.transcode_seconds, 24.0);
+        assert_eq!(prediction.speed, 2.5);
+        assert_eq!(prediction.ssim, Some(0.9987));
+        assert_eq!(prediction.psnr_y_db, Some(42.5));
+        assert_eq!(state.notices[0].text, "movie.mkv · VMAF 95.25 · 800 MiB");
+    }
+
+    fn estimate<T: Copy>(value: T) -> Estimate<T> {
+        Estimate {
+            value,
+            low: value,
+            high: value,
+        }
     }
 }

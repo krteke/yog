@@ -16,6 +16,8 @@ use yog_runtime::{RunOutcome, event::RunEvent};
 use app::{App, AppAction};
 use form::RunRequest;
 
+use crate::ui::DrawApp;
+
 enum RuntimeMessage {
     Event(RunEvent),
     Finished(RunOutcome),
@@ -56,7 +58,7 @@ async fn run(terminal: &mut DefaultTerminal) -> io::Result<()> {
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
-        terminal.draw(|frame| ui::draw(frame, &app))?;
+        terminal.draw(|frame| frame.draw(&app))?;
 
         tokio::select! {
             event = events.next() => match event {

@@ -73,6 +73,21 @@ pub enum Field {
     Start,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Transcode,
+    Predict,
+}
+
+impl Mode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Transcode => "Transcode",
+            Self::Predict => "Predict",
+        }
+    }
+}
+
 pub enum FormAction {
     None,
     PickInput,
@@ -282,7 +297,8 @@ impl TextInput {
     }
 }
 
-pub struct TranscodeForm {
+pub struct CommandForm {
+    mode: Mode,
     input: Option<PathSelection>,
     output: TextInput,
     container: usize,
@@ -299,9 +315,10 @@ pub struct TranscodeForm {
     editing: Option<Field>,
 }
 
-impl Default for TranscodeForm {
+impl Default for CommandForm {
     fn default() -> Self {
         Self {
+            mode: Mode::Transcode,
             input: None,
             output: TextInput::default(),
             container: 0,
@@ -320,7 +337,7 @@ impl Default for TranscodeForm {
     }
 }
 
-impl TranscodeForm {
+impl CommandForm {
     pub fn handle_key(&mut self, key: KeyEvent) -> FormAction {
         if let Some(field) = self.editing {
             self.handle_text_key(field, key);
@@ -329,8 +346,9 @@ impl TranscodeForm {
 
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => return FormAction::Quit,
-            KeyCode::Char('j') | KeyCode::Down | KeyCode::Tab => self.move_focus(1),
-            KeyCode::Char('k') | KeyCode::Up | KeyCode::BackTab => self.move_focus(-1),
+            KeyCode::Tab | KeyCode::BackTab => self.switch_mode(),
+            KeyCode::Char('j') | KeyCode::Down => self.move_focus(1),
+            KeyCode::Char('k') | KeyCode::Up => self.move_focus(-1),
             KeyCode::Char('h') | KeyCode::Left => self.adjust(-1),
             KeyCode::Char('l') | KeyCode::Right => self.adjust(1),
             KeyCode::Char('g') => self.focus = 0,
@@ -346,6 +364,10 @@ impl TranscodeForm {
         self.input.as_ref()
     }
 
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
+
     pub fn set_input(&mut self, input: PathSelection) {
         self.input = Some(input);
     }
@@ -354,18 +376,21 @@ impl TranscodeForm {
         self.fields()[self.focus]
     }
 
-    pub fn source_fields(&self) -> &'static [Field] {
-        &[
-            Field::Input,
-            Field::Output,
-            Field::Container,
-            Field::Decoder,
-        ]
+    pub fn source_fields(&self) -> Vec<Field> {
+        let mut fields = vec![Field::Input];
+        if self.mode == Mode::Transcode {
+            fields.push(Field::Output);
+        }
+        fields.extend([Field::Container, Field::Decoder]);
+        fields
     }
 
     pub fn video_fields(&self) -> Vec<Field> {
-        let mut fields = vec![Field::Action];
-        if self.action == VideoAction::Encode {
+        let mut fields = Vec::new();
+        if self.mode == Mode::Transcode {
+            fields.push(Field::Action);
+        }
+        if self.mode == Mode::Predict || self.action == VideoAction::Encode {
             fields.push(Field::Encoder);
             if self.encoder().presets.len() > 0 {
                 fields.push(Field::Preset);
@@ -376,9 +401,12 @@ impl TranscodeForm {
     }
 
     pub fn option_fields(&self) -> Vec<Field> {
-        let mut fields = vec![Field::Overwrite, Field::Verify, Field::Vmaf];
-        if self.vmaf == VmafMode::Subsample {
-            fields.push(Field::VmafInterval);
+        let mut fields = Vec::new();
+        if self.mode == Mode::Transcode {
+            fields.extend([Field::Overwrite, Field::Verify, Field::Vmaf]);
+            if self.vmaf == VmafMode::Subsample {
+                fields.push(Field::VmafInterval);
+            }
         }
         fields.push(Field::Start);
         fields
@@ -439,7 +467,7 @@ impl TranscodeForm {
     }
 
     fn fields(&self) -> Vec<Field> {
-        let mut fields = self.source_fields().to_vec();
+        let mut fields = self.source_fields();
         fields.extend(self.video_fields());
         fields.extend(self.option_fields());
         fields
@@ -447,6 +475,14 @@ impl TranscodeForm {
 
     fn move_focus(&mut self, direction: isize) {
         self.focus = step(self.focus, self.fields().len(), direction);
+    }
+
+    fn switch_mode(&mut self) {
+        self.mode = match self.mode {
+            Mode::Transcode => Mode::Predict,
+            Mode::Predict => Mode::Transcode,
+        };
+        self.clamp_focus();
     }
 
     fn activate(&mut self) -> FormAction {
@@ -530,50 +566,48 @@ impl TranscodeForm {
             .input
             .as_ref()
             .ok_or_else(|| "Select an input file or directory".to_owned())?;
-        if self.output.value.is_empty() {
+        if self.mode == Mode::Transcode && self.output.value.is_empty() {
             return Err("Enter an output path".to_owned());
         }
 
-        let video = match self.action {
-            VideoAction::Copy => CoreVideoAction::Copy,
-            VideoAction::Encode => {
-                let encoder = self.encoder();
-                let mut encoding = encoder.encoding();
-                if encoder.presets.len() > 0 {
-                    encoding
-                        .try_set_preset(&encoder.presets.label(self.preset))
-                        .expect("TUI preset choices must be accepted by yog-core");
-                }
-                encoding.set_quality(self.quality);
-                CoreVideoAction::Encode(encoding)
-            }
+        let video = if self.mode == Mode::Transcode && self.action == VideoAction::Copy {
+            CoreVideoAction::Copy
+        } else {
+            CoreVideoAction::Encode(self.selected_encoding())
         };
         let decoding = DECODERS[self.decoder].backend();
-        let mut request = TranscodeRequest::new(input.path(), PathBuf::from(&self.output.value))
+        let output = match self.mode {
+            Mode::Transcode => PathBuf::from(&self.output.value),
+            Mode::Predict => PathBuf::new(),
+        };
+        let mut request = TranscodeRequest::new(input.path(), output)
             .with_decoding(decoding)
             .with_video(video)
-            .with_overwrite(self.overwrite);
+            .with_overwrite(self.mode == Mode::Transcode && self.overwrite);
         if let Some(container) = CONTAINERS[self.container] {
             request = request.with_container(container);
         }
 
         let command = Command {
             request,
-            operation: Operation::Transcode,
+            operation: match self.mode {
+                Mode::Transcode => Operation::Transcode,
+                Mode::Predict => Operation::Predict,
+            },
             recursive: input.recursive(),
         };
         command.validate().map_err(|error| format!("{error:#}"))?;
         let options = Options {
-            verify: self.verify,
-            vmaf: match self.vmaf {
-                VmafMode::Off => None,
-                VmafMode::Full => Some(VmafOptions::default()),
-                VmafMode::Subsample => Some(VmafOptions {
+            verify: self.mode == Mode::Transcode && self.verify,
+            vmaf: match (self.mode, self.vmaf) {
+                (Mode::Transcode, VmafMode::Full) => Some(VmafOptions::default()),
+                (Mode::Transcode, VmafMode::Subsample) => Some(VmafOptions {
                     n_subsample: Some(
                         NonZeroU32::new(self.vmaf_interval)
                             .expect("VMAF interval is always greater than zero"),
                     ),
                 }),
+                (Mode::Transcode, VmafMode::Off) | (Mode::Predict, _) => None,
             },
             terminal_output: false,
             ..Options::default()
@@ -619,6 +653,18 @@ impl TranscodeForm {
         self.focus = self.focus.min(self.fields().len() - 1);
     }
 
+    fn selected_encoding(&self) -> VideoEncoding {
+        let encoder = self.encoder();
+        let mut encoding = encoder.encoding();
+        if encoder.presets.len() > 0 {
+            encoding
+                .try_set_preset(&encoder.presets.label(self.preset))
+                .expect("TUI preset choices must be accepted by yog-core");
+        }
+        encoding.set_quality(self.quality);
+        encoding
+    }
+
     fn encoder(&self) -> Encoder {
         ENCODERS[self.encoder]
     }
@@ -654,7 +700,7 @@ mod tests {
 
     #[test]
     fn vim_navigation_moves_focus_and_changes_choices() {
-        let mut form = TranscodeForm::default();
+        let mut form = CommandForm::default();
         assert_eq!(form.focused(), Field::Input);
 
         form.handle_key(key('j'));
@@ -673,7 +719,7 @@ mod tests {
 
     #[test]
     fn output_editing_keeps_vim_keys_as_text_until_editing_ends() {
-        let mut form = TranscodeForm::default();
+        let mut form = CommandForm::default();
         form.handle_key(key('j'));
         form.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         form.handle_key(key('h'));
@@ -682,5 +728,22 @@ mod tests {
 
         assert_eq!(form.value(Field::Output), "hj");
         assert!(matches!(form.handle_key(key('q')), FormAction::Quit));
+    }
+
+    #[test]
+    fn predict_mode_removes_transcode_only_fields() {
+        let mut form = CommandForm::default();
+        form.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+        assert_eq!(form.mode(), Mode::Predict);
+        assert_eq!(
+            form.source_fields(),
+            vec![Field::Input, Field::Container, Field::Decoder]
+        );
+        assert!(!form.video_fields().contains(&Field::Action));
+        assert_eq!(form.option_fields(), vec![Field::Start]);
+
+        form.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(form.mode(), Mode::Transcode);
     }
 }

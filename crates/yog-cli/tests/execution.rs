@@ -2076,7 +2076,7 @@ esac"#,
         let mut command = fixture.command();
         command.env("TMPDIR", &temporary).arg("-O");
         if phase == "vmaf" {
-            command.args(["--vmaf", "--copy"]);
+            command.args(["--vmaf", "--copy", "--report", "report.jsonl"]);
         } else {
             command.args([
                 "--verify",
@@ -2136,6 +2136,12 @@ esac"#,
             expected,
             "{phase}"
         );
+        if phase == "vmaf" {
+            let records = read_report(&fixture, "report.jsonl");
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0]["transcode"]["status"], "success");
+            assert_eq!(records[0]["transcode"]["vmaf"]["error"], "cancelled");
+        }
         let pid = fs::read_to_string(fixture.0.join("child-pid")).unwrap();
         assert!(!PathBuf::from(format!("/proc/{pid}")).exists());
     };

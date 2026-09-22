@@ -281,6 +281,10 @@ async fn run_single(
         status: outcome.status(),
         error: outcome.error(),
     });
+    if matches!(outcome, TaskOutcome::Success) && transcoder.cancelled() {
+        diagnostics.cancelled();
+        return RunOutcome::Cancelled;
+    }
     finish(outcome, diagnostics)
 }
 

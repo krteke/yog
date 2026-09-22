@@ -212,7 +212,11 @@ fn read_entries(directory: &Path) -> io::Result<Vec<Entry>> {
     for entry in fs::read_dir(directory)? {
         let entry = entry?;
         let path = entry.path();
-        let file_type = fs::metadata(&path)?.file_type();
+        let file_type = match fs::metadata(&path) {
+            Ok(metadata) => metadata.file_type(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
         let kind = if file_type.is_dir() {
             EntryKind::Directory
         } else if file_type.is_file() {
@@ -312,5 +316,20 @@ mod tests {
         assert_eq!(picker.entries().len(), 1);
         assert!(picker.entries()[0].is_directory());
         assert_eq!(picker.selected(), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlink_does_not_make_its_directory_unreadable() {
+        use std::{ffi::OsStr, os::unix::fs::symlink};
+
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("video.mkv"), []).unwrap();
+        symlink(root.path().join("missing"), root.path().join("dangling")).unwrap();
+
+        let entries = read_entries(root.path()).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name(), OsStr::new("video.mkv"));
     }
 }

@@ -10,7 +10,7 @@ use crate::file_picker::FilePicker;
 
 const ACCENT: Color = Color::Rgb(125, 195, 255);
 
-pub(super) fn draw(frame: &mut Frame<'_>, area: Rect, picker: &FilePicker) {
+pub fn draw(frame: &mut Frame<'_>, area: Rect, picker: &FilePicker) {
     let area = popup_area(area);
     frame.render_widget(Clear, area);
 

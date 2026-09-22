@@ -13,21 +13,21 @@ enum EntryKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PathSelection {
+pub struct PathSelection {
     path: PathBuf,
     kind: EntryKind,
 }
 
 impl PathSelection {
-    pub(crate) fn path(&self) -> &Path {
+    pub fn path(&self) -> &Path {
         &self.path
     }
 
-    pub(crate) fn recursive(&self) -> bool {
+    pub fn recursive(&self) -> bool {
         self.kind == EntryKind::Directory
     }
 
-    pub(crate) fn display(&self) -> String {
+    pub fn display(&self) -> String {
         let mut value = self.path.display().to_string();
         if self.recursive() && !value.ends_with(std::path::MAIN_SEPARATOR) {
             value.push(std::path::MAIN_SEPARATOR);
@@ -37,29 +37,29 @@ impl PathSelection {
 }
 
 #[derive(Debug)]
-pub(crate) struct Entry {
+pub struct Entry {
     path: PathBuf,
     name: OsString,
     kind: EntryKind,
 }
 
 impl Entry {
-    pub(crate) fn name(&self) -> &OsString {
+    pub fn name(&self) -> &OsString {
         &self.name
     }
 
-    pub(crate) fn is_directory(&self) -> bool {
+    pub fn is_directory(&self) -> bool {
         self.kind == EntryKind::Directory
     }
 }
 
-pub(crate) enum PickerAction {
+pub enum PickerAction {
     None,
     Cancel,
     Confirm(PathSelection),
 }
 
-pub(crate) struct FilePicker {
+pub struct FilePicker {
     directory: PathBuf,
     entries: Vec<Entry>,
     cursor: usize,
@@ -68,7 +68,7 @@ pub(crate) struct FilePicker {
 }
 
 impl FilePicker {
-    pub(crate) fn open(current: Option<&PathSelection>) -> io::Result<Self> {
+    pub fn open(current: Option<&PathSelection>) -> io::Result<Self> {
         let directory = match current {
             Some(selection) => selection
                 .path()
@@ -93,7 +93,7 @@ impl FilePicker {
         })
     }
 
-    pub(crate) fn handle_key(&mut self, key: KeyEvent) -> PickerAction {
+    pub fn handle_key(&mut self, key: KeyEvent) -> PickerAction {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => PickerAction::Cancel,
             KeyCode::Char('j') | KeyCode::Down => {
@@ -129,23 +129,23 @@ impl FilePicker {
         }
     }
 
-    pub(crate) fn directory(&self) -> &Path {
+    pub fn directory(&self) -> &Path {
         &self.directory
     }
 
-    pub(crate) fn entries(&self) -> &[Entry] {
+    pub fn entries(&self) -> &[Entry] {
         &self.entries
     }
 
-    pub(crate) fn cursor(&self) -> usize {
+    pub fn cursor(&self) -> usize {
         self.cursor
     }
 
-    pub(crate) fn selected(&self) -> Option<usize> {
+    pub fn selected(&self) -> Option<usize> {
         self.selected
     }
 
-    pub(crate) fn error(&self) -> Option<&str> {
+    pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
     }
 

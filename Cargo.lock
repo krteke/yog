@@ -2668,6 +2668,7 @@ dependencies = [
  "ratatui",
  "tempfile",
  "tokio",
+ "tokio-util",
  "yog-cli",
  "yog-core",
  "yog-runtime",

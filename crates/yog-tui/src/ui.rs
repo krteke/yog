@@ -1,4 +1,5 @@
 mod picker;
+mod run;
 
 use ratatui::{
     Frame,
@@ -16,24 +17,19 @@ use crate::{
 const ACCENT: Color = Color::Rgb(125, 195, 255);
 const INACTIVE: Color = Color::DarkGray;
 
-pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
+pub fn draw(frame: &mut Frame<'_>, app: &App) {
     let area = frame.area();
     if area.width < 64 || area.height < 22 {
         render_too_small(frame, area);
         return;
     }
 
-    let shell = Block::new()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(ACCENT))
-        .title(Span::styled(
-            " yog ",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ))
-        .title(Line::from(" Transcode ").right_aligned());
-    let content = shell.inner(area);
-    frame.render_widget(shell, area);
+    if let Some(state) = app.run() {
+        run::draw(frame, area, state);
+        return;
+    }
+
+    let content = render_shell(frame, area, "Transcode");
 
     let form = app.form();
     let source = form.source_fields();
@@ -98,6 +94,14 @@ fn field_line(form: &TranscodeForm, field: Field, focused: bool) -> Line<'static
         value_style
     };
 
+    if field == Field::Start {
+        return Line::from(vec![
+            Span::styled(format!("{marker} "), marker_style),
+            Span::styled("[ Start ]", value_style),
+        ])
+        .alignment(Alignment::Center);
+    }
+
     Line::from(vec![
         Span::styled(format!(" {marker} "), marker_style),
         Span::styled(
@@ -126,11 +130,28 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, error: Option<&str>) {
         Span::raw(" Change    "),
         key("Enter"),
         Span::raw(" Select/Edit    "),
+        key("s"),
+        Span::raw(" Start    "),
         key("q"),
         Span::raw(" Quit"),
     ])
     .alignment(Alignment::Center);
     frame.render_widget(Paragraph::new(line), area);
+}
+
+pub fn render_shell(frame: &mut Frame<'_>, area: Rect, title: &str) -> Rect {
+    let shell = Block::new()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(ACCENT))
+        .title(Span::styled(
+            " yog ",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ))
+        .title(Line::from(format!(" {title} ")).right_aligned());
+    let content = shell.inner(area);
+    frame.render_widget(shell, area);
+    content
 }
 
 fn key(value: &'static str) -> Span<'static> {

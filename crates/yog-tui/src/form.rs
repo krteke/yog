@@ -1,5 +1,13 @@
+use std::{num::NonZeroU32, path::PathBuf};
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use yog_core::ffmpeg::{encoding::VideoEncoding, plan::Container};
+use yog_core::ffmpeg::{
+    decoding::DecodingBackend,
+    encoding::VideoEncoding,
+    plan::{Container, TranscodeRequest, VideoAction as CoreVideoAction},
+    vmaf::VmafOptions,
+};
+use yog_runtime::{Command, Config, Operation, Options, Validate};
 
 use crate::file_picker::PathSelection;
 
@@ -26,7 +34,12 @@ const CONTAINERS: &[Option<Container>] = &[
     Some(Container::Ogg),
     Some(Container::Ogv),
 ];
-const DECODERS: &[&str] = &["Software", "VAAPI", "CUDA", "QSV"];
+const DECODERS: &[DecoderChoice] = &[
+    DecoderChoice::Software,
+    DecoderChoice::Vaapi,
+    DecoderChoice::Cuda,
+    DecoderChoice::Qsv,
+];
 const X26X_PRESETS: &[&str] = &[
     "ultrafast",
     "superfast",
@@ -44,7 +57,7 @@ const QSV_PRESETS: &[&str] = &[
 const NVENC_PRESETS: &[&str] = &["p1", "p2", "p3", "p4", "p5", "p6", "p7"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Field {
+pub enum Field {
     Input,
     Output,
     Container,
@@ -57,12 +70,20 @@ pub(crate) enum Field {
     Verify,
     Vmaf,
     VmafInterval,
+    Start,
 }
 
-pub(crate) enum FormAction {
+pub enum FormAction {
     None,
     PickInput,
+    Submit,
     Quit,
+}
+
+pub struct RunRequest {
+    pub command: Command,
+    pub options: Options,
+    pub config: Config,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +97,34 @@ enum VmafMode {
     Off,
     Full,
     Subsample,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DecoderChoice {
+    Software,
+    Vaapi,
+    Cuda,
+    Qsv,
+}
+
+impl DecoderChoice {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Software => "Software",
+            Self::Vaapi => "VAAPI",
+            Self::Cuda => "CUDA",
+            Self::Qsv => "QSV",
+        }
+    }
+
+    fn backend(self) -> DecodingBackend {
+        match self {
+            Self::Software => DecodingBackend::Software,
+            Self::Vaapi => DecodingBackend::Vaapi(None),
+            Self::Cuda => DecodingBackend::Cuda(None),
+            Self::Qsv => DecodingBackend::Qsv(None),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -233,7 +282,7 @@ impl TextInput {
     }
 }
 
-pub(crate) struct TranscodeForm {
+pub struct TranscodeForm {
     input: Option<PathSelection>,
     output: TextInput,
     container: usize,
@@ -272,7 +321,7 @@ impl Default for TranscodeForm {
 }
 
 impl TranscodeForm {
-    pub(crate) fn handle_key(&mut self, key: KeyEvent) -> FormAction {
+    pub fn handle_key(&mut self, key: KeyEvent) -> FormAction {
         if let Some(field) = self.editing {
             self.handle_text_key(field, key);
             return FormAction::None;
@@ -286,25 +335,26 @@ impl TranscodeForm {
             KeyCode::Char('l') | KeyCode::Right => self.adjust(1),
             KeyCode::Char('g') => self.focus = 0,
             KeyCode::Char('G') => self.focus = self.fields().len() - 1,
+            KeyCode::Char('s') => return FormAction::Submit,
             KeyCode::Char(' ') | KeyCode::Enter => return self.activate(),
             _ => {}
         }
         FormAction::None
     }
 
-    pub(crate) fn input(&self) -> Option<&PathSelection> {
+    pub fn input(&self) -> Option<&PathSelection> {
         self.input.as_ref()
     }
 
-    pub(crate) fn set_input(&mut self, input: PathSelection) {
+    pub fn set_input(&mut self, input: PathSelection) {
         self.input = Some(input);
     }
 
-    pub(crate) fn focused(&self) -> Field {
+    pub fn focused(&self) -> Field {
         self.fields()[self.focus]
     }
 
-    pub(crate) fn source_fields(&self) -> &'static [Field] {
+    pub fn source_fields(&self) -> &'static [Field] {
         &[
             Field::Input,
             Field::Output,
@@ -313,7 +363,7 @@ impl TranscodeForm {
         ]
     }
 
-    pub(crate) fn video_fields(&self) -> Vec<Field> {
+    pub fn video_fields(&self) -> Vec<Field> {
         let mut fields = vec![Field::Action];
         if self.action == VideoAction::Encode {
             fields.push(Field::Encoder);
@@ -325,15 +375,16 @@ impl TranscodeForm {
         fields
     }
 
-    pub(crate) fn option_fields(&self) -> Vec<Field> {
+    pub fn option_fields(&self) -> Vec<Field> {
         let mut fields = vec![Field::Overwrite, Field::Verify, Field::Vmaf];
         if self.vmaf == VmafMode::Subsample {
             fields.push(Field::VmafInterval);
         }
+        fields.push(Field::Start);
         fields
     }
 
-    pub(crate) fn label(field: Field) -> &'static str {
+    pub fn label(field: Field) -> &'static str {
         match field {
             Field::Input => "Input",
             Field::Output => "Output",
@@ -347,10 +398,11 @@ impl TranscodeForm {
             Field::Verify => "Verify",
             Field::Vmaf => "VMAF",
             Field::VmafInterval => "N subsample",
+            Field::Start => "",
         }
     }
 
-    pub(crate) fn value(&self, field: Field) -> String {
+    pub fn value(&self, field: Field) -> String {
         match field {
             Field::Input => self
                 .input
@@ -358,7 +410,7 @@ impl TranscodeForm {
                 .map_or_else(|| "—".to_owned(), PathSelection::display),
             Field::Output => self.output.display(self.editing == Some(field)),
             Field::Container => container_label(CONTAINERS[self.container]),
-            Field::Decoder => DECODERS[self.decoder].to_owned(),
+            Field::Decoder => DECODERS[self.decoder].label().to_owned(),
             Field::Action => match self.action {
                 VideoAction::Copy => "Copy".to_owned(),
                 VideoAction::Encode => "Encode".to_owned(),
@@ -378,10 +430,11 @@ impl TranscodeForm {
                 VmafMode::Subsample => "Subsample".to_owned(),
             },
             Field::VmafInterval => self.vmaf_interval.to_string(),
+            Field::Start => "Start".to_owned(),
         }
     }
 
-    pub(crate) fn is_editing(&self, field: Field) -> bool {
+    pub fn is_editing(&self, field: Field) -> bool {
         self.editing == Some(field)
     }
 
@@ -405,6 +458,7 @@ impl TranscodeForm {
             }
             Field::Overwrite => self.overwrite = !self.overwrite,
             Field::Verify => self.verify = !self.verify,
+            Field::Start => return FormAction::Submit,
             _ => self.adjust(1),
         }
         FormAction::None
@@ -467,7 +521,70 @@ impl TranscodeForm {
                     self.vmaf_interval.saturating_add(1)
                 };
             }
+            Field::Start => {}
         }
+    }
+
+    pub fn build_request(&self) -> Result<RunRequest, String> {
+        let input = self
+            .input
+            .as_ref()
+            .ok_or_else(|| "Select an input file or directory".to_owned())?;
+        if self.output.value.is_empty() {
+            return Err("Enter an output path".to_owned());
+        }
+
+        let video = match self.action {
+            VideoAction::Copy => CoreVideoAction::Copy,
+            VideoAction::Encode => {
+                let encoder = self.encoder();
+                let mut encoding = encoder.encoding();
+                if encoder.presets.len() > 0 {
+                    encoding
+                        .try_set_preset(&encoder.presets.label(self.preset))
+                        .expect("TUI preset choices must be accepted by yog-core");
+                }
+                encoding.set_quality(self.quality);
+                CoreVideoAction::Encode(encoding)
+            }
+        };
+        let decoding = DECODERS[self.decoder].backend();
+        let mut request = TranscodeRequest::new(input.path(), PathBuf::from(&self.output.value))
+            .with_decoding(decoding)
+            .with_video(video)
+            .with_overwrite(self.overwrite);
+        if let Some(container) = CONTAINERS[self.container] {
+            request = request.with_container(container);
+        }
+
+        let command = Command {
+            request,
+            operation: Operation::Transcode,
+            recursive: input.recursive(),
+        };
+        command.validate().map_err(|error| format!("{error:#}"))?;
+        let options = Options {
+            verify: self.verify,
+            vmaf: match self.vmaf {
+                VmafMode::Off => None,
+                VmafMode::Full => Some(VmafOptions::default()),
+                VmafMode::Subsample => Some(VmafOptions {
+                    n_subsample: Some(
+                        NonZeroU32::new(self.vmaf_interval)
+                            .expect("VMAF interval is always greater than zero"),
+                    ),
+                }),
+            },
+            terminal_output: false,
+            ..Options::default()
+        };
+        let config = Config::load(None).map_err(|error| format!("{error:#}"))?;
+
+        Ok(RunRequest {
+            command,
+            options,
+            config,
+        })
     }
 
     fn handle_text_key(&mut self, field: Field, key: KeyEvent) {

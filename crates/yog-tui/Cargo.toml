@@ -11,7 +11,8 @@ yog-runtime.workspace = true
 crossterm = { workspace = true, features = ["event-stream"] }
 futures-util = { workspace = true, features = ["std"] }
 ratatui.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tokio-util = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -1,19 +1,29 @@
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use yog_runtime::{RunOutcome, event::RunEvent};
 
 use crate::{
     file_picker::{FilePicker, PickerAction},
-    form::{FormAction, TranscodeForm},
+    form::{FormAction, RunRequest, TranscodeForm},
+    run::{RunStage, RunState},
 };
 
+pub enum AppAction {
+    None,
+    Quit,
+    Start(Box<RunRequest>),
+    Cancel,
+}
+
 #[derive(Default)]
-pub(crate) struct App {
+pub struct App {
     form: TranscodeForm,
     picker: Option<FilePicker>,
+    run: Option<RunState>,
     error: Option<String>,
 }
 
 impl App {
-    pub(crate) fn handle_key(&mut self, key: KeyEvent) -> bool {
+    pub fn handle_key(&mut self, key: KeyEvent) -> AppAction {
         if let Some(picker) = &mut self.picker {
             match picker.handle_key(key) {
                 PickerAction::None => {}
@@ -23,32 +33,137 @@ impl App {
                     self.picker = None;
                 }
             }
-            return false;
+            return AppAction::None;
+        }
+
+        if let Some(run) = &mut self.run {
+            return match run.stage {
+                RunStage::Finished(_) => match key.code {
+                    KeyCode::Char('q') => AppAction::Quit,
+                    KeyCode::Enter | KeyCode::Esc => {
+                        self.run = None;
+                        AppAction::None
+                    }
+                    _ => AppAction::None,
+                },
+                RunStage::Running | RunStage::Cancelling
+                    if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
+                        || key.code == KeyCode::Char('c')
+                            && key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    if run.stage == RunStage::Running {
+                        run.request_cancel();
+                        AppAction::Cancel
+                    } else {
+                        AppAction::None
+                    }
+                }
+                RunStage::Running | RunStage::Cancelling => AppAction::None,
+            };
         }
 
         self.error = None;
         match self.form.handle_key(key) {
-            FormAction::None => false,
-            FormAction::Quit => true,
+            FormAction::None => AppAction::None,
+            FormAction::Quit => AppAction::Quit,
             FormAction::PickInput => {
                 match FilePicker::open(self.form.input()) {
                     Ok(picker) => self.picker = Some(picker),
                     Err(error) => self.error = Some(format!("Cannot open file picker: {error}")),
                 }
-                false
+                AppAction::None
             }
+            FormAction::Submit => match self.form.build_request() {
+                Ok(request) => {
+                    self.run = Some(RunState::new());
+                    AppAction::Start(Box::new(request))
+                }
+                Err(error) => {
+                    self.error = Some(error);
+                    AppAction::None
+                }
+            },
         }
     }
 
-    pub(crate) fn form(&self) -> &TranscodeForm {
+    pub fn form(&self) -> &TranscodeForm {
         &self.form
     }
 
-    pub(crate) fn picker(&self) -> Option<&FilePicker> {
+    pub fn picker(&self) -> Option<&FilePicker> {
         self.picker.as_ref()
     }
 
-    pub(crate) fn error(&self) -> Option<&str> {
+    pub fn run(&self) -> Option<&RunState> {
+        self.run.as_ref()
+    }
+
+    pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
+    }
+
+    pub fn handle_run_event(&mut self, event: RunEvent) {
+        self.run
+            .as_mut()
+            .expect("runtime events require an active run")
+            .handle_event(event);
+    }
+
+    pub fn finish_run(&mut self, outcome: RunOutcome) {
+        self.run
+            .as_mut()
+            .expect("runtime completion requires an active run")
+            .finish(outcome);
+    }
+
+    pub fn tick(&mut self) {
+        self.run
+            .as_mut()
+            .expect("animation ticks require an active run")
+            .tick();
+    }
+
+    pub fn is_animating(&self) -> bool {
+        self.run
+            .as_ref()
+            .is_some_and(|run| !matches!(run.stage, RunStage::Finished(_)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn running_screen_cancels_once_then_returns_after_completion() {
+        let mut app = App {
+            run: Some(RunState::new()),
+            ..App::default()
+        };
+
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Char('q'))),
+            AppAction::Cancel
+        ));
+        assert_eq!(app.run().unwrap().stage, RunStage::Cancelling);
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Char('q'))),
+            AppAction::None
+        ));
+
+        app.finish_run(RunOutcome::Cancelled);
+        assert_eq!(
+            app.run().unwrap().stage,
+            RunStage::Finished(yog_runtime::RunStatus::Cancelled)
+        );
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter)),
+            AppAction::None
+        ));
+        assert!(app.run().is_none());
     }
 }

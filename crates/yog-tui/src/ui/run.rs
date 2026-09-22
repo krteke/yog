@@ -23,6 +23,7 @@ pub trait DrawRuning {
     fn render_status(&mut self, area: Rect, state: &RunState);
     fn render_progress(&mut self, area: Rect, state: &RunState);
     fn render_prediction(&mut self, area: Rect, state: &RunState);
+    fn render_emulation(&mut self, area: Rect, state: &RunState);
     fn render_tasks(&mut self, area: Rect, state: &RunState);
     fn render_notices(&mut self, area: Rect, state: &RunState);
     fn render_footer_run(&mut self, area: Rect, stage: RunStage);
@@ -31,10 +32,22 @@ pub trait DrawRuning {
 impl DrawRuning for Frame<'_> {
     fn draw_run(&mut self, area: Rect, state: &RunState) {
         let content = self.render_shell(area, state.kind.label());
+        let status = match state.kind {
+            RunKind::Transcode => 5,
+            RunKind::Predict => 4,
+            RunKind::Emulate => {
+                4 + state.chart_png.iter().chain(state.chart_svg.iter()).count() as u16
+            }
+        };
+        let details = if matches!(state.kind, RunKind::Predict | RunKind::Emulate) {
+            4
+        } else {
+            0
+        };
         let rows = Layout::vertical([
-            Constraint::Length(5),
+            Constraint::Length(status),
             Constraint::Length(4),
-            Constraint::Length(if state.kind == RunKind::Predict { 4 } else { 0 }),
+            Constraint::Length(details),
             Constraint::Length(3),
             Constraint::Min(3),
             Constraint::Length(1),
@@ -45,6 +58,8 @@ impl DrawRuning for Frame<'_> {
         self.render_progress(rows[1], state);
         if state.kind == RunKind::Predict {
             self.render_prediction(rows[2], state);
+        } else if state.kind == RunKind::Emulate {
+            self.render_emulation(rows[2], state);
         }
         self.render_tasks(rows[3], state);
         self.render_notices(rows[4], state);
@@ -87,6 +102,13 @@ impl DrawRuning for Frame<'_> {
         ];
         if state.kind == RunKind::Transcode {
             lines.push(path_line("Output", output));
+        } else if state.kind == RunKind::Emulate {
+            if let Some(path) = &state.chart_png {
+                lines.push(path_line("PNG", path.display().to_string()));
+            }
+            if let Some(path) = &state.chart_svg {
+                lines.push(path_line("SVG", path.display().to_string()));
+            }
         }
         self.render_widget(Paragraph::new(lines), content);
     }
@@ -98,10 +120,12 @@ impl DrawRuning for Frame<'_> {
         let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(content);
 
         let ratio = state.progress_ratio();
-        let task = if state.task_index == 0 {
-            "Waiting".to_owned()
-        } else {
-            format!("Task {}/{}", state.task_index, state.task_total)
+        let task = match (state.kind, state.emulation.as_ref(), state.task_index) {
+            (RunKind::Emulate, Some(emulation), _) => {
+                format!("Point {}/{}", emulation.index, emulation.total)
+            }
+            (_, _, 0) => "Waiting".to_owned(),
+            _ => format!("Task {}/{}", state.task_index, state.task_total),
         };
         self.render_widget(
             Gauge::default()
@@ -112,6 +136,12 @@ impl DrawRuning for Frame<'_> {
         );
 
         let mut metrics = vec![format!("Elapsed {}", format_duration(state.elapsed()))];
+        if let Some(emulation) = &state.emulation {
+            metrics.push(format!("{} {}", emulation.parameter, emulation.quality));
+            if let Some(candidate) = emulation.candidate {
+                metrics.push(format!("Candidate #{candidate}"));
+            }
+        }
         if let Some(time) = state.progress.out_time_us {
             metrics.push(format!(
                 "Processed {}",
@@ -136,6 +166,45 @@ impl DrawRuning for Frame<'_> {
     }
 
     fn render_tasks(&mut self, area: Rect, state: &RunState) {
+        if state.kind == RunKind::Emulate {
+            let block = section(" Points ", Color::DarkGray);
+            let content = block.inner(area);
+            self.render_widget(block, area);
+            let (succeeded, failed, remaining) =
+                state.emulation.as_ref().map_or((0, 0, 0), |emulation| {
+                    (
+                        emulation.succeeded,
+                        emulation.failed,
+                        emulation.total.saturating_sub(emulation.completed),
+                    )
+                });
+            self.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(
+                        format!("{succeeded} succeeded"),
+                        Style::default().fg(Color::Green),
+                    ),
+                    Span::raw("    "),
+                    Span::styled(
+                        format!("{failed} failed"),
+                        Style::default().fg(if failed == 0 {
+                            Color::DarkGray
+                        } else {
+                            Color::LightRed
+                        }),
+                    ),
+                    Span::raw("    "),
+                    Span::styled(
+                        format!("{remaining} remaining"),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]))
+                .alignment(Alignment::Center),
+                content,
+            );
+            return;
+        }
+
         let block = section(" Tasks ", Color::DarkGray);
         let content = block.inner(area);
         self.render_widget(block, area);
@@ -205,6 +274,49 @@ impl DrawRuning for Frame<'_> {
             Paragraph::new(vec![
                 Line::from(quality.join("  ·  ")).alignment(Alignment::Center),
                 Line::from(estimate).alignment(Alignment::Center),
+            ]),
+            content,
+        );
+    }
+
+    fn render_emulation(&mut self, area: Rect, state: &RunState) {
+        let block = section(" Emulation ", ACCENT);
+        let content = block.inner(area);
+        self.render_widget(block, area);
+
+        let Some(emulation) = &state.emulation else {
+            self.render_widget(
+                Paragraph::new("Waiting for first point")
+                    .alignment(Alignment::Center)
+                    .style(Style::default().fg(Color::DarkGray)),
+                content,
+            );
+            return;
+        };
+
+        let label = emulation.candidate.map_or_else(
+            || emulation.label.clone(),
+            |candidate| format!("Candidate #{candidate} · {}", emulation.label),
+        );
+        let result = match (emulation.vmaf, emulation.output_bytes) {
+            (Some(vmaf), Some(bytes)) => format!(
+                "{} {}  ·  VMAF {vmaf:.2}  ·  {}",
+                emulation.parameter,
+                emulation.quality,
+                format_bytes(bytes)
+            ),
+            _ if emulation.completed == emulation.index => {
+                format!("{} {}  ·  Failed", emulation.parameter, emulation.quality)
+            }
+            _ => format!(
+                "{} {}  ·  Predicting...",
+                emulation.parameter, emulation.quality
+            ),
+        };
+        self.render_widget(
+            Paragraph::new(vec![
+                Line::from(label).alignment(Alignment::Center),
+                Line::from(result).alignment(Alignment::Center),
             ]),
             content,
         );

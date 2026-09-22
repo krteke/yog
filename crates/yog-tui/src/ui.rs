@@ -92,6 +92,8 @@ impl DrawApp for Frame<'_> {
                 tab("Transcode", mode == Mode::Transcode),
                 Span::raw("  "),
                 tab("Predict", mode == Mode::Predict),
+                Span::raw("  "),
+                tab("Emulate", mode == Mode::Emulate),
             ]))
             .alignment(Alignment::Center),
             area,

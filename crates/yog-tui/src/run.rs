@@ -66,6 +66,20 @@ pub struct PredictionSummary {
     pub samples: usize,
 }
 
+pub struct EmulationState {
+    pub index: usize,
+    pub total: usize,
+    pub candidate: Option<usize>,
+    pub label: String,
+    pub parameter: &'static str,
+    pub quality: u8,
+    pub completed: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub vmaf: Option<f64>,
+    pub output_bytes: Option<u64>,
+}
+
 impl From<&Prediction> for PredictionSummary {
     fn from(prediction: &Prediction) -> Self {
         Self {
@@ -82,6 +96,8 @@ impl From<&Prediction> for PredictionSummary {
 
 pub struct RunState {
     pub kind: RunKind,
+    pub chart_png: Option<PathBuf>,
+    pub chart_svg: Option<PathBuf>,
     pub stage: RunStage,
     pub phase: Option<RunPhase>,
     pub input: Option<PathBuf>,
@@ -94,6 +110,7 @@ pub struct RunState {
     pub duration: Option<Duration>,
     pub progress: Progress,
     pub prediction: Option<PredictionSummary>,
+    pub emulation: Option<EmulationState>,
     pub notices: VecDeque<Notice>,
     pub spinner: usize,
     started: Instant,
@@ -101,9 +118,15 @@ pub struct RunState {
 }
 
 impl RunState {
-    pub fn new(kind: RunKind) -> Self {
+    pub fn new(operation: &Operation) -> Self {
+        let (chart_png, chart_svg) = match operation {
+            Operation::Emulate(options) => (options.png.clone(), options.svg.clone()),
+            Operation::Transcode | Operation::Predict => (None, None),
+        };
         Self {
-            kind,
+            kind: RunKind::from_operation(operation),
+            chart_png,
+            chart_svg,
             stage: RunStage::Running,
             phase: None,
             input: None,
@@ -116,6 +139,7 @@ impl RunState {
             duration: None,
             progress: Progress::default(),
             prediction: None,
+            emulation: None,
             notices: VecDeque::new(),
             spinner: 0,
             started: Instant::now(),
@@ -155,6 +179,7 @@ impl RunState {
                 self.duration = None;
                 self.progress = Progress::default();
                 self.prediction = None;
+                self.emulation = None;
             }
             RunEvent::Progress { duration, progress } => {
                 self.duration = duration;
@@ -176,7 +201,67 @@ impl RunState {
                 );
                 self.prediction = Some(summary);
             }
-            RunEvent::EmulationPointStarted { .. } | RunEvent::EmulationPointFinished { .. } => {}
+            RunEvent::EmulationPointStarted {
+                index,
+                total,
+                candidate,
+                label,
+                parameter,
+                quality,
+            } => {
+                let (completed, succeeded, failed) =
+                    self.emulation.as_ref().map_or((0, 0, 0), |state| {
+                        (state.completed, state.succeeded, state.failed)
+                    });
+                self.emulation = Some(EmulationState {
+                    index,
+                    total,
+                    candidate,
+                    label,
+                    parameter,
+                    quality,
+                    completed,
+                    succeeded,
+                    failed,
+                    vmaf: None,
+                    output_bytes: None,
+                });
+            }
+            RunEvent::EmulationPointFinished {
+                index,
+                total,
+                candidate,
+                quality,
+                status,
+                vmaf,
+                output_bytes,
+                error,
+            } => {
+                let state = self
+                    .emulation
+                    .as_mut()
+                    .expect("an emulation point must start before it finishes");
+                debug_assert_eq!(state.index, index);
+                debug_assert_eq!(state.total, total);
+                debug_assert_eq!(state.candidate, candidate);
+                debug_assert_eq!(state.quality, quality);
+                match status {
+                    TaskStatus::Success => {
+                        state.completed = index;
+                        state.succeeded += 1;
+                        state.vmaf = vmaf;
+                        state.output_bytes = output_bytes;
+                    }
+                    TaskStatus::Failure => {
+                        state.completed = index;
+                        state.failed += 1;
+                        if let Some(error) = error {
+                            self.push_notice(NoticeKind::Error, error);
+                        }
+                    }
+                    TaskStatus::Cancelled => {}
+                }
+            }
             RunEvent::VmafFinished {
                 options, outcome, ..
             } => match outcome {
@@ -246,6 +331,12 @@ impl RunState {
         if self.stage == RunStage::Finished(RunStatus::Success) {
             return 1.0;
         }
+        if self.kind == RunKind::Emulate {
+            return self
+                .emulation
+                .as_ref()
+                .map_or(0.0, |state| state.completed as f64 / state.total as f64);
+        }
         if self.task_index == 0 || self.task_total == 0 {
             return 0.0;
         }
@@ -298,7 +389,7 @@ mod tests {
 
     #[test]
     fn task_progress_combines_completed_tasks_with_the_current_task() {
-        let mut state = RunState::new(RunKind::Transcode);
+        let mut state = RunState::new(&Operation::Transcode);
         state.handle_event(RunEvent::TaskStarted {
             index: 2,
             total: 4,
@@ -318,7 +409,7 @@ mod tests {
 
     #[test]
     fn vmaf_failure_is_a_warning_and_does_not_fail_the_task() {
-        let mut state = RunState::new(RunKind::Transcode);
+        let mut state = RunState::new(&Operation::Transcode);
         state.handle_event(RunEvent::VmafFinished {
             output: "output.mkv".into(),
             options: Default::default(),
@@ -340,7 +431,7 @@ mod tests {
 
     #[test]
     fn prediction_event_keeps_the_central_estimates_for_the_result_screen() {
-        let mut state = RunState::new(RunKind::Predict);
+        let mut state = RunState::new(&Operation::Predict);
         state.handle_event(RunEvent::PredictionCompleted {
             input: "movie.mkv".into(),
             prediction: Prediction {
@@ -373,6 +464,62 @@ mod tests {
         assert_eq!(prediction.ssim, Some(0.9987));
         assert_eq!(prediction.psnr_y_db, Some(42.5));
         assert_eq!(state.notices[0].text, "movie.mkv · VMAF 95.25 · 800 MiB");
+    }
+
+    #[test]
+    fn emulation_progress_counts_completed_successes_and_failures() {
+        let mut state = RunState::new(&Operation::Emulate(yog_runtime::EmulationOptions {
+            png: Some("chart.png".into()),
+            svg: None,
+            qualities: vec![20, 21],
+            candidates: Vec::new(),
+        }));
+        state.handle_event(RunEvent::EmulationPointStarted {
+            index: 1,
+            total: 2,
+            candidate: None,
+            label: "x265 / Software / Preset medium".to_owned(),
+            parameter: "CRF",
+            quality: 20,
+        });
+        state.handle_event(RunEvent::EmulationPointFinished {
+            index: 1,
+            total: 2,
+            candidate: None,
+            quality: 20,
+            status: TaskStatus::Success,
+            vmaf: Some(95.5),
+            output_bytes: Some(838_860_800),
+            error: None,
+        });
+
+        assert_eq!(state.progress_ratio(), 0.5);
+        assert_eq!(state.emulation.as_ref().unwrap().succeeded, 1);
+        assert_eq!(state.emulation.as_ref().unwrap().vmaf, Some(95.5));
+
+        state.handle_event(RunEvent::EmulationPointStarted {
+            index: 2,
+            total: 2,
+            candidate: None,
+            label: "x265 / Software / Preset medium".to_owned(),
+            parameter: "CRF",
+            quality: 21,
+        });
+        state.handle_event(RunEvent::EmulationPointFinished {
+            index: 2,
+            total: 2,
+            candidate: None,
+            quality: 21,
+            status: TaskStatus::Failure,
+            vmaf: None,
+            output_bytes: None,
+            error: Some("prediction failed".to_owned()),
+        });
+
+        assert_eq!(state.progress_ratio(), 1.0);
+        assert_eq!(state.emulation.as_ref().unwrap().succeeded, 1);
+        assert_eq!(state.emulation.as_ref().unwrap().failed, 1);
+        assert_eq!(state.notices[0].text, "prediction failed");
     }
 
     fn estimate<T: Copy>(value: T) -> Estimate<T> {

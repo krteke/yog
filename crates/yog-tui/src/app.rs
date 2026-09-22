@@ -4,7 +4,7 @@ use yog_runtime::{RunOutcome, event::RunEvent};
 use crate::{
     file_picker::{FilePicker, PickerAction},
     form::{CommandForm, FormAction, RunRequest},
-    run::{RunKind, RunStage, RunState},
+    run::{RunStage, RunState},
 };
 
 pub enum AppAction {
@@ -75,9 +75,7 @@ impl App {
             }
             FormAction::Submit => match self.form.build_request() {
                 Ok(request) => {
-                    self.run = Some(RunState::new(RunKind::from_operation(
-                        &request.command.operation,
-                    )));
+                    self.run = Some(RunState::new(&request.command.operation));
                     AppAction::Start(Box::new(request))
                 }
                 Err(error) => {
@@ -143,7 +141,7 @@ mod tests {
     #[test]
     fn running_screen_cancels_once_then_returns_after_completion() {
         let mut app = App {
-            run: Some(RunState::new(RunKind::Transcode)),
+            run: Some(RunState::new(&yog_runtime::Operation::Transcode)),
             ..App::default()
         };
 

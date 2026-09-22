@@ -2,7 +2,6 @@ use std::{num::NonZeroU32, path::PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use yog_core::ffmpeg::{
-    encoding::VideoEncoding,
     plan::{Container, TranscodeRequest, VideoAction as CoreVideoAction},
     vmaf::VmafOptions,
 };
@@ -10,8 +9,9 @@ use yog_runtime::{Command, Config, EmulationOptions, Operation, Options, Validat
 
 use crate::{
     candidate::{CandidateDraft, CandidateEditor},
-    encoding::{DECODERS, ENCODERS, EncoderChoice, cycle},
+    encoding::{DecoderDraft, EncodingDraft, RateMode, cycle},
     file_picker::PathSelection,
+    text_input::TextInput,
 };
 
 const CONTAINERS: &[Option<Container>] = &[
@@ -43,13 +43,19 @@ pub enum Field {
     Output,
     Png,
     Svg,
+    Report,
     Container,
     Decoder,
+    DecodeDevice,
     Action,
     Candidates,
     Encoder,
     Preset,
+    Rate,
     Quality,
+    Bitrate,
+    Multipass,
+    EncodeDevice,
     RangeStart,
     RangeEnd,
     Overwrite,
@@ -103,77 +109,17 @@ enum VmafMode {
     Subsample,
 }
 
-#[derive(Debug, Default)]
-struct TextInput {
-    value: String,
-    cursor: usize,
-}
-
-impl TextInput {
-    fn begin(&mut self) {
-        self.cursor = self.value.len();
-    }
-
-    fn insert(&mut self, value: char) {
-        self.value.insert(self.cursor, value);
-        self.cursor += value.len_utf8();
-    }
-
-    fn backspace(&mut self) {
-        let Some((index, _)) = self.value[..self.cursor].char_indices().next_back() else {
-            return;
-        };
-        self.value.remove(index);
-        self.cursor = index;
-    }
-
-    fn delete(&mut self) {
-        if self.cursor < self.value.len() {
-            self.value.remove(self.cursor);
-        }
-    }
-
-    fn move_left(&mut self) {
-        if let Some((index, _)) = self.value[..self.cursor].char_indices().next_back() {
-            self.cursor = index;
-        }
-    }
-
-    fn move_right(&mut self) {
-        if let Some(value) = self.value[self.cursor..].chars().next() {
-            self.cursor += value.len_utf8();
-        }
-    }
-
-    fn display(&self, editing: bool) -> String {
-        if !editing {
-            return if self.value.is_empty() {
-                "—".to_owned()
-            } else {
-                self.value.clone()
-            };
-        }
-
-        let mut value = self.value.clone();
-        value.insert(self.cursor, '│');
-        value
-    }
-}
-
 pub struct CommandForm {
     mode: Mode,
     input: Option<PathSelection>,
     output: TextInput,
     png: TextInput,
     svg: TextInput,
+    report: TextInput,
     container: usize,
-    decoder: usize,
+    decoder: DecoderDraft,
     action: VideoAction,
-    encoder: usize,
-    preset: usize,
-    quality: u8,
-    range_start: u8,
-    range_end: u8,
+    encoding: EncodingDraft,
     candidates: Vec<CandidateDraft>,
     overwrite: bool,
     verify: bool,
@@ -185,21 +131,18 @@ pub struct CommandForm {
 
 impl Default for CommandForm {
     fn default() -> Self {
-        let range = ENCODERS[1].encoding().quality_range();
+        let encoding = EncodingDraft::new(1, 5, 23, 0, 51);
         Self {
             mode: Mode::Transcode,
             input: None,
             output: TextInput::default(),
             png: TextInput::default(),
             svg: TextInput::default(),
+            report: TextInput::default(),
             container: 0,
-            decoder: 0,
+            decoder: DecoderDraft::new(0),
             action: VideoAction::Encode,
-            encoder: 1,
-            preset: 5,
-            quality: 23,
-            range_start: *range.start(),
-            range_end: *range.end(),
+            encoding,
             candidates: Vec::new(),
             overwrite: false,
             verify: false,
@@ -250,13 +193,7 @@ impl CommandForm {
     pub fn candidate_editor(&self) -> CandidateEditor {
         CandidateEditor::new(
             self.candidates.clone(),
-            CandidateDraft::new(
-                self.decoder,
-                self.encoder,
-                self.preset,
-                self.range_start,
-                self.range_end,
-            ),
+            CandidateDraft::new(self.decoder.clone(), self.encoding.clone()),
         )
     }
 
@@ -281,6 +218,9 @@ impl CommandForm {
         fields.push(Field::Container);
         if self.mode != Mode::Emulate || self.candidates.is_empty() {
             fields.push(Field::Decoder);
+            if self.decoder.has_device() {
+                fields.push(Field::DecodeDevice);
+            }
         }
         fields
     }
@@ -298,13 +238,24 @@ impl CommandForm {
         }
         if self.mode != Mode::Transcode || self.action == VideoAction::Encode {
             fields.push(Field::Encoder);
-            if self.encoder().preset_count() > 0 {
+            if self.encoding.preset_count() > 0 {
                 fields.push(Field::Preset);
+            }
+            if self.encoding.is_nvenc() {
+                fields.push(Field::Multipass);
+            }
+            if self.encoding.is_vaapi() {
+                fields.push(Field::EncodeDevice);
             }
             if self.mode == Mode::Emulate {
                 fields.extend([Field::RangeStart, Field::RangeEnd]);
             } else {
-                fields.push(Field::Quality);
+                fields.push(Field::Rate);
+                match self.encoding.rate() {
+                    RateMode::Default => {}
+                    RateMode::Quality => fields.push(Field::Quality),
+                    RateMode::Bitrate => fields.push(Field::Bitrate),
+                }
             }
         }
         fields
@@ -320,6 +271,7 @@ impl CommandForm {
         } else if self.mode == Mode::Emulate {
             fields.extend([Field::Png, Field::Svg, Field::Overwrite]);
         }
+        fields.push(Field::Report);
         fields.push(Field::Start);
         fields
     }
@@ -330,13 +282,19 @@ impl CommandForm {
             Field::Output => "Output",
             Field::Png => "PNG",
             Field::Svg => "SVG",
+            Field::Report => "Report",
             Field::Container => "Container",
             Field::Decoder => "Decoder",
+            Field::DecodeDevice => "Decode device",
             Field::Action => "Video",
             Field::Candidates => "Candidates",
             Field::Encoder => "Encoder",
             Field::Preset => "Preset",
+            Field::Rate => "Rate control",
             Field::Quality => "Quality",
+            Field::Bitrate => "Bitrate",
+            Field::Multipass => "Multipass",
+            Field::EncodeDevice => "Encode device",
             Field::RangeStart => "Range start",
             Field::RangeEnd => "Range end",
             Field::Overwrite => "Overwrite",
@@ -356,8 +314,10 @@ impl CommandForm {
             Field::Output => self.output.display(self.editing == Some(field)),
             Field::Png => self.png.display(self.editing == Some(field)),
             Field::Svg => self.svg.display(self.editing == Some(field)),
+            Field::Report => self.report.display(self.editing == Some(field)),
             Field::Container => container_label(CONTAINERS[self.container]),
-            Field::Decoder => DECODERS[self.decoder].label().to_owned(),
+            Field::Decoder => self.decoder.label().to_owned(),
+            Field::DecodeDevice => self.decoder.device(self.editing == Some(field)),
             Field::Action => match self.action {
                 VideoAction::Copy => "Copy".to_owned(),
                 VideoAction::Encode => "Encode".to_owned(),
@@ -369,23 +329,15 @@ impl CommandForm {
                     format!("{} configured", self.candidates.len())
                 }
             }
-            Field::Encoder => self.encoder().label(),
-            Field::Preset => self.encoder().preset_label(self.preset),
-            Field::Quality => format!(
-                "{} {}",
-                self.encoder().encoding().quality_parameter(),
-                self.quality
-            ),
-            Field::RangeStart => format!(
-                "{} {}",
-                self.encoder().encoding().quality_parameter(),
-                self.range_start
-            ),
-            Field::RangeEnd => format!(
-                "{} {}",
-                self.encoder().encoding().quality_parameter(),
-                self.range_end
-            ),
+            Field::Encoder => self.encoding.encoder_label(),
+            Field::Preset => self.encoding.preset_label(),
+            Field::Rate => self.encoding.rate_label().to_owned(),
+            Field::Quality => self.encoding.quality_label(),
+            Field::Bitrate => self.encoding.bitrate(self.editing == Some(field)),
+            Field::Multipass => self.encoding.multipass_label().to_owned(),
+            Field::EncodeDevice => self.encoding.device(self.editing == Some(field)),
+            Field::RangeStart => self.encoding.range_start_label(),
+            Field::RangeEnd => self.encoding.range_end_label(),
             Field::Overwrite => state(self.overwrite).to_owned(),
             Field::Verify => state(self.verify).to_owned(),
             Field::Vmaf => match self.vmaf {
@@ -425,7 +377,13 @@ impl CommandForm {
     fn activate(&mut self) -> FormAction {
         match self.focused() {
             Field::Input => return FormAction::PickInput,
-            Field::Output | Field::Png | Field::Svg => {
+            Field::Output
+            | Field::Png
+            | Field::Svg
+            | Field::Report
+            | Field::DecodeDevice
+            | Field::Bitrate
+            | Field::EncodeDevice => {
                 let field = self.focused();
                 self.text_input_mut(field).begin();
                 self.editing = Some(field);
@@ -441,12 +399,21 @@ impl CommandForm {
 
     fn adjust(&mut self, direction: isize) {
         match self.focused() {
-            Field::Input | Field::Output | Field::Png | Field::Svg | Field::Candidates => {}
+            Field::Input
+            | Field::Output
+            | Field::Png
+            | Field::Svg
+            | Field::Report
+            | Field::DecodeDevice
+            | Field::Bitrate
+            | Field::EncodeDevice
+            | Field::Candidates => {}
             Field::Container => {
                 self.container = cycle(self.container, CONTAINERS.len(), direction);
             }
             Field::Decoder => {
-                self.decoder = cycle(self.decoder, DECODERS.len(), direction);
+                self.decoder.adjust(direction);
+                self.clamp_focus();
             }
             Field::Action => {
                 self.action = if direction < 0 {
@@ -457,42 +424,27 @@ impl CommandForm {
                 self.clamp_focus();
             }
             Field::Encoder => {
-                self.encoder = cycle(self.encoder, ENCODERS.len(), direction);
-                let encoder = self.encoder();
-                self.preset = self.preset.min(encoder.preset_count().saturating_sub(1));
-                let quality = encoder.encoding().quality_range();
-                self.quality = self.quality.clamp(*quality.start(), *quality.end());
-                if self.mode == Mode::Emulate {
-                    self.range_start = *quality.start();
-                    self.range_end = *quality.end();
-                }
+                self.encoding.adjust_encoder(direction);
+                self.clamp_focus();
             }
             Field::Preset => {
-                self.preset = cycle(self.preset, self.encoder().preset_count(), direction);
+                self.encoding.adjust_preset(direction);
+            }
+            Field::Rate => {
+                self.encoding.adjust_rate(direction);
+                self.clamp_focus();
             }
             Field::Quality => {
-                let quality = self.encoder().encoding().quality_range();
-                self.quality = if direction < 0 {
-                    self.quality.saturating_sub(1).max(*quality.start())
-                } else {
-                    self.quality.saturating_add(1).min(*quality.end())
-                };
+                self.encoding.adjust_quality(direction);
+            }
+            Field::Multipass => {
+                self.encoding.adjust_multipass(direction);
             }
             Field::RangeStart => {
-                let minimum = *self.encoder().encoding().quality_range().start();
-                self.range_start = if direction < 0 {
-                    self.range_start.saturating_sub(1).max(minimum)
-                } else {
-                    self.range_start.saturating_add(1).min(self.range_end)
-                };
+                self.encoding.adjust_range_start(direction);
             }
             Field::RangeEnd => {
-                let maximum = *self.encoder().encoding().quality_range().end();
-                self.range_end = if direction < 0 {
-                    self.range_end.saturating_sub(1).max(self.range_start)
-                } else {
-                    self.range_end.saturating_add(1).min(maximum)
-                };
+                self.encoding.adjust_range_end(direction);
             }
             Field::Overwrite => self.overwrite = direction > 0,
             Field::Verify => self.verify = direction > 0,
@@ -525,7 +477,7 @@ impl CommandForm {
             .input
             .as_ref()
             .ok_or_else(|| "Select an input file or directory".to_owned())?;
-        if self.mode == Mode::Transcode && self.output.value.is_empty() {
+        if self.mode == Mode::Transcode && self.output.value().is_empty() {
             return Err("Enter an output path".to_owned());
         }
         if self.mode == Mode::Emulate && input.recursive() {
@@ -536,16 +488,18 @@ impl CommandForm {
         let video =
             if candidate_mode || self.mode == Mode::Transcode && self.action == VideoAction::Copy {
                 CoreVideoAction::Copy
+            } else if self.mode == Mode::Emulate {
+                CoreVideoAction::Encode(self.encoding.build())
             } else {
-                CoreVideoAction::Encode(self.selected_encoding(self.mode != Mode::Emulate))
+                CoreVideoAction::Encode(self.encoding.build_with_rate()?)
             };
         let decoding = if candidate_mode {
-            DECODERS[0].backend()
+            DecoderDraft::new(0).backend()
         } else {
-            DECODERS[self.decoder].backend()
+            self.decoder.backend()
         };
         let output = match self.mode {
-            Mode::Transcode => PathBuf::from(&self.output.value),
+            Mode::Transcode => PathBuf::from(self.output.value()),
             Mode::Predict | Mode::Emulate => PathBuf::new(),
         };
         let mut request = TranscodeRequest::new(input.path(), output)
@@ -562,12 +516,12 @@ impl CommandForm {
                 Mode::Transcode => Operation::Transcode,
                 Mode::Predict => Operation::Predict,
                 Mode::Emulate => Operation::Emulate(EmulationOptions {
-                    png: (!self.png.value.is_empty()).then(|| PathBuf::from(&self.png.value)),
-                    svg: (!self.svg.value.is_empty()).then(|| PathBuf::from(&self.svg.value)),
+                    png: (!self.png.value().is_empty()).then(|| PathBuf::from(self.png.value())),
+                    svg: (!self.svg.value().is_empty()).then(|| PathBuf::from(self.svg.value())),
                     qualities: if candidate_mode {
                         Vec::new()
                     } else {
-                        (self.range_start..=self.range_end).collect()
+                        self.encoding.qualities()
                     },
                     candidates: self.candidates.iter().map(CandidateDraft::build).collect(),
                 }),
@@ -588,6 +542,7 @@ impl CommandForm {
                 (Mode::Transcode, VmafMode::Off) | (Mode::Predict | Mode::Emulate, _) => None,
             },
             terminal_output: false,
+            report: (!self.report.value().is_empty()).then(|| PathBuf::from(self.report.value())),
             ..Options::default()
         };
         let config = Config::load(None).map_err(|error| format!("{error:#}"))?;
@@ -609,18 +564,18 @@ impl CommandForm {
         match key.code {
             KeyCode::Left => input.move_left(),
             KeyCode::Right => input.move_right(),
-            KeyCode::Home => input.cursor = 0,
-            KeyCode::End => input.cursor = input.value.len(),
+            KeyCode::Home => input.move_home(),
+            KeyCode::End => input.move_end(),
             KeyCode::Backspace => input.backspace(),
             KeyCode::Delete => input.delete(),
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                input.value.clear();
-                input.cursor = 0;
+                input.clear();
             }
             KeyCode::Char(value)
                 if !key
                     .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                    && (field != Field::Bitrate || value.is_ascii_digit()) =>
             {
                 input.insert(value);
             }
@@ -632,26 +587,17 @@ impl CommandForm {
         self.focus = self.focus.min(self.fields().len() - 1);
     }
 
-    fn selected_encoding(&self, fixed_quality: bool) -> VideoEncoding {
-        let encoder = self.encoder();
-        let mut encoding = encoder.configured(self.preset);
-        if fixed_quality {
-            encoding.set_quality(self.quality);
-        }
-        encoding
-    }
-
     fn text_input_mut(&mut self, field: Field) -> &mut TextInput {
         match field {
             Field::Output => &mut self.output,
             Field::Png => &mut self.png,
             Field::Svg => &mut self.svg,
-            _ => unreachable!("only output paths support text editing"),
+            Field::Report => &mut self.report,
+            Field::DecodeDevice => self.decoder.device_input(),
+            Field::Bitrate => self.encoding.bitrate_input(),
+            Field::EncodeDevice => self.encoding.device_input(),
+            _ => unreachable!("field does not support text editing"),
         }
-    }
-
-    fn encoder(&self) -> EncoderChoice {
-        ENCODERS[self.encoder]
     }
 }
 
@@ -717,7 +663,7 @@ mod tests {
             vec![Field::Input, Field::Container, Field::Decoder]
         );
         assert!(!form.video_fields().contains(&Field::Action));
-        assert_eq!(form.option_fields(), vec![Field::Start]);
+        assert_eq!(form.option_fields(), vec![Field::Report, Field::Start]);
 
         form.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(form.mode(), Mode::Emulate);
@@ -733,10 +679,19 @@ mod tests {
         );
         assert_eq!(
             form.option_fields(),
-            vec![Field::Png, Field::Svg, Field::Overwrite, Field::Start]
+            vec![
+                Field::Png,
+                Field::Svg,
+                Field::Overwrite,
+                Field::Report,
+                Field::Start
+            ]
         );
 
-        form.set_candidates(vec![CandidateDraft::new(0, 1, 5, 18, 30)]);
+        form.set_candidates(vec![CandidateDraft::new(
+            DecoderDraft::new(0),
+            EncodingDraft::new(1, 5, 18, 18, 30),
+        )]);
         assert_eq!(form.source_fields(), vec![Field::Input, Field::Container]);
         assert_eq!(form.video_fields(), vec![Field::Candidates]);
         assert_eq!(form.value(Field::Candidates), "1 configured");

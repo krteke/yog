@@ -51,9 +51,31 @@ pub enum NoticeKind {
     Error,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunPanel {
+    Results,
+    Events,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResultStatus {
+    Success,
+    Failure,
+    Cancelled,
+    Skipped,
+}
+
 pub struct Notice {
     pub kind: NoticeKind,
     pub text: String,
+}
+
+pub struct TaskResult {
+    pub position: Option<(usize, usize)>,
+    pub input: PathBuf,
+    pub output: Option<PathBuf>,
+    pub status: ResultStatus,
+    pub error: Option<String>,
 }
 
 pub struct PredictionSummary {
@@ -78,6 +100,7 @@ pub struct EmulationState {
     pub failed: usize,
     pub vmaf: Option<f64>,
     pub output_bytes: Option<u64>,
+    pub last_status: Option<TaskStatus>,
 }
 
 impl From<&Prediction> for PredictionSummary {
@@ -111,7 +134,11 @@ pub struct RunState {
     pub progress: Progress,
     pub prediction: Option<PredictionSummary>,
     pub emulation: Option<EmulationState>,
+    pub panel: RunPanel,
+    pub results: Vec<TaskResult>,
+    pub result_cursor: usize,
     pub notices: VecDeque<Notice>,
+    pub notice_cursor: usize,
     pub spinner: usize,
     started: Instant,
     finished_elapsed: Option<Duration>,
@@ -140,7 +167,11 @@ impl RunState {
             progress: Progress::default(),
             prediction: None,
             emulation: None,
+            panel: RunPanel::Events,
+            results: Vec::new(),
+            result_cursor: 0,
             notices: VecDeque::new(),
+            notice_cursor: 0,
             spinner: 0,
             started: Instant::now(),
             finished_elapsed: None,
@@ -165,6 +196,13 @@ impl RunState {
                     NoticeKind::Warning,
                     format!("Skipped {}: {error}", input.display()),
                 );
+                self.push_result(TaskResult {
+                    position: None,
+                    input,
+                    output: None,
+                    status: ResultStatus::Skipped,
+                    error: Some(error),
+                });
             }
             RunEvent::TaskStarted {
                 index,
@@ -225,6 +263,7 @@ impl RunState {
                     failed,
                     vmaf: None,
                     output_bytes: None,
+                    last_status: None,
                 });
             }
             RunEvent::EmulationPointFinished {
@@ -251,15 +290,17 @@ impl RunState {
                         state.succeeded += 1;
                         state.vmaf = vmaf;
                         state.output_bytes = output_bytes;
+                        state.last_status = Some(TaskStatus::Success);
                     }
                     TaskStatus::Failure => {
                         state.completed = index;
                         state.failed += 1;
+                        state.last_status = Some(TaskStatus::Failure);
                         if let Some(error) = error {
                             self.push_notice(NoticeKind::Error, error);
                         }
                     }
-                    TaskStatus::Cancelled => {}
+                    TaskStatus::Cancelled => state.last_status = Some(TaskStatus::Cancelled),
                 }
             }
             RunEvent::VmafFinished {
@@ -280,20 +321,40 @@ impl RunState {
             },
             RunEvent::Warning { message } => self.push_notice(NoticeKind::Warning, message),
             RunEvent::Error { message } => self.push_notice(NoticeKind::Error, message),
-            RunEvent::TaskFinished { status, error, .. } => match status {
-                TaskStatus::Success => {
-                    self.succeeded += 1;
-                    self.progress.finished = true;
-                }
-                TaskStatus::Failure => {
-                    self.failed += 1;
-                    self.progress.finished = true;
-                    if let Some(error) = error {
-                        self.push_notice(NoticeKind::Error, error);
+            RunEvent::TaskFinished {
+                index,
+                total,
+                input,
+                status,
+                error,
+            } => {
+                let result_status = match status {
+                    TaskStatus::Success => {
+                        self.succeeded += 1;
+                        self.progress.finished = true;
+                        ResultStatus::Success
                     }
-                }
-                TaskStatus::Cancelled => {}
-            },
+                    TaskStatus::Failure => {
+                        self.failed += 1;
+                        self.progress.finished = true;
+                        if let Some(error) = &error {
+                            self.push_notice(NoticeKind::Error, error.clone());
+                        }
+                        ResultStatus::Failure
+                    }
+                    TaskStatus::Cancelled => ResultStatus::Cancelled,
+                };
+                let output = (self.input.as_ref() == Some(&input))
+                    .then(|| self.output.clone())
+                    .flatten();
+                self.push_result(TaskResult {
+                    position: Some((index, total)),
+                    input,
+                    output,
+                    status: result_status,
+                    error,
+                });
+            }
         }
     }
 
@@ -316,10 +377,42 @@ impl RunState {
         }
         self.finished_elapsed = Some(self.started.elapsed());
         self.stage = RunStage::Finished(status);
+        if !self.results.is_empty() && (self.results.len() > 1 || status != RunStatus::Success) {
+            self.panel = RunPanel::Results;
+            self.result_cursor = self
+                .results
+                .iter()
+                .position(|result| result.status == ResultStatus::Failure)
+                .unwrap_or_else(|| self.results.len().saturating_sub(1));
+        }
     }
 
     pub fn tick(&mut self) {
         self.spinner = self.spinner.wrapping_add(1);
+    }
+
+    pub fn toggle_panel(&mut self) {
+        self.panel = match self.panel {
+            RunPanel::Results => RunPanel::Events,
+            RunPanel::Events => RunPanel::Results,
+        };
+    }
+
+    pub fn move_panel_cursor(&mut self, direction: isize) {
+        match self.panel {
+            RunPanel::Results => {
+                move_cursor(&mut self.result_cursor, self.results.len(), direction)
+            }
+            RunPanel::Events => move_cursor(&mut self.notice_cursor, self.notices.len(), direction),
+        }
+    }
+
+    pub fn move_panel_cursor_to(&mut self, end: bool) {
+        let (cursor, len) = match self.panel {
+            RunPanel::Results => (&mut self.result_cursor, self.results.len()),
+            RunPanel::Events => (&mut self.notice_cursor, self.notices.len()),
+        };
+        *cursor = if end { len.saturating_sub(1) } else { 0 };
     }
 
     pub fn elapsed(&self) -> Duration {
@@ -364,10 +457,31 @@ impl RunState {
         {
             return;
         }
+        let follow_tail = self.notices.is_empty() || self.notice_cursor + 1 == self.notices.len();
         if self.notices.len() == MAX_NOTICES {
             self.notices.pop_front();
+            self.notice_cursor = self.notice_cursor.saturating_sub(1);
         }
         self.notices.push_back(Notice { kind, text });
+        if follow_tail {
+            self.notice_cursor = self.notices.len() - 1;
+        }
+    }
+
+    fn push_result(&mut self, result: TaskResult) {
+        let follow_tail = self.results.is_empty() || self.result_cursor + 1 == self.results.len();
+        self.results.push(result);
+        if follow_tail {
+            self.result_cursor = self.results.len() - 1;
+        }
+    }
+}
+
+fn move_cursor(cursor: &mut usize, len: usize, direction: isize) {
+    if direction < 0 {
+        *cursor = cursor.saturating_sub(1);
+    } else if *cursor + 1 < len {
+        *cursor += 1;
     }
 }
 
@@ -520,6 +634,67 @@ mod tests {
         assert_eq!(state.emulation.as_ref().unwrap().succeeded, 1);
         assert_eq!(state.emulation.as_ref().unwrap().failed, 1);
         assert_eq!(state.notices[0].text, "prediction failed");
+    }
+
+    #[test]
+    fn failed_task_keeps_its_input_output_and_error_in_results() {
+        let mut state = RunState::new(&Operation::Transcode);
+        state.handle_event(RunEvent::TaskStarted {
+            index: 2,
+            total: 3,
+            input: "broken.mkv".into(),
+            output: Some("broken.mp4".into()),
+        });
+        state.handle_event(RunEvent::TaskFinished {
+            index: 2,
+            total: 3,
+            input: "broken.mkv".into(),
+            status: TaskStatus::Failure,
+            error: Some("encoder failed".to_owned()),
+        });
+
+        let result = &state.results[0];
+        assert_eq!(result.position, Some((2, 3)));
+        assert_eq!(result.input, PathBuf::from("broken.mkv"));
+        assert_eq!(
+            result.output.as_deref(),
+            Some(std::path::Path::new("broken.mp4"))
+        );
+        assert_eq!(result.status, ResultStatus::Failure);
+        assert_eq!(result.error.as_deref(), Some("encoder failed"));
+    }
+
+    #[test]
+    fn cancelled_emulation_point_is_not_left_predicting() {
+        let mut state = RunState::new(&Operation::Emulate(yog_runtime::EmulationOptions {
+            png: Some("chart.png".into()),
+            svg: None,
+            qualities: vec![20],
+            candidates: Vec::new(),
+        }));
+        state.handle_event(RunEvent::EmulationPointStarted {
+            index: 1,
+            total: 1,
+            candidate: None,
+            label: "x265 / Software / Preset medium".to_owned(),
+            parameter: "CRF",
+            quality: 20,
+        });
+        state.handle_event(RunEvent::EmulationPointFinished {
+            index: 1,
+            total: 1,
+            candidate: None,
+            quality: 20,
+            status: TaskStatus::Cancelled,
+            vmaf: None,
+            output_bytes: None,
+            error: None,
+        });
+
+        assert_eq!(
+            state.emulation.as_ref().unwrap().last_status,
+            Some(TaskStatus::Cancelled)
+        );
     }
 
     fn estimate<T: Copy>(value: T) -> Estimate<T> {

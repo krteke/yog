@@ -43,29 +43,41 @@ impl DrawCandidates for Frame<'_> {
         .split(content);
         self.render_candidate_list(rows[0], editor);
         self.render_candidate_settings(rows[1], editor);
-        let footer = if editor.is_editing() {
+        let text_editing = editor
+            .focused()
+            .is_some_and(|field| editor.is_text_editing(field));
+        let footer = if text_editing {
+            Line::from(vec![
+                key("←/→"),
+                Span::raw(" Cursor  "),
+                key("Enter/Esc"),
+                Span::raw(" Done"),
+            ])
+        } else if editor.is_editing() {
             Line::from(vec![
                 key("j/k"),
-                Span::raw(" Move  "),
+                Span::raw(" Move "),
                 key("h/l"),
-                Span::raw(" Change  "),
+                Span::raw(" Change "),
                 key("Enter"),
-                Span::raw(" Save  "),
+                Span::raw(" Edit/Save "),
+                key("s"),
+                Span::raw(" Save "),
                 key("Esc"),
                 Span::raw(" Cancel"),
             ])
         } else {
             Line::from(vec![
                 key("j/k"),
-                Span::raw(" Select  "),
+                Span::raw(" Select "),
                 key("Enter"),
-                Span::raw(" Edit  "),
+                Span::raw(" Edit "),
                 key("a"),
-                Span::raw(" Add  "),
+                Span::raw(" Add "),
                 key("d"),
-                Span::raw(" Delete  "),
+                Span::raw(" Delete "),
                 key("s"),
-                Span::raw(" Apply  "),
+                Span::raw(" Apply "),
                 key("Esc"),
                 Span::raw(" Cancel"),
             ])
@@ -157,14 +169,18 @@ fn candidate_line(editor: &CandidateEditor, field: CandidateField, focused: bool
             format!("{:<13}", field.label()),
             Style::default().fg(Color::Gray),
         ),
-        Span::styled(
-            editor.value(field),
-            if focused {
+        Span::styled(editor.value(field), {
+            let style = if focused {
                 Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::White)
-            },
-        ),
+            };
+            if editor.is_text_editing(field) {
+                style.add_modifier(Modifier::UNDERLINED)
+            } else {
+                style
+            }
+        }),
     ])
 }
 

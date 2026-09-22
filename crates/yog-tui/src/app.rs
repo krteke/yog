@@ -51,6 +51,29 @@ impl App {
         }
 
         if let Some(run) = &mut self.run {
+            match key.code {
+                KeyCode::Tab | KeyCode::BackTab => {
+                    run.toggle_panel();
+                    return AppAction::None;
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    run.move_panel_cursor(1);
+                    return AppAction::None;
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    run.move_panel_cursor(-1);
+                    return AppAction::None;
+                }
+                KeyCode::Char('g') | KeyCode::Home => {
+                    run.move_panel_cursor_to(false);
+                    return AppAction::None;
+                }
+                KeyCode::Char('G') | KeyCode::End => {
+                    run.move_panel_cursor_to(true);
+                    return AppAction::None;
+                }
+                _ => {}
+            }
             return match run.stage {
                 RunStage::Finished(_) => match key.code {
                     KeyCode::Char('q') => AppAction::Quit,

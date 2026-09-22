@@ -41,11 +41,15 @@ impl DrawApp for Frame<'_> {
         let source = form.source_fields();
         let video = form.video_fields();
         let options = form.option_fields();
+        let heights = section_heights(
+            content.height.saturating_sub(2),
+            [source.len(), video.len(), options.len()],
+        );
         let rows = Layout::vertical([
             Constraint::Length(1),
-            Constraint::Length(source.len() as u16 + 2),
-            Constraint::Length(video.len() as u16 + 2),
-            Constraint::Length(options.len() as u16 + 2),
+            Constraint::Length(heights[0]),
+            Constraint::Length(heights[1]),
+            Constraint::Length(heights[2]),
             Constraint::Min(0),
             Constraint::Length(1),
         ])
@@ -108,16 +112,28 @@ impl DrawApp for Frame<'_> {
         let focused = form.focused();
         let active = fields.contains(&focused);
         let color = if active { ACCENT } else { INACTIVE };
-        let block = Block::new()
+        let visible = usize::from(area.height.saturating_sub(2));
+        let focused_index = fields.iter().position(|field| *field == focused);
+        let start = focused_index
+            .map(|index| window_start(index, fields.len(), visible))
+            .unwrap_or(0);
+        let mut block = Block::new()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(color))
             .title(Span::styled(title, Style::default().fg(color)));
+        if fields.len() > visible && visible > 0 {
+            let position = focused_index.map_or(start + 1, |index| index + 1);
+            block =
+                block.title(Line::from(format!(" {position}/{} ", fields.len())).right_aligned());
+        }
         let content = block.inner(area);
         self.render_widget(block, area);
 
         let lines = fields
             .iter()
+            .skip(start)
+            .take(visible)
             .copied()
             .map(|field| field_line(form, field, focused == field))
             .collect::<Vec<_>>();
@@ -153,6 +169,35 @@ impl DrawApp for Frame<'_> {
 
         self.render_widget(Paragraph::new(line), area);
     }
+}
+
+fn section_heights(available: u16, lengths: [usize; 3]) -> [u16; 3] {
+    let desired = lengths.map(|length| length as u16 + 2);
+    let mut heights = desired.map(|height| height.min(3));
+    let mut remaining = available.saturating_sub(heights.iter().sum());
+    while remaining > 0 {
+        let mut changed = false;
+        for index in 0..heights.len() {
+            if heights[index] < desired[index] {
+                heights[index] += 1;
+                remaining -= 1;
+                changed = true;
+                if remaining == 0 {
+                    break;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    heights
+}
+
+fn window_start(cursor: usize, len: usize, visible: usize) -> usize {
+    cursor
+        .saturating_sub(visible / 2)
+        .min(len.saturating_sub(visible))
 }
 
 fn field_line(form: &CommandForm, field: Field, focused: bool) -> Line<'static> {

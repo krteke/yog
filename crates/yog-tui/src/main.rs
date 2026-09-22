@@ -4,6 +4,7 @@ mod encoding;
 mod file_picker;
 mod form;
 mod run;
+mod text_input;
 mod ui;
 
 use std::{io, process::ExitCode, time::Duration};

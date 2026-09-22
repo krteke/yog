@@ -1,25 +1,19 @@
-use crossterm::event::{KeyCode, KeyEvent};
-use yog_core::ffmpeg::encoding::{NvencMultipass, VideoEncoding};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use yog_runtime::Candidate;
 
-use crate::encoding::{DECODERS, ENCODERS, cycle};
-
-const MULTIPASS: &[(&str, Option<NvencMultipass>)] = &[
-    ("Default", None),
-    ("Disabled", Some(NvencMultipass::Disabled)),
-    (
-        "Quarter resolution",
-        Some(NvencMultipass::QuarterResolution),
-    ),
-    ("Full resolution", Some(NvencMultipass::FullResolution)),
-];
+use crate::{
+    encoding::{DecoderDraft, EncodingDraft, cycle},
+    text_input::TextInput,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CandidateField {
     Decoder,
+    DecodeDevice,
     Encoder,
     Preset,
     Multipass,
+    EncodeDevice,
     RangeStart,
     RangeEnd,
 }
@@ -28,9 +22,11 @@ impl CandidateField {
     pub fn label(self) -> &'static str {
         match self {
             Self::Decoder => "Decoder",
+            Self::DecodeDevice => "Decode device",
             Self::Encoder => "Encoder",
             Self::Preset => "Preset",
             Self::Multipass => "Multipass",
+            Self::EncodeDevice => "Encode device",
             Self::RangeStart => "Range start",
             Self::RangeEnd => "Range end",
         }
@@ -45,137 +41,99 @@ pub enum CandidateAction {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CandidateDraft {
-    decoder: usize,
-    encoder: usize,
-    preset: usize,
-    multipass: usize,
-    range_start: u8,
-    range_end: u8,
+    decoder: DecoderDraft,
+    encoding: EncodingDraft,
 }
 
 impl CandidateDraft {
-    pub fn new(
-        decoder: usize,
-        encoder: usize,
-        preset: usize,
-        range_start: u8,
-        range_end: u8,
-    ) -> Self {
-        Self {
-            decoder,
-            encoder,
-            preset,
-            multipass: 0,
-            range_start,
-            range_end,
-        }
+    pub fn new(decoder: DecoderDraft, encoding: EncodingDraft) -> Self {
+        Self { decoder, encoding }
     }
 
     pub fn build(&self) -> Candidate {
-        let mut encoding = ENCODERS[self.encoder].configured(self.preset);
-        if let VideoEncoding::Nvenc { multipass, .. } = &mut encoding {
-            *multipass = MULTIPASS[self.multipass].1;
-        }
         Candidate {
-            decoding: DECODERS[self.decoder].backend(),
-            encoding,
-            qualities: (self.range_start..=self.range_end).collect(),
+            decoding: self.decoder.backend(),
+            encoding: self.encoding.build(),
+            qualities: self.encoding.qualities(),
         }
     }
 
     pub fn summary(&self) -> String {
-        let encoder = ENCODERS[self.encoder];
-        let encoding = encoder.encoding();
-        let mut details = vec![encoder.label(), DECODERS[self.decoder].label().to_owned()];
-        if encoder.preset_count() > 0 {
-            details.push(format!("Preset {}", encoder.preset_label(self.preset)));
+        let mut details = vec![self.encoding.encoder_label(), self.decoder.backend().name()];
+        if self.encoding.preset_count() > 0 {
+            details.push(format!("Preset {}", self.encoding.preset_label()));
         }
-        if encoder.is_nvenc() && self.multipass > 0 {
-            details.push(format!("Multipass {}", MULTIPASS[self.multipass].0));
+        if self.encoding.is_nvenc() && self.encoding.multipass_label() != "Default" {
+            details.push(format!("Multipass {}", self.encoding.multipass_label()));
         }
-        details.push(format!(
-            "{} {}..={}",
-            encoding.quality_parameter(),
-            self.range_start,
-            self.range_end
-        ));
+        if self.encoding.is_vaapi() {
+            details.push(format!("Device {}", self.encoding.device(false)));
+        }
+        details.push(self.encoding.range_label());
         details.join(" / ")
     }
 
     fn fields(&self) -> Vec<CandidateField> {
-        let encoder = self.encoder();
         let mut fields = vec![CandidateField::Decoder, CandidateField::Encoder];
-        if encoder.preset_count() > 0 {
+        if self.decoder.has_device() {
+            fields.insert(1, CandidateField::DecodeDevice);
+        }
+        if self.encoding.preset_count() > 0 {
             fields.push(CandidateField::Preset);
         }
-        if encoder.is_nvenc() {
+        if self.encoding.is_nvenc() {
             fields.push(CandidateField::Multipass);
+        }
+        if self.encoding.is_vaapi() {
+            fields.push(CandidateField::EncodeDevice);
         }
         fields.extend([CandidateField::RangeStart, CandidateField::RangeEnd]);
         fields
     }
 
-    fn value(&self, field: CandidateField) -> String {
-        let encoder = self.encoder();
+    fn value(&self, field: CandidateField, editing: bool) -> String {
         match field {
-            CandidateField::Decoder => DECODERS[self.decoder].label().to_owned(),
-            CandidateField::Encoder => encoder.label(),
-            CandidateField::Preset => encoder.preset_label(self.preset),
-            CandidateField::Multipass => MULTIPASS[self.multipass].0.to_owned(),
-            CandidateField::RangeStart => format!(
-                "{} {}",
-                encoder.encoding().quality_parameter(),
-                self.range_start
-            ),
-            CandidateField::RangeEnd => format!(
-                "{} {}",
-                encoder.encoding().quality_parameter(),
-                self.range_end
-            ),
+            CandidateField::Decoder => self.decoder.label().to_owned(),
+            CandidateField::DecodeDevice => self.decoder.device(editing),
+            CandidateField::Encoder => self.encoding.encoder_label(),
+            CandidateField::Preset => self.encoding.preset_label(),
+            CandidateField::Multipass => self.encoding.multipass_label().to_owned(),
+            CandidateField::EncodeDevice => self.encoding.device(editing),
+            CandidateField::RangeStart => self.encoding.range_start_label(),
+            CandidateField::RangeEnd => self.encoding.range_end_label(),
         }
     }
 
     fn adjust(&mut self, field: CandidateField, direction: isize) {
         match field {
             CandidateField::Decoder => {
-                self.decoder = cycle(self.decoder, DECODERS.len(), direction);
+                self.decoder.adjust(direction);
             }
+            CandidateField::DecodeDevice | CandidateField::EncodeDevice => {}
             CandidateField::Encoder => {
-                self.encoder = cycle(self.encoder, ENCODERS.len(), direction);
-                let encoder = self.encoder();
-                self.preset = self.preset.min(encoder.preset_count().saturating_sub(1));
-                self.multipass = 0;
-                let range = encoder.encoding().quality_range();
-                self.range_start = *range.start();
-                self.range_end = *range.end();
+                self.encoding.adjust_encoder(direction);
             }
             CandidateField::Preset => {
-                self.preset = cycle(self.preset, self.encoder().preset_count(), direction);
+                self.encoding.adjust_preset(direction);
             }
             CandidateField::Multipass => {
-                self.multipass = cycle(self.multipass, MULTIPASS.len(), direction);
+                self.encoding.adjust_multipass(direction);
             }
             CandidateField::RangeStart => {
-                let minimum = *self.encoder().encoding().quality_range().start();
-                self.range_start = if direction < 0 {
-                    self.range_start.saturating_sub(1).max(minimum)
-                } else {
-                    self.range_start.saturating_add(1).min(self.range_end)
-                };
+                self.encoding.adjust_range_start(direction);
             }
             CandidateField::RangeEnd => {
-                let maximum = *self.encoder().encoding().quality_range().end();
-                self.range_end = if direction < 0 {
-                    self.range_end.saturating_sub(1).max(self.range_start)
-                } else {
-                    self.range_end.saturating_add(1).min(maximum)
-                };
+                self.encoding.adjust_range_end(direction);
             }
         }
     }
 
-    fn encoder(&self) -> crate::encoding::EncoderChoice {
-        ENCODERS[self.encoder]
+    fn text_input(&mut self, field: CandidateField) -> &mut TextInput {
+        match field {
+            CandidateField::DecodeDevice => self.decoder.device_input(),
+            CandidateField::EncodeDevice => self.encoding.device_input(),
+            _ => unreachable!("candidate field does not support text editing"),
+        }
     }
 }
 
@@ -183,6 +141,7 @@ struct CandidateEdit {
     index: Option<usize>,
     draft: CandidateDraft,
     focus: usize,
+    text_editing: Option<CandidateField>,
 }
 
 pub struct CandidateEditor {
@@ -203,10 +162,32 @@ impl CandidateEditor {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> CandidateAction {
+        if let Some(field) = self
+            .editing
+            .as_ref()
+            .and_then(|editing| editing.text_editing)
+        {
+            self.handle_text_key(field, key);
+            return CandidateAction::None;
+        }
+
         if self.editing.is_some() {
             match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => self.editing = None,
-                KeyCode::Enter => self.save(),
+                KeyCode::Enter => {
+                    if matches!(
+                        self.focused(),
+                        Some(CandidateField::DecodeDevice | CandidateField::EncodeDevice)
+                    ) {
+                        let field = self.focused().unwrap();
+                        let editing = self.editing.as_mut().unwrap();
+                        editing.draft.text_input(field).begin();
+                        editing.text_editing = Some(field);
+                    } else {
+                        self.save();
+                    }
+                }
+                KeyCode::Char('s') => self.save(),
                 KeyCode::Char('j') | KeyCode::Down => self.move_focus(1),
                 KeyCode::Char('k') | KeyCode::Up => self.move_focus(-1),
                 KeyCode::Char('h') | KeyCode::Left => self.adjust(-1),
@@ -258,6 +239,12 @@ impl CandidateEditor {
             .is_some_and(|editing| editing.index.is_none())
     }
 
+    pub fn is_text_editing(&self, field: CandidateField) -> bool {
+        self.editing
+            .as_ref()
+            .is_some_and(|editing| editing.text_editing == Some(field))
+    }
+
     pub fn fields(&self) -> Vec<CandidateField> {
         self.settings()
             .map_or_else(Vec::new, CandidateDraft::fields)
@@ -271,7 +258,7 @@ impl CandidateEditor {
     pub fn value(&self, field: CandidateField) -> String {
         self.settings()
             .expect("candidate fields require a selected or edited candidate")
-            .value(field)
+            .value(field, self.is_text_editing(field))
     }
 
     fn settings(&self) -> Option<&CandidateDraft> {
@@ -311,6 +298,7 @@ impl CandidateEditor {
             index: None,
             draft,
             focus: 0,
+            text_editing: None,
         });
     }
 
@@ -322,6 +310,7 @@ impl CandidateEditor {
             index: Some(self.selected),
             draft,
             focus: 0,
+            text_editing: None,
         });
     }
 
@@ -343,6 +332,32 @@ impl CandidateEditor {
         self.candidates.remove(self.selected);
         self.selected = self.selected.min(self.candidates.len().saturating_sub(1));
     }
+
+    fn handle_text_key(&mut self, field: CandidateField, key: KeyEvent) {
+        if matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
+            self.editing.as_mut().unwrap().text_editing = None;
+            return;
+        }
+
+        let input = self.editing.as_mut().unwrap().draft.text_input(field);
+        match key.code {
+            KeyCode::Left => input.move_left(),
+            KeyCode::Right => input.move_right(),
+            KeyCode::Home => input.move_home(),
+            KeyCode::End => input.move_end(),
+            KeyCode::Backspace => input.backspace(),
+            KeyCode::Delete => input.delete(),
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => input.clear(),
+            KeyCode::Char(value)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                input.insert(value);
+            }
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]
@@ -354,9 +369,22 @@ mod tests {
         KeyEvent::new(KeyCode::Char(value), KeyModifiers::NONE)
     }
 
+    fn draft(
+        decoder: usize,
+        encoder: usize,
+        preset: usize,
+        range_start: u8,
+        range_end: u8,
+    ) -> CandidateDraft {
+        CandidateDraft::new(
+            DecoderDraft::new(decoder),
+            EncodingDraft::new(encoder, preset, range_start, range_start, range_end),
+        )
+    }
+
     #[test]
     fn candidates_are_saved_before_they_enter_the_list() {
-        let seed = CandidateDraft::new(0, 1, 5, 18, 30);
+        let seed = draft(0, 1, 5, 18, 30);
         let mut editor = CandidateEditor::new(Vec::new(), seed.clone());
         assert!(editor.candidates().is_empty());
 
@@ -382,8 +410,8 @@ mod tests {
 
     #[test]
     fn editing_an_existing_candidate_can_be_cancelled_or_saved() {
-        let seed = CandidateDraft::new(0, 1, 5, 18, 30);
-        let mut editor = CandidateEditor::new(vec![seed], CandidateDraft::new(0, 1, 5, 0, 51));
+        let seed = draft(0, 1, 5, 18, 30);
+        let mut editor = CandidateEditor::new(vec![seed], draft(0, 1, 5, 0, 51));
 
         editor.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         editor.handle_key(key('l'));
@@ -404,8 +432,8 @@ mod tests {
 
     #[test]
     fn nvenc_candidate_carries_its_independent_multipass_and_range() {
-        let mut draft = CandidateDraft::new(2, 5, 3, 10, 30);
-        draft.multipass = 3;
+        let mut draft = draft(2, 5, 3, 10, 30);
+        draft.encoding.adjust_multipass(-1);
 
         let candidate = draft.build();
         assert!(matches!(
@@ -415,5 +443,24 @@ mod tests {
         assert_eq!(candidate.encoding.preset().as_deref(), Some("p4"));
         assert_eq!(candidate.encoding.multipass(), Some("fullres"));
         assert_eq!(candidate.qualities, (10..=30).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn hardware_device_text_is_saved_with_the_candidate() {
+        let seed = draft(0, 1, 5, 18, 30);
+        let mut editor = CandidateEditor::new(vec![seed], draft(0, 1, 5, 0, 51));
+
+        editor.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        editor.handle_key(key('l'));
+        editor.handle_key(key('j'));
+        editor.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        editor.handle_key(key('0'));
+        editor.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        editor.handle_key(key('s'));
+
+        assert!(matches!(
+            editor.candidates()[0].build().decoding,
+            yog_core::ffmpeg::decoding::DecodingBackend::Vaapi(Some(device)) if device == "0"
+        ));
     }
 }

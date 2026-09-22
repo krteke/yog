@@ -10,7 +10,9 @@ use ratatui::{
 use yog_runtime::{RunStatus, event::RunPhase};
 
 use crate::{
-    run::{NoticeKind, RunKind, RunStage, RunState, format_bytes},
+    run::{
+        NoticeKind, ResultStatus, RunKind, RunPanel, RunStage, RunState, TaskResult, format_bytes,
+    },
     ui::DrawApp,
 };
 
@@ -25,8 +27,9 @@ pub trait DrawRuning {
     fn render_prediction(&mut self, area: Rect, state: &RunState);
     fn render_emulation(&mut self, area: Rect, state: &RunState);
     fn render_tasks(&mut self, area: Rect, state: &RunState);
+    fn render_results(&mut self, area: Rect, state: &RunState);
     fn render_notices(&mut self, area: Rect, state: &RunState);
-    fn render_footer_run(&mut self, area: Rect, stage: RunStage);
+    fn render_footer_run(&mut self, area: Rect, state: &RunState);
 }
 
 impl DrawRuning for Frame<'_> {
@@ -62,8 +65,11 @@ impl DrawRuning for Frame<'_> {
             self.render_emulation(rows[2], state);
         }
         self.render_tasks(rows[3], state);
-        self.render_notices(rows[4], state);
-        self.render_footer_run(rows[5], state.stage);
+        match state.panel {
+            RunPanel::Results => self.render_results(rows[4], state),
+            RunPanel::Events => self.render_notices(rows[4], state),
+        }
+        self.render_footer_run(rows[5], state);
     }
 
     fn render_status(&mut self, area: Rect, state: &RunState) {
@@ -298,15 +304,25 @@ impl DrawRuning for Frame<'_> {
             || emulation.label.clone(),
             |candidate| format!("Candidate #{candidate} · {}", emulation.label),
         );
-        let result = match (emulation.vmaf, emulation.output_bytes) {
-            (Some(vmaf), Some(bytes)) => format!(
+        let result = match (
+            emulation.last_status,
+            emulation.vmaf,
+            emulation.output_bytes,
+        ) {
+            (Some(yog_runtime::event::TaskStatus::Success), Some(vmaf), Some(bytes)) => format!(
                 "{} {}  ·  VMAF {vmaf:.2}  ·  {}",
                 emulation.parameter,
                 emulation.quality,
                 format_bytes(bytes)
             ),
-            _ if emulation.completed == emulation.index => {
+            (Some(yog_runtime::event::TaskStatus::Failure), _, _) => {
                 format!("{} {}  ·  Failed", emulation.parameter, emulation.quality)
+            }
+            (Some(yog_runtime::event::TaskStatus::Cancelled), _, _) => {
+                format!(
+                    "{} {}  ·  Cancelled",
+                    emulation.parameter, emulation.quality
+                )
             }
             _ => format!(
                 "{} {}  ·  Predicting...",
@@ -322,16 +338,73 @@ impl DrawRuning for Frame<'_> {
         );
     }
 
+    fn render_results(&mut self, area: Rect, state: &RunState) {
+        let position = list_position(state.result_cursor, state.results.len());
+        let block = panel(" Results ", position, Color::DarkGray);
+        let content = block.inner(area);
+        self.render_widget(block, area);
+
+        if state.results.is_empty() {
+            self.render_widget(
+                Paragraph::new(" No completed tasks").style(Style::default().fg(Color::DarkGray)),
+                content,
+            );
+            return;
+        }
+
+        let selected = &state.results[state.result_cursor];
+        let has_detail = selected.error.is_some() || selected.output.is_some();
+        let detail_height = if has_detail && content.height >= 3 {
+            2
+        } else {
+            0
+        };
+        let rows = Layout::vertical([Constraint::Min(1), Constraint::Length(detail_height)])
+            .split(content);
+        let visible = usize::from(rows[0].height).max(1);
+        let start = window_start(state.result_cursor, state.results.len(), visible);
+        let lines = state
+            .results
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(visible)
+            .map(|(index, result)| {
+                result_line(result, index == state.result_cursor, detail_height == 0)
+            })
+            .collect::<Vec<_>>();
+        self.render_widget(Paragraph::new(lines), rows[0]);
+
+        if detail_height > 0 {
+            let detail = selected.error.as_ref().map_or_else(
+                || format!("Output: {}", selected.output.as_ref().unwrap().display()),
+                |error| format!("Error: {error}"),
+            );
+            self.render_widget(
+                Paragraph::new(detail)
+                    .style(Style::default().fg(if selected.error.is_some() {
+                        Color::LightRed
+                    } else {
+                        Color::Gray
+                    }))
+                    .wrap(Wrap { trim: false }),
+                rows[1],
+            );
+        }
+    }
+
     fn render_notices(&mut self, area: Rect, state: &RunState) {
-        let block = section(" Events ", Color::DarkGray);
+        let position = list_position(state.notice_cursor, state.notices.len());
+        let block = panel(" Events ", position, Color::DarkGray);
         let content = block.inner(area);
         self.render_widget(block, area);
 
         let visible = usize::from(content.height);
+        let start = window_start(state.notice_cursor, state.notices.len(), visible);
         let lines = state
             .notices
             .iter()
-            .rev()
+            .skip(start)
             .take(visible)
             .map(|notice| {
                 let (marker, color) = match notice.kind {
@@ -348,20 +421,29 @@ impl DrawRuning for Frame<'_> {
         self.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), content);
     }
 
-    fn render_footer_run(&mut self, area: Rect, stage: RunStage) {
-        let line = match stage {
-            RunStage::Running => Line::from(vec![key("q/Esc"), Span::raw(" Cancel")]),
+    fn render_footer_run(&mut self, area: Rect, state: &RunState) {
+        let mut spans = vec![
+            key("Tab"),
+            Span::raw(" Panel    "),
+            key("j/k"),
+            Span::raw(" Scroll    "),
+        ];
+        match state.stage {
+            RunStage::Running => spans.extend([key("q/Esc"), Span::raw(" Cancel")]),
             RunStage::Cancelling => {
-                Line::styled("Cancelling...", Style::default().fg(Color::Yellow))
+                spans.push(Span::styled(
+                    "Cancelling...",
+                    Style::default().fg(Color::Yellow),
+                ));
             }
-            RunStage::Finished(_) => Line::from(vec![
+            RunStage::Finished(_) => spans.extend([
                 key("Enter"),
                 Span::raw(" Back    "),
                 key("q"),
                 Span::raw(" Quit"),
             ]),
         }
-        .alignment(Alignment::Center);
+        let line = Line::from(spans).alignment(Alignment::Center);
         self.render_widget(Paragraph::new(line), area);
     }
 }
@@ -372,6 +454,61 @@ fn section(title: &'static str, color: Color) -> Block<'static> {
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(color))
         .title(Span::styled(title, Style::default().fg(color)))
+}
+
+fn panel(title: &'static str, position: String, color: Color) -> Block<'static> {
+    section(title, color).title(Line::from(position).right_aligned())
+}
+
+fn list_position(cursor: usize, len: usize) -> String {
+    if len == 0 {
+        " 0/0 ".to_owned()
+    } else {
+        format!(" {}/{} ", cursor + 1, len)
+    }
+}
+
+fn window_start(cursor: usize, len: usize, visible: usize) -> usize {
+    let max_start = len.saturating_sub(visible);
+    cursor.saturating_sub(visible / 2).min(max_start)
+}
+
+fn result_line(result: &TaskResult, selected: bool, inline_detail: bool) -> Line<'static> {
+    let (marker, color) = match result.status {
+        ResultStatus::Success => ("✓", Color::Green),
+        ResultStatus::Failure => ("×", Color::LightRed),
+        ResultStatus::Cancelled => ("■", Color::Yellow),
+        ResultStatus::Skipped => ("·", Color::Yellow),
+    };
+    let position = result
+        .position
+        .map_or_else(String::new, |(index, total)| format!("{index}/{total} "));
+    let mut spans = vec![
+        Span::styled(
+            if selected { " › " } else { "   " },
+            Style::default().fg(if selected { ACCENT } else { Color::DarkGray }),
+        ),
+        Span::styled(format!("{marker} "), Style::default().fg(color)),
+        Span::styled(position, Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            result.input.display().to_string(),
+            Style::default().fg(if selected { ACCENT } else { Color::White }),
+        ),
+    ];
+    if selected && inline_detail {
+        if let Some(error) = &result.error {
+            spans.push(Span::styled(
+                format!(" — {error}"),
+                Style::default().fg(Color::LightRed),
+            ));
+        } else if let Some(output) = &result.output {
+            spans.push(Span::styled(
+                format!(" → {}", output.display()),
+                Style::default().fg(Color::Gray),
+            ));
+        }
+    }
+    Line::from(spans)
 }
 
 fn path_line(label: &'static str, value: String) -> Line<'static> {

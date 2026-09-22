@@ -9,7 +9,7 @@ mod cli;
 #[cfg(test)]
 mod tests;
 
-const DEFAULT_VAAPI_DEVICE: &str = "/dev/dri/renderD128";
+pub const DEFAULT_VAAPI_DEVICE: &str = "/dev/dri/renderD128";
 
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
@@ -497,6 +497,10 @@ impl VideoEncoding {
     }
 
     pub fn set_quality(&mut self, quality: u8) {
+        self.set_rate(Some(RateControl::Quality(quality)));
+    }
+
+    pub fn set_rate(&mut self, value: Option<RateControl>) {
         let rate = match self {
             Self::X264 { rate, .. }
             | Self::X265 { rate, .. }
@@ -507,7 +511,7 @@ impl VideoEncoding {
             | Self::Qsv { rate, .. }
             | Self::Vaapi { rate, .. } => rate,
         };
-        *rate = Some(RateControl::Quality(quality));
+        *rate = value;
     }
 
     fn quality_option(&self) -> VideoOption {

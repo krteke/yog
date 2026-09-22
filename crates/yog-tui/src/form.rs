@@ -2,14 +2,17 @@ use std::{num::NonZeroU32, path::PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use yog_core::ffmpeg::{
-    decoding::DecodingBackend,
     encoding::VideoEncoding,
     plan::{Container, TranscodeRequest, VideoAction as CoreVideoAction},
     vmaf::VmafOptions,
 };
 use yog_runtime::{Command, Config, EmulationOptions, Operation, Options, Validate};
 
-use crate::file_picker::PathSelection;
+use crate::{
+    candidate::{CandidateDraft, CandidateEditor},
+    encoding::{DECODERS, ENCODERS, EncoderChoice, cycle},
+    file_picker::PathSelection,
+};
 
 const CONTAINERS: &[Option<Container>] = &[
     None,
@@ -34,28 +37,6 @@ const CONTAINERS: &[Option<Container>] = &[
     Some(Container::Ogg),
     Some(Container::Ogv),
 ];
-const DECODERS: &[DecoderChoice] = &[
-    DecoderChoice::Software,
-    DecoderChoice::Vaapi,
-    DecoderChoice::Cuda,
-    DecoderChoice::Qsv,
-];
-const X26X_PRESETS: &[&str] = &[
-    "ultrafast",
-    "superfast",
-    "veryfast",
-    "faster",
-    "fast",
-    "medium",
-    "slow",
-    "slower",
-    "veryslow",
-];
-const QSV_PRESETS: &[&str] = &[
-    "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow",
-];
-const NVENC_PRESETS: &[&str] = &["p1", "p2", "p3", "p4", "p5", "p6", "p7"];
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
     Input,
@@ -65,6 +46,7 @@ pub enum Field {
     Container,
     Decoder,
     Action,
+    Candidates,
     Encoder,
     Preset,
     Quality,
@@ -97,6 +79,7 @@ impl Mode {
 pub enum FormAction {
     None,
     PickInput,
+    EditCandidates,
     Submit,
     Quit,
 }
@@ -119,132 +102,6 @@ enum VmafMode {
     Full,
     Subsample,
 }
-
-#[derive(Debug, Clone, Copy)]
-enum DecoderChoice {
-    Software,
-    Vaapi,
-    Cuda,
-    Qsv,
-}
-
-impl DecoderChoice {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Software => "Software",
-            Self::Vaapi => "VAAPI",
-            Self::Cuda => "CUDA",
-            Self::Qsv => "QSV",
-        }
-    }
-
-    fn backend(self) -> DecodingBackend {
-        match self {
-            Self::Software => DecodingBackend::Software,
-            Self::Vaapi => DecodingBackend::Vaapi(None),
-            Self::Cuda => DecodingBackend::Cuda(None),
-            Self::Qsv => DecodingBackend::Qsv(None),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-enum Presets {
-    Named(&'static [&'static str]),
-    Numbered { first: u8, last: u8 },
-    None,
-}
-
-impl Presets {
-    fn len(self) -> usize {
-        match self {
-            Self::Named(values) => values.len(),
-            Self::Numbered { first, last } => usize::from(last - first) + 1,
-            Self::None => 0,
-        }
-    }
-
-    fn label(self, index: usize) -> String {
-        match self {
-            Self::Named(values) => values[index].to_owned(),
-            Self::Numbered { first, .. } => (first + index as u8).to_string(),
-            Self::None => "—".to_owned(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Encoder {
-    name: &'static str,
-    presets: Presets,
-}
-
-impl Encoder {
-    fn encoding(self) -> VideoEncoding {
-        self.name
-            .parse()
-            .expect("TUI encoder names must be accepted by yog-core")
-    }
-}
-
-const ENCODERS: &[Encoder] = &[
-    Encoder {
-        name: "libx264",
-        presets: Presets::Named(X26X_PRESETS),
-    },
-    Encoder {
-        name: "libx265",
-        presets: Presets::Named(X26X_PRESETS),
-    },
-    Encoder {
-        name: "libsvtav1",
-        presets: Presets::Numbered { first: 0, last: 13 },
-    },
-    Encoder {
-        name: "libaom-av1",
-        presets: Presets::Numbered { first: 0, last: 8 },
-    },
-    Encoder {
-        name: "librav1e",
-        presets: Presets::Numbered { first: 0, last: 10 },
-    },
-    Encoder {
-        name: "h264_nvenc",
-        presets: Presets::Named(NVENC_PRESETS),
-    },
-    Encoder {
-        name: "hevc_nvenc",
-        presets: Presets::Named(NVENC_PRESETS),
-    },
-    Encoder {
-        name: "av1_nvenc",
-        presets: Presets::Named(NVENC_PRESETS),
-    },
-    Encoder {
-        name: "h264_qsv",
-        presets: Presets::Named(QSV_PRESETS),
-    },
-    Encoder {
-        name: "hevc_qsv",
-        presets: Presets::Named(QSV_PRESETS),
-    },
-    Encoder {
-        name: "av1_qsv",
-        presets: Presets::Named(QSV_PRESETS),
-    },
-    Encoder {
-        name: "h264_vaapi",
-        presets: Presets::None,
-    },
-    Encoder {
-        name: "hevc_vaapi",
-        presets: Presets::None,
-    },
-    Encoder {
-        name: "av1_vaapi",
-        presets: Presets::None,
-    },
-];
 
 #[derive(Debug, Default)]
 struct TextInput {
@@ -317,6 +174,7 @@ pub struct CommandForm {
     quality: u8,
     range_start: u8,
     range_end: u8,
+    candidates: Vec<CandidateDraft>,
     overwrite: bool,
     verify: bool,
     vmaf: VmafMode,
@@ -342,6 +200,7 @@ impl Default for CommandForm {
             quality: 23,
             range_start: *range.start(),
             range_end: *range.end(),
+            candidates: Vec::new(),
             overwrite: false,
             verify: false,
             vmaf: VmafMode::Off,
@@ -388,6 +247,28 @@ impl CommandForm {
         self.input = Some(input);
     }
 
+    pub fn candidate_editor(&self) -> CandidateEditor {
+        CandidateEditor::new(
+            self.candidates.clone(),
+            CandidateDraft::new(
+                self.decoder,
+                self.encoder,
+                self.preset,
+                self.range_start,
+                self.range_end,
+            ),
+        )
+    }
+
+    pub fn set_candidates(&mut self, candidates: Vec<CandidateDraft>) {
+        self.candidates = candidates;
+        self.focus = self
+            .fields()
+            .iter()
+            .position(|field| *field == Field::Candidates)
+            .expect("candidate editing is only available in Emulate mode");
+    }
+
     pub fn focused(&self) -> Field {
         self.fields()[self.focus]
     }
@@ -397,18 +278,27 @@ impl CommandForm {
         if self.mode == Mode::Transcode {
             fields.push(Field::Output);
         }
-        fields.extend([Field::Container, Field::Decoder]);
+        fields.push(Field::Container);
+        if self.mode != Mode::Emulate || self.candidates.is_empty() {
+            fields.push(Field::Decoder);
+        }
         fields
     }
 
     pub fn video_fields(&self) -> Vec<Field> {
         let mut fields = Vec::new();
+        if self.mode == Mode::Emulate {
+            fields.push(Field::Candidates);
+            if !self.candidates.is_empty() {
+                return fields;
+            }
+        }
         if self.mode == Mode::Transcode {
             fields.push(Field::Action);
         }
         if self.mode != Mode::Transcode || self.action == VideoAction::Encode {
             fields.push(Field::Encoder);
-            if self.encoder().presets.len() > 0 {
+            if self.encoder().preset_count() > 0 {
                 fields.push(Field::Preset);
             }
             if self.mode == Mode::Emulate {
@@ -443,6 +333,7 @@ impl CommandForm {
             Field::Container => "Container",
             Field::Decoder => "Decoder",
             Field::Action => "Video",
+            Field::Candidates => "Candidates",
             Field::Encoder => "Encoder",
             Field::Preset => "Preset",
             Field::Quality => "Quality",
@@ -471,8 +362,15 @@ impl CommandForm {
                 VideoAction::Copy => "Copy".to_owned(),
                 VideoAction::Encode => "Encode".to_owned(),
             },
-            Field::Encoder => self.encoder().encoding().to_string(),
-            Field::Preset => self.encoder().presets.label(self.preset),
+            Field::Candidates => {
+                if self.candidates.is_empty() {
+                    "Single encoder".to_owned()
+                } else {
+                    format!("{} configured", self.candidates.len())
+                }
+            }
+            Field::Encoder => self.encoder().label(),
+            Field::Preset => self.encoder().preset_label(self.preset),
             Field::Quality => format!(
                 "{} {}",
                 self.encoder().encoding().quality_parameter(),
@@ -512,7 +410,7 @@ impl CommandForm {
     }
 
     fn move_focus(&mut self, direction: isize) {
-        self.focus = step(self.focus, self.fields().len(), direction);
+        self.focus = cycle(self.focus, self.fields().len(), direction);
     }
 
     fn change_mode(&mut self, forward: bool) {
@@ -532,6 +430,7 @@ impl CommandForm {
                 self.text_input_mut(field).begin();
                 self.editing = Some(field);
             }
+            Field::Candidates => return FormAction::EditCandidates,
             Field::Overwrite => self.overwrite = !self.overwrite,
             Field::Verify => self.verify = !self.verify,
             Field::Start => return FormAction::Submit,
@@ -542,12 +441,12 @@ impl CommandForm {
 
     fn adjust(&mut self, direction: isize) {
         match self.focused() {
-            Field::Input | Field::Output | Field::Png | Field::Svg => {}
+            Field::Input | Field::Output | Field::Png | Field::Svg | Field::Candidates => {}
             Field::Container => {
-                self.container = step(self.container, CONTAINERS.len(), direction);
+                self.container = cycle(self.container, CONTAINERS.len(), direction);
             }
             Field::Decoder => {
-                self.decoder = step(self.decoder, DECODERS.len(), direction);
+                self.decoder = cycle(self.decoder, DECODERS.len(), direction);
             }
             Field::Action => {
                 self.action = if direction < 0 {
@@ -558,9 +457,9 @@ impl CommandForm {
                 self.clamp_focus();
             }
             Field::Encoder => {
-                self.encoder = step(self.encoder, ENCODERS.len(), direction);
+                self.encoder = cycle(self.encoder, ENCODERS.len(), direction);
                 let encoder = self.encoder();
-                self.preset = self.preset.min(encoder.presets.len().saturating_sub(1));
+                self.preset = self.preset.min(encoder.preset_count().saturating_sub(1));
                 let quality = encoder.encoding().quality_range();
                 self.quality = self.quality.clamp(*quality.start(), *quality.end());
                 if self.mode == Mode::Emulate {
@@ -569,7 +468,7 @@ impl CommandForm {
                 }
             }
             Field::Preset => {
-                self.preset = step(self.preset, self.encoder().presets.len(), direction);
+                self.preset = cycle(self.preset, self.encoder().preset_count(), direction);
             }
             Field::Quality => {
                 let quality = self.encoder().encoding().quality_range();
@@ -603,7 +502,7 @@ impl CommandForm {
                     VmafMode::Full => 1,
                     VmafMode::Subsample => 2,
                 };
-                self.vmaf = match step(index, 3, direction) {
+                self.vmaf = match cycle(index, 3, direction) {
                     0 => VmafMode::Off,
                     1 => VmafMode::Full,
                     _ => VmafMode::Subsample,
@@ -633,12 +532,18 @@ impl CommandForm {
             return Err("Emulation requires an input file".to_owned());
         }
 
-        let video = if self.mode == Mode::Transcode && self.action == VideoAction::Copy {
-            CoreVideoAction::Copy
+        let candidate_mode = self.mode == Mode::Emulate && !self.candidates.is_empty();
+        let video =
+            if candidate_mode || self.mode == Mode::Transcode && self.action == VideoAction::Copy {
+                CoreVideoAction::Copy
+            } else {
+                CoreVideoAction::Encode(self.selected_encoding(self.mode != Mode::Emulate))
+            };
+        let decoding = if candidate_mode {
+            DECODERS[0].backend()
         } else {
-            CoreVideoAction::Encode(self.selected_encoding(self.mode != Mode::Emulate))
+            DECODERS[self.decoder].backend()
         };
-        let decoding = DECODERS[self.decoder].backend();
         let output = match self.mode {
             Mode::Transcode => PathBuf::from(&self.output.value),
             Mode::Predict | Mode::Emulate => PathBuf::new(),
@@ -659,8 +564,12 @@ impl CommandForm {
                 Mode::Emulate => Operation::Emulate(EmulationOptions {
                     png: (!self.png.value.is_empty()).then(|| PathBuf::from(&self.png.value)),
                     svg: (!self.svg.value.is_empty()).then(|| PathBuf::from(&self.svg.value)),
-                    qualities: (self.range_start..=self.range_end).collect(),
-                    candidates: Vec::new(),
+                    qualities: if candidate_mode {
+                        Vec::new()
+                    } else {
+                        (self.range_start..=self.range_end).collect()
+                    },
+                    candidates: self.candidates.iter().map(CandidateDraft::build).collect(),
                 }),
             },
             recursive: self.mode != Mode::Emulate && input.recursive(),
@@ -725,12 +634,7 @@ impl CommandForm {
 
     fn selected_encoding(&self, fixed_quality: bool) -> VideoEncoding {
         let encoder = self.encoder();
-        let mut encoding = encoder.encoding();
-        if encoder.presets.len() > 0 {
-            encoding
-                .try_set_preset(&encoder.presets.label(self.preset))
-                .expect("TUI preset choices must be accepted by yog-core");
-        }
+        let mut encoding = encoder.configured(self.preset);
         if fixed_quality {
             encoding.set_quality(self.quality);
         }
@@ -746,17 +650,8 @@ impl CommandForm {
         }
     }
 
-    fn encoder(&self) -> Encoder {
+    fn encoder(&self) -> EncoderChoice {
         ENCODERS[self.encoder]
-    }
-}
-
-fn step(current: usize, len: usize, direction: isize) -> usize {
-    debug_assert!(len > 0);
-    if direction < 0 {
-        current.checked_sub(1).unwrap_or(len - 1)
-    } else {
-        (current + 1) % len
     }
 }
 
@@ -829,6 +724,7 @@ mod tests {
         assert_eq!(
             form.video_fields(),
             vec![
+                Field::Candidates,
                 Field::Encoder,
                 Field::Preset,
                 Field::RangeStart,
@@ -839,6 +735,11 @@ mod tests {
             form.option_fields(),
             vec![Field::Png, Field::Svg, Field::Overwrite, Field::Start]
         );
+
+        form.set_candidates(vec![CandidateDraft::new(0, 1, 5, 18, 30)]);
+        assert_eq!(form.source_fields(), vec![Field::Input, Field::Container]);
+        assert_eq!(form.video_fields(), vec![Field::Candidates]);
+        assert_eq!(form.value(Field::Candidates), "1 configured");
 
         form.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(form.mode(), Mode::Transcode);

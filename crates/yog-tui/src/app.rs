@@ -2,6 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use yog_runtime::{RunOutcome, event::RunEvent};
 
 use crate::{
+    candidate::{CandidateAction, CandidateEditor},
     file_picker::{FilePicker, PickerAction},
     form::{CommandForm, FormAction, RunRequest},
     run::{RunStage, RunState},
@@ -17,6 +18,7 @@ pub enum AppAction {
 #[derive(Default)]
 pub struct App {
     form: CommandForm,
+    candidate_editor: Option<CandidateEditor>,
     picker: Option<FilePicker>,
     run: Option<RunState>,
     error: Option<String>,
@@ -24,6 +26,18 @@ pub struct App {
 
 impl App {
     pub fn handle_key(&mut self, key: KeyEvent) -> AppAction {
+        if let Some(editor) = &mut self.candidate_editor {
+            match editor.handle_key(key) {
+                CandidateAction::None => {}
+                CandidateAction::Cancel => self.candidate_editor = None,
+                CandidateAction::Confirm(candidates) => {
+                    self.form.set_candidates(candidates);
+                    self.candidate_editor = None;
+                }
+            }
+            return AppAction::None;
+        }
+
         if let Some(picker) = &mut self.picker {
             match picker.handle_key(key) {
                 PickerAction::None => {}
@@ -73,6 +87,10 @@ impl App {
                 }
                 AppAction::None
             }
+            FormAction::EditCandidates => {
+                self.candidate_editor = Some(self.form.candidate_editor());
+                AppAction::None
+            }
             FormAction::Submit => match self.form.build_request() {
                 Ok(request) => {
                     self.run = Some(RunState::new(&request.command.operation));
@@ -92,6 +110,10 @@ impl App {
 
     pub fn picker(&self) -> Option<&FilePicker> {
         self.picker.as_ref()
+    }
+
+    pub fn candidate_editor(&self) -> Option<&CandidateEditor> {
+        self.candidate_editor.as_ref()
     }
 
     pub fn run(&self) -> Option<&RunState> {
@@ -165,5 +187,64 @@ mod tests {
             AppAction::None
         ));
         assert!(app.run().is_none());
+    }
+
+    #[test]
+    fn candidate_edits_are_applied_only_after_confirmation() {
+        let mut app = App::default();
+        app.handle_key(key(KeyCode::Tab));
+        app.handle_key(key(KeyCode::Tab));
+        app.handle_key(key(KeyCode::Char('j')));
+        app.handle_key(key(KeyCode::Char('j')));
+        app.handle_key(key(KeyCode::Char('j')));
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.candidate_editor().is_some());
+
+        app.handle_key(key(KeyCode::Char('a')));
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.candidate_editor().is_some());
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.candidate_editor().is_none());
+        assert_eq!(
+            app.form().value(crate::form::Field::Candidates),
+            "Single encoder"
+        );
+
+        app.handle_key(key(KeyCode::Enter));
+        app.handle_key(key(KeyCode::Char('a')));
+        app.handle_key(key(KeyCode::Enter));
+        app.handle_key(key(KeyCode::Char('a')));
+        app.handle_key(key(KeyCode::Enter));
+        app.handle_key(key(KeyCode::Char('s')));
+        assert!(app.candidate_editor().is_none());
+        assert_eq!(
+            app.form().value(crate::form::Field::Candidates),
+            "2 configured"
+        );
+
+        app.handle_key(key(KeyCode::Enter));
+        app.handle_key(key(KeyCode::Enter));
+        app.handle_key(key(KeyCode::Char('l')));
+        app.handle_key(key(KeyCode::Enter));
+        assert!(
+            app.candidate_editor().unwrap().candidates()[0]
+                .summary()
+                .contains("VAAPI")
+        );
+        app.handle_key(key(KeyCode::Char('s')));
+
+        app.handle_key(key(KeyCode::Enter));
+        app.handle_key(key(KeyCode::Char('d')));
+        app.handle_key(key(KeyCode::Char('d')));
+        app.handle_key(key(KeyCode::Char('s')));
+        assert_eq!(
+            app.form().value(crate::form::Field::Candidates),
+            "Single encoder"
+        );
+        assert!(
+            app.form()
+                .source_fields()
+                .contains(&crate::form::Field::Decoder)
+        );
     }
 }

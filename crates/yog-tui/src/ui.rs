@@ -1,3 +1,4 @@
+mod candidate;
 mod picker;
 mod run;
 
@@ -12,7 +13,7 @@ use ratatui::{
 use crate::{
     app::App,
     form::{CommandForm, Field, Mode},
-    ui::{picker::DrawPicker, run::DrawRuning},
+    ui::{candidate::DrawCandidates, picker::DrawPicker, run::DrawRuning},
 };
 
 const ACCENT: Color = Color::Rgb(125, 195, 255);
@@ -58,6 +59,9 @@ impl DrawApp for Frame<'_> {
 
         if let Some(file_picker) = app.picker() {
             self.draw_picker(area, file_picker);
+        }
+        if let Some(editor) = app.candidate_editor() {
+            self.draw_candidates(area, editor);
         }
     }
 

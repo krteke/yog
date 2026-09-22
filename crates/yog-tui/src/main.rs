@@ -1,4 +1,6 @@
 mod app;
+mod candidate;
+mod encoding;
 mod file_picker;
 mod form;
 mod run;

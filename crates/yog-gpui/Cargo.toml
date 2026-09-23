@@ -5,3 +5,7 @@ edition.workspace = true
 
 [dependencies]
 gpui-kit.workspace = true
+tokio = { workspace = true, features = ["rt", "sync"] }
+tokio-util.workspace = true
+yog-core.workspace = true
+yog-runtime.workspace = true

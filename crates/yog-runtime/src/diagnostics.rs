@@ -37,13 +37,12 @@ impl<'a> Diagnostics<'a> {
 
     pub fn ffmpeg(&self, bytes: &[u8]) -> bool {
         let message = String::from_utf8_lossy(bytes);
-        let message = message.trim_end_matches(['\r', '\n']);
         if message.is_empty() || !log::log_enabled!(log::Level::Debug) {
             return false;
         }
 
         self.stderr_logged.store(true, Ordering::Relaxed);
-        log::debug!("{message}");
+        log::debug!(target: "yog::ffmpeg", "{message}");
         true
     }
 

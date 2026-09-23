@@ -1,5 +1,6 @@
 mod components;
 mod emulate;
+pub(crate) mod messages;
 mod predict;
 mod source;
 mod transcode;
@@ -257,7 +258,7 @@ impl Render for Workspace {
                 .child(
                     resizable_panel()
                         .size(px(224.))
-                        .size_range(px(176.)..px(360.))
+                        .size_range(px(160.)..px(240.))
                         .flex_none()
                         .child(self.render_sidebar(cx).w_full()),
                 )

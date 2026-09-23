@@ -38,8 +38,8 @@ pub fn page_layout(
                 .child(resizable_panel().child(work_area))
                 .child(
                     resizable_panel()
-                        .size(px(360.))
-                        .size_range(px(300.)..px(520.))
+                        .size(px(300.))
+                        .size_range(px(200.)..px(420.))
                         .flex_none()
                         .child(inspector),
                 ),

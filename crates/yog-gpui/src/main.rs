@@ -1,3 +1,4 @@
+mod logging;
 mod workspace;
 
 use gpui_kit::component::{Root, Theme, TitleBar};
@@ -5,6 +6,7 @@ use gpui_kit::*;
 use workspace::Workspace;
 
 fn main() {
+    logging::init();
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
         .run(|cx| {
@@ -17,7 +19,6 @@ fn main() {
                     size(px(1280.), px(800.)),
                     cx,
                 ))),
-                window_min_size: Some(size(px(980.), px(620.))),
                 titlebar: Some(TitlebarOptions {
                     title: Some("Yog".into()),
                     ..TitleBar::title_bar_options()

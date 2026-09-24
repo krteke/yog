@@ -1,12 +1,13 @@
 use gpui_kit::component::{
-    ActiveTheme, Disableable, IndexPath, RopeExt as _, Sizable as _, StyledExt as _,
+    ActiveTheme, Disableable, Icon, IconName, IndexPath, RopeExt as _, Sizable as _,
+    StyledExt as _,
     button::{Button, ButtonVariants},
     input::{Textarea, TextareaState},
     select::{SearchableVec, Select, SelectEvent, SelectState},
 };
 use gpui_kit::{
-    AppContext as _, ClipboardItem, Context, Entity, IntoElement, ParentElement as _, Render,
-    Styled as _, Subscription, Window, div, relative,
+    AppContext as _, ClipboardItem, Context, Entity, EventEmitter, IntoElement, ParentElement as _,
+    Render, Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, relative,
 };
 
 const FILTERS: &[&str] = &[
@@ -59,6 +60,8 @@ pub struct NewMessage {
     pub level: MessageLevel,
     pub text: String,
 }
+
+pub struct ExpansionChanged;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Filter {
@@ -124,15 +127,27 @@ fn complete_ffmpeg_lines(pending: &mut String, chunk: &str) -> Vec<String> {
     complete
 }
 
+fn at_bottom(text: &TextareaState) -> bool {
+    text.selected_range().is_empty()
+        && text
+            .visible_row_range()
+            .is_none_or(|rows| rows.end >= text.text().lines_len())
+}
+
 pub struct Messages {
     entries: Vec<NewMessage>,
     ffmpeg_partial: String,
+    expanded: bool,
     filter: Filter,
     filter_select: Entity<SelectState<SearchableVec<&'static str>>>,
     text: Entity<TextareaState>,
+    page_visible: bool,
+    follow_on_show: bool,
     follow_pending: bool,
     _filter_subscription: Subscription,
 }
+
+impl EventEmitter<ExpansionChanged> for Messages {}
 
 impl Messages {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -163,17 +178,39 @@ impl Messages {
         Self {
             entries: Vec::new(),
             ffmpeg_partial: String::new(),
+            expanded: false,
             filter: Filter::All,
             filter_select,
             text,
+            page_visible: true,
+            follow_on_show: true,
             follow_pending: false,
             _filter_subscription: filter_subscription,
+        }
+    }
+
+    pub fn is_expanded(&self) -> bool {
+        self.expanded
+    }
+
+    pub fn set_page_visible(&mut self, visible: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.page_visible == visible {
+            return;
+        }
+        if !visible && self.expanded {
+            self.follow_on_show = at_bottom(self.text.read(cx));
+        }
+        self.page_visible = visible;
+        if visible && self.expanded && self.follow_on_show {
+            let scroll = self.text.read(cx).scroll_offset();
+            self.schedule_follow(scroll, window, cx);
         }
     }
 
     pub fn clear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.entries.clear();
         self.ffmpeg_partial.clear();
+        self.follow_on_show = true;
         self.text
             .update(cx, |text, cx| text.set_value("", window, cx));
         cx.notify();
@@ -242,42 +279,58 @@ impl Messages {
         if appended.is_empty() {
             return;
         }
+        let rendered = self.expanded && self.page_visible;
+        let follow_on_show = self.follow_on_show;
         let mut follow_from = None;
         self.text.update(cx, |text, cx| {
             let selection = text.selected_range();
             let scroll = text.scroll_offset();
-            let at_bottom = selection.is_empty()
-                && text
-                    .visible_row_range()
-                    .is_none_or(|rows| rows.end >= text.text().lines_len());
+            let was_at_bottom = if rendered {
+                at_bottom(text)
+            } else {
+                follow_on_show
+            };
             let end = text.text().len();
             text.set_selected_range(end..end, cx);
             text.insert(appended, window, cx);
-            if at_bottom {
+            if was_at_bottom && rendered {
                 follow_from = Some(scroll);
-            } else {
+            } else if !was_at_bottom {
                 text.set_selected_range(selection, cx);
                 text.set_scroll_offset(scroll, cx);
             }
         });
-        if let Some(scroll) = follow_from
-            && !self.follow_pending
-        {
-            self.follow_pending = true;
-            let view = cx.entity();
-            window.on_next_frame(move |_, cx| {
-                view.update(cx, |this, cx| {
-                    this.follow_pending = false;
-                    this.text.update(cx, |text, cx| {
-                        if text.selected_range().is_empty() && text.scroll_offset() == scroll {
-                            let end = text.text().len();
-                            text.set_selected_range(end..end, cx);
-                        }
-                    });
-                });
-            });
+        if let Some(scroll) = follow_from {
+            self.schedule_follow(scroll, window, cx);
         }
         cx.notify();
+    }
+
+    fn schedule_follow(
+        &mut self,
+        scroll: gpui_kit::Point<gpui_kit::Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.follow_pending {
+            return;
+        }
+        self.follow_pending = true;
+        let view = cx.entity();
+        window.on_next_frame(move |_, cx| {
+            view.update(cx, |this, cx| {
+                this.follow_pending = false;
+                if !this.expanded || !this.page_visible {
+                    return;
+                }
+                this.text.update(cx, |text, cx| {
+                    if text.selected_range().is_empty() && text.scroll_offset().y <= scroll.y {
+                        let end = text.text().len();
+                        text.set_selected_range(end..end, cx);
+                    }
+                });
+            });
+        });
     }
 
     fn rebuild_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -296,11 +349,12 @@ impl Messages {
 impl Render for Messages {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
-            .size_full()
+            .w_full()
             .min_w_0()
             .min_h_0()
             .flex()
             .flex_col()
+            .when(self.expanded, |this| this.h_full())
             .bg(cx.theme().background)
             .child(
                 div()
@@ -309,43 +363,107 @@ impl Render for Messages {
                     .px_4()
                     .py_2()
                     .flex()
-                    .items_center()
+                    .flex_col()
                     .gap_2()
+                    .when(!self.expanded, |this| this.border_t_1())
                     .border_b_1()
                     .border_color(cx.theme().border)
-                    .child(div().font_medium().child("Messages"))
-                    .child(div().flex_1().min_w_0())
+                    .bg(cx.theme().group_box)
                     .child(
-                        Select::new(&self.filter_select)
-                            .id("messages-filter")
-                            .accessibility_label("Message filter")
-                            .w_32(),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().font_medium().child("Messages"))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(format!("{} total lines", self.entries.len())),
+                            )
+                            .child(div().flex_1().min_w_0())
+                            .child(
+                                Button::new("toggle-messages")
+                                    .ghost()
+                                    .small()
+                                    .label(if self.expanded { "Collapse" } else { "Expand" })
+                                    .icon(Icon::new(if self.expanded {
+                                        IconName::ChevronDown
+                                    } else {
+                                        IconName::ChevronUp
+                                    }))
+                                    .accessibility_label(if self.expanded {
+                                        "Collapse messages"
+                                    } else {
+                                        "Expand messages"
+                                    })
+                                    .tooltip(if self.expanded {
+                                        "Collapse messages"
+                                    } else {
+                                        "Expand messages"
+                                    })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        if this.expanded {
+                                            this.follow_on_show = at_bottom(this.text.read(cx));
+                                            this.expanded = false;
+                                        } else {
+                                            this.expanded = true;
+                                            if this.follow_on_show {
+                                                let scroll = this.text.read(cx).scroll_offset();
+                                                this.schedule_follow(scroll, window, cx);
+                                            }
+                                        }
+                                        cx.emit(ExpansionChanged);
+                                        cx.notify();
+                                    })),
+                            ),
                     )
-                    .child(
-                        Button::new("copy-messages")
-                            .ghost()
-                            .small()
-                            .label("Copy all")
-                            .disabled(self.text.read(cx).text().len() == 0)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let content = this.text.read(cx).value().to_string();
-                                cx.write_to_clipboard(ClipboardItem::new_string(content));
-                            })),
+                    .when(self.expanded, |this| {
+                        this.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    div().w_32().flex_none().child(
+                                        Select::new(&self.filter_select)
+                                            .id("messages-filter")
+                                            .accessibility_label("Message filter")
+                                            .w_full(),
+                                    ),
+                                )
+                                .child(
+                                    Button::new("copy-messages")
+                                        .ghost()
+                                        .small()
+                                        .label("Copy all")
+                                        .disabled(self.text.read(cx).text().len() == 0)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            let content = this.text.read(cx).value().to_string();
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                content,
+                                            ));
+                                        })),
+                                ),
+                        )
+                    }),
+            )
+            .when(self.expanded, |this| {
+                this.child(
+                    div().flex_1().min_h_0().min_w_0().child(
+                        Textarea::new(&self.text)
+                            .readonly(true)
+                            .appearance(false)
+                            .bordered(false)
+                            .h(relative(1.))
+                            .w_full()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .text_sm()
+                            .aria_label("Messages"),
                     ),
-            )
-            .child(
-                div().flex_1().min_h_0().min_w_0().child(
-                    Textarea::new(&self.text)
-                        .readonly(true)
-                        .appearance(false)
-                        .bordered(false)
-                        .h(relative(1.))
-                        .w_full()
-                        .font_family(cx.theme().mono_font_family.clone())
-                        .text_sm()
-                        .aria_label("Messages"),
-                ),
-            )
+                )
+            })
     }
 }
 
@@ -384,7 +502,7 @@ mod tests {
     fn toolbar_stays_above_selectable_text_and_copies_its_contents(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let mut messages = None;
-        let window_handle = cx.open_window(size(px(420.), px(240.)), |window, cx| {
+        let window_handle = cx.open_window(size(px(420.), px(400.)), |window, cx| {
             let view = cx.new(|cx| Messages::new(window, cx));
             messages = Some(view.clone());
             Root::new(view, window, cx)
@@ -392,6 +510,12 @@ mod tests {
         let messages = messages.unwrap();
 
         cx.update_window(window_handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let text_id = ("input", messages.read(cx).text.entity_id());
+            assert!(window.try_find(text_id).is_none());
+            window.click("toggle-messages", cx);
+            assert!(messages.read(cx).is_expanded());
+
             messages.update(cx, |messages, cx| {
                 messages.push(
                     NewMessage {
@@ -405,7 +529,6 @@ mod tests {
             });
             window.render_frame(cx);
 
-            let text_id = ("input", messages.read(cx).text.entity_id());
             let toolbar_bottom = window.find("copy-messages").bounds().bottom();
             let text_top = window.find(text_id).bounds().top();
             assert!(toolbar_bottom <= text_top);
@@ -441,8 +564,58 @@ mod tests {
                 cx.read_from_clipboard().and_then(|item| item.text()),
                 Some("[WARN] [Program] Cannot open input\n[INFO] [Program] Continuing\n".into())
             );
+        })
+        .unwrap();
+        cx.update_window(window_handle.into(), |_, window, cx| {
+            window.click("toggle-messages", cx);
+            assert!(!messages.read(cx).is_expanded());
+            assert!(window.try_find("messages-filter").is_none());
+            window.click("toggle-messages", cx);
+            assert_eq!(
+                messages.read(cx).text.read(cx).value().as_ref(),
+                "[WARN] [Program] Cannot open input\n[INFO] [Program] Continuing\n"
+            );
+        })
+        .unwrap();
+    }
 
+    #[gpui_kit::test]
+    fn filter_menu_changes_displayed_messages(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut messages = None;
+        let window_handle = cx.open_window(size(px(420.), px(400.)), |window, cx| {
+            let view = cx.new(|cx| Messages::new(window, cx));
+            messages = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let messages = messages.unwrap();
+
+        cx.update_window(window_handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("toggle-messages", cx);
+            messages.update(cx, |messages, cx| {
+                messages.push(
+                    NewMessage {
+                        source: MessageSource::Program,
+                        level: MessageLevel::Info,
+                        text: "Starting".into(),
+                    },
+                    window,
+                    cx,
+                );
+                messages.push(
+                    NewMessage {
+                        source: MessageSource::Ffmpeg,
+                        level: MessageLevel::Debug,
+                        text: "frame=1\n".into(),
+                    },
+                    window,
+                    cx,
+                );
+            });
+            window.render_frame(cx);
             window.click("messages-filter", cx);
+            assert_eq!(window.find("messages-filter").expanded(), Some(true));
             window.press("down", cx);
             window.press("enter", cx);
         })
@@ -451,23 +624,23 @@ mod tests {
         cx.update(|cx| {
             assert_eq!(
                 messages.read(cx).text.read(cx).value().as_ref(),
-                "[WARN] Cannot open input\n[INFO] Continuing\n"
+                "[INFO] Starting\n"
             );
         });
     }
 
     #[gpui_kit::test]
-    fn manual_scroll_is_not_overridden_by_new_messages(cx: &mut TestAppContext) {
+    fn closed_panel_opens_at_latest_message(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let mut messages = None;
-        let window_handle = cx.open_window(size(px(420.), px(240.)), |window, cx| {
+        let handle = cx.open_window(size(px(420.), px(240.)), |window, cx| {
             let view = cx.new(|cx| Messages::new(window, cx));
             messages = Some(view.clone());
             Root::new(view, window, cx)
         });
         let messages = messages.unwrap();
 
-        cx.update_window(window_handle.into(), |_, window, cx| {
+        cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             let lines = (0..100)
                 .map(|index| format!("line {index}"))
@@ -485,7 +658,84 @@ mod tests {
                 );
             });
             window.render_frame(cx);
-            assert_eq!(window.simulate_next_frame(cx), 1);
+            window.click("toggle-messages", cx);
+            window.render_frame(cx);
+            window.simulate_next_frame(cx);
+            window.render_frame(cx);
+            window.simulate_next_frame(cx);
+            window.render_frame(cx);
+            let bottom = messages.read(cx).text.read(cx).scroll_offset().y;
+            assert!(bottom < px(0.));
+            assert_eq!(
+                messages
+                    .read(cx)
+                    .text
+                    .read(cx)
+                    .visible_row_range()
+                    .unwrap()
+                    .end,
+                messages.read(cx).text.read(cx).text().lines_len()
+            );
+
+            messages.update(cx, |messages, cx| {
+                messages.set_page_visible(false, window, cx);
+                messages.push(
+                    NewMessage {
+                        source: MessageSource::Program,
+                        level: MessageLevel::Info,
+                        text: (100..120)
+                            .map(|index| format!("line {index}"))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    },
+                    window,
+                    cx,
+                );
+                messages.set_page_visible(true, window, cx);
+            });
+            window.render_frame(cx);
+            window.simulate_next_frame(cx);
+            window.render_frame(cx);
+            window.simulate_next_frame(cx);
+            window.render_frame(cx);
+            assert!(messages.read(cx).text.read(cx).scroll_offset().y < bottom);
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn manual_scroll_is_not_overridden_by_new_messages(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut messages = None;
+        let window_handle = cx.open_window(size(px(420.), px(240.)), |window, cx| {
+            let view = cx.new(|cx| Messages::new(window, cx));
+            messages = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let messages = messages.unwrap();
+
+        cx.update_window(window_handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("toggle-messages", cx);
+            let lines = (0..100)
+                .map(|index| format!("line {index}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            messages.update(cx, |messages, cx| {
+                messages.push(
+                    NewMessage {
+                        source: MessageSource::Program,
+                        level: MessageLevel::Info,
+                        text: lines,
+                    },
+                    window,
+                    cx,
+                );
+            });
+            window.render_frame(cx);
+            window.simulate_next_frame(cx);
+            window.render_frame(cx);
+            window.simulate_next_frame(cx);
             window.render_frame(cx);
 
             let text = messages.read(cx).text.clone();
@@ -508,6 +758,8 @@ mod tests {
             window.render_frame(cx);
             window.simulate_next_frame(cx);
             window.render_frame(cx);
+            window.simulate_next_frame(cx);
+            window.render_frame(cx);
             assert!(text.read(cx).scroll_offset().y < bottom);
 
             text.update(cx, |text, cx| {
@@ -526,6 +778,31 @@ mod tests {
                     window,
                     cx,
                 );
+            });
+            window.render_frame(cx);
+            window.simulate_next_frame(cx);
+            window.render_frame(cx);
+            assert_eq!(text.read(cx).scroll_offset().y, px(0.));
+
+            window.click("toggle-messages", cx);
+            window.click("toggle-messages", cx);
+            window.render_frame(cx);
+            window.simulate_next_frame(cx);
+            window.render_frame(cx);
+            assert_eq!(text.read(cx).scroll_offset().y, px(0.));
+
+            messages.update(cx, |messages, cx| {
+                messages.set_page_visible(false, window, cx);
+                messages.push(
+                    NewMessage {
+                        source: MessageSource::Program,
+                        level: MessageLevel::Info,
+                        text: "while on another page".into(),
+                    },
+                    window,
+                    cx,
+                );
+                messages.set_page_visible(true, window, cx);
             });
             window.render_frame(cx);
             window.simulate_next_frame(cx);

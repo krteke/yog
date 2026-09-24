@@ -499,7 +499,7 @@ impl Render for TranscodeSettings {
             .quality_parameter();
 
         let mut video = Form::new().child(
-            Field::new().label("Video").child(
+            Field::new().label("Action").child(
                 RadioGroup::new("video-action")
                     .children(["Encode", "Copy"])
                     .selected_index(Some(if self.encode { 0 } else { 1 }))
@@ -620,6 +620,9 @@ impl Render for TranscodeSettings {
                             .flex()
                             .flex_col()
                             .gap_4()
+                            .pb_4()
+                            .border_b_1()
+                            .border_color(cx.theme().border)
                             .child(div().font_medium().child("Output"))
                             .child(
                                 Form::new()
@@ -643,6 +646,9 @@ impl Render for TranscodeSettings {
                             .flex()
                             .flex_col()
                             .gap_4()
+                            .pb_4()
+                            .border_b_1()
+                            .border_color(cx.theme().border)
                             .child(div().font_medium().child("Video"))
                             .child(video),
                     )
@@ -651,6 +657,9 @@ impl Render for TranscodeSettings {
                             .flex()
                             .flex_col()
                             .gap_4()
+                            .pb_4()
+                            .border_b_1()
+                            .border_color(cx.theme().border)
                             .child(div().font_medium().child("Processing"))
                             .child(
                                 Form::new()

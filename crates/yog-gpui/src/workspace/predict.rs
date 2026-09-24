@@ -57,7 +57,7 @@ impl PredictPage {
                     .flex_col()
                     .gap_6()
                     .child(self.source.clone())
-                    .child(div().font_medium().child("Results"))
+                    .child(div().text_lg().font_medium().child("Results"))
                     .child(components::empty_results(cx)),
             )
     }

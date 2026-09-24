@@ -12,15 +12,20 @@ use gpui_kit::component::{
     resizable::{h_resizable, resizable_panel},
     sidebar::{Sidebar, SidebarMenu, SidebarMenuItem},
     status_bar::StatusBar,
+    tag::Tag,
 };
 use gpui_kit::{
     Anchor, App, AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _,
     IntoElement, KeyBinding, Menu, MenuItem, ParentElement as _, Render, Styled as _, Subscription,
-    Window, actions, div, px,
+    Window, actions, div, prelude::FluentBuilder as _, px,
 };
+use yog_runtime::RunStatus;
 
 use self::{
-    emulate::EmulatePage, predict::PredictPage, source::SourcePicker, transcode::TranscodePage,
+    emulate::EmulatePage,
+    predict::PredictPage,
+    source::SourcePicker,
+    transcode::{ActivityChanged, TranscodeActivity, TranscodePage},
 };
 
 actions!(
@@ -108,6 +113,7 @@ pub struct Workspace {
     predict: Entity<PredictPage>,
     emulate: Entity<EmulatePage>,
     _source_observation: Subscription,
+    _activity_subscription: Subscription,
     _appearance_subscription: Subscription,
 }
 
@@ -121,6 +127,8 @@ impl Workspace {
         let predict = cx.new(|cx| PredictPage::new(source.clone(), window, cx));
         let emulate = cx.new(|cx| EmulatePage::new(source.clone(), window, cx));
         let source_observation = cx.observe(&source, |_, _, cx| cx.notify());
+        let activity_subscription =
+            cx.subscribe(&transcode, |_, _, _: &ActivityChanged, cx| cx.notify());
 
         let weak = cx.weak_entity();
         let appearance_subscription = window.observe_window_appearance(move |window, cx| {
@@ -142,11 +150,18 @@ impl Workspace {
             predict,
             emulate,
             _source_observation: source_observation,
+            _activity_subscription: activity_subscription,
             _appearance_subscription: appearance_subscription,
         }
     }
 
-    fn change_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
+    fn change_mode(&mut self, mode: Mode, window: &mut Window, cx: &mut Context<Self>) {
+        if self.mode == mode {
+            return;
+        }
+        self.transcode.update(cx, |transcode, cx| {
+            transcode.set_page_visible(mode == Mode::Transcode, window, cx);
+        });
         self.mode = mode;
         self.source.update(cx, |source, cx| {
             source.set_allow_directory(mode != Mode::Emulate, cx);
@@ -177,24 +192,24 @@ impl Workspace {
                     SidebarMenuItem::new("Transcode")
                         .icon(IconName::Play)
                         .active(self.mode == Mode::Transcode)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.change_mode(Mode::Transcode, cx);
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.change_mode(Mode::Transcode, window, cx);
                         })),
                 )
                 .child(
                     SidebarMenuItem::new("Predict")
                         .icon(IconName::Cpu)
                         .active(self.mode == Mode::Predict)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.change_mode(Mode::Predict, cx);
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.change_mode(Mode::Predict, window, cx);
                         })),
                 )
                 .child(
                     SidebarMenuItem::new("Emulate")
                         .icon(IconName::ChartPie)
                         .active(self.mode == Mode::Emulate)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.change_mode(Mode::Emulate, cx);
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.change_mode(Mode::Emulate, window, cx);
                         })),
                 ),
         )
@@ -227,17 +242,59 @@ impl Workspace {
                     )
             })
     }
-}
 
-impl Render for Workspace {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let source_status = self
+    fn render_status_bar(&self, cx: &mut Context<Self>) -> StatusBar {
+        let source = self
             .source
             .read(cx)
             .path()
             .and_then(|path| path.file_name())
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_else(|| "No source selected".into());
+        let bar = StatusBar::new().right(div().max_w_48().truncate().child(source));
+        let Some(activity) = self.transcode.read(cx).activity() else {
+            return bar;
+        };
+        let (tag, state, detail) = match activity {
+            TranscodeActivity::Running(detail) => (Tag::info(), "Running", detail),
+            TranscodeActivity::Cancelling => (Tag::warning(), "Cancelling", "Transcode".into()),
+            TranscodeActivity::Finished(RunStatus::Success) => {
+                (Tag::success(), "Completed", "Transcode".into())
+            }
+            TranscodeActivity::Finished(RunStatus::Failure) => {
+                (Tag::danger(), "Failed", "Transcode".into())
+            }
+            TranscodeActivity::Finished(RunStatus::Cancelled) => {
+                (Tag::secondary(), "Cancelled", "Transcode".into())
+            }
+        };
+        let view_label = format!("View transcode: {state}, {detail}");
+        let status = div()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(tag.small().outline().child(state))
+            .child(div().min_w_0().truncate().child(detail))
+            .when(self.mode != Mode::Transcode, |this| {
+                this.child(
+                    Button::new("view-transcode")
+                        .ghost()
+                        .small()
+                        .label("View")
+                        .accessibility_label(view_label)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.change_mode(Mode::Transcode, window, cx);
+                        })),
+                )
+            });
+        bar.left(status)
+    }
+}
+
+impl Render for Workspace {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let status_bar = self.render_status_bar(cx);
         let page = match self.mode {
             Mode::Transcode => self.transcode.clone().into_any_element(),
             Mode::Predict => self.predict.clone().into_any_element(),
@@ -279,14 +336,14 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &OpenDirectory, _, cx| {
                 this.source.update(cx, |source, cx| source.choose(true, cx));
             }))
-            .on_action(cx.listener(|this, _: &ShowTranscode, _, cx| {
-                this.change_mode(Mode::Transcode, cx);
+            .on_action(cx.listener(|this, _: &ShowTranscode, window, cx| {
+                this.change_mode(Mode::Transcode, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &ShowPredict, _, cx| {
-                this.change_mode(Mode::Predict, cx);
+            .on_action(cx.listener(|this, _: &ShowPredict, window, cx| {
+                this.change_mode(Mode::Predict, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &ShowEmulate, _, cx| {
-                this.change_mode(Mode::Emulate, cx);
+            .on_action(cx.listener(|this, _: &ShowEmulate, window, cx| {
+                this.change_mode(Mode::Emulate, window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
                 this.sidebar_collapsed = !this.sidebar_collapsed;
@@ -334,7 +391,7 @@ impl Render for Workspace {
                     .child(self.render_theme_menu()),
             )
             .child(content)
-            .child(StatusBar::new().right(source_status))
+            .child(status_bar)
             .children(Root::render_dialog_layer(window, cx))
             .children(Root::render_sheet_layer(window, cx))
             .children(Root::render_notification_layer(window, cx))

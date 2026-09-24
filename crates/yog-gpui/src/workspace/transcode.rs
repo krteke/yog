@@ -1,21 +1,24 @@
 mod settings;
 
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
 use gpui_kit::component::{
-    ActiveTheme, Disableable, StyledExt as _,
+    ActiveTheme, Disableable, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants},
     progress::Progress as ProgressBar,
     resizable::{resizable_panel, v_resizable},
     scroll::ScrollableElement,
+    tag::Tag,
 };
 use gpui_kit::{
-    AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
-    Subscription, Window, div, prelude::FluentBuilder as _,
+    AppContext as _, Context, Entity, EventEmitter, IntoElement, ParentElement as _, Render,
+    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _,
 };
+#[cfg(test)]
+use gpui_kit::{InteractiveElement as _, test::TestSupportExt as _};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use yog_core::ffmpeg::progress::Progress;
@@ -27,7 +30,7 @@ use yog_runtime::{
 use self::settings::TranscodeSettings;
 use super::{
     components,
-    messages::{MessageLevel, MessageSource, Messages, NewMessage},
+    messages::{ExpansionChanged, MessageLevel, MessageSource, Messages, NewMessage},
     source::SourcePicker,
 };
 use crate::logging;
@@ -38,6 +41,14 @@ enum Stage {
     Cancelling,
     Finished(RunStatus),
 }
+
+pub(super) enum TranscodeActivity {
+    Running(String),
+    Cancelling,
+    Finished(RunStatus),
+}
+
+pub(super) struct ActivityChanged;
 
 struct TaskResult {
     name: String,
@@ -64,7 +75,7 @@ pub struct TranscodePage {
     stage: Stage,
     cancellation: Option<CancellationToken>,
     error: Option<String>,
-    notice: Option<String>,
+    notice: Option<(MessageLevel, String)>,
     phase: Option<RunPhase>,
     current_name: Option<String>,
     current_output: Option<PathBuf>,
@@ -81,7 +92,10 @@ pub struct TranscodePage {
     results: Vec<TaskResult>,
     _source_observation: Subscription,
     _settings_observation: Subscription,
+    _messages_subscription: Subscription,
 }
+
+impl EventEmitter<ActivityChanged> for TranscodePage {}
 
 impl TranscodePage {
     pub fn new(source: Entity<SourcePicker>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -89,6 +103,8 @@ impl TranscodePage {
         let messages = cx.new(|cx| Messages::new(window, cx));
         let source_observation = cx.observe(&source, |_, _, cx| cx.notify());
         let settings_observation = cx.observe(&settings, |_, _, cx| cx.notify());
+        let messages_subscription =
+            cx.subscribe(&messages, |_, _, _: &ExpansionChanged, cx| cx.notify());
         Self {
             source,
             settings,
@@ -113,6 +129,7 @@ impl TranscodePage {
             results: Vec::new(),
             _source_observation: source_observation,
             _settings_observation: settings_observation,
+            _messages_subscription: messages_subscription,
         }
     }
 
@@ -233,6 +250,7 @@ impl TranscodePage {
             }
         })
         .detach();
+        cx.emit(ActivityChanged);
         cx.notify();
     }
 
@@ -246,6 +264,7 @@ impl TranscodePage {
                 window,
                 cx,
             );
+            cx.emit(ActivityChanged);
             cx.notify();
         }
     }
@@ -333,7 +352,7 @@ impl TranscodePage {
                     output, outcome, ..
                 } => match outcome {
                     VmafOutcome::Scored(score) => {
-                        self.notice = Some(format!("VMAF {score:.2}"));
+                        self.notice = Some((MessageLevel::Info, format!("VMAF {score:.2}")));
                         self.message(
                             MessageLevel::Info,
                             format!("VMAF {score:.2}: {}", output.display()),
@@ -342,19 +361,20 @@ impl TranscodePage {
                         );
                     }
                     VmafOutcome::Failed(error) => {
-                        self.notice = Some(format!("VMAF failed: {error}"));
+                        self.notice =
+                            Some((MessageLevel::Warning, format!("VMAF failed: {error}")));
                     }
                     VmafOutcome::Cancelled => {
-                        self.notice = Some("VMAF cancelled".into());
+                        self.notice = Some((MessageLevel::Warning, "VMAF cancelled".into()));
                     }
                 },
                 RunEvent::Warning { message } => {
                     self.message(MessageLevel::Warning, message.clone(), window, cx);
-                    self.notice = Some(message);
+                    self.notice = Some((MessageLevel::Warning, message));
                 }
                 RunEvent::Error { message } => {
                     self.message(MessageLevel::Error, message.clone(), window, cx);
-                    self.notice = Some(message);
+                    self.notice = Some((MessageLevel::Error, message));
                 }
                 RunEvent::TaskFinished {
                     input,
@@ -436,6 +456,7 @@ impl TranscodePage {
                 );
             }
         }
+        cx.emit(ActivityChanged);
         cx.notify();
     }
 
@@ -454,6 +475,37 @@ impl TranscodePage {
         }
     }
 
+    pub(super) fn activity(&self) -> Option<TranscodeActivity> {
+        match self.stage {
+            Stage::Idle => None,
+            Stage::Running => {
+                let mut label = self.phase_label().to_owned();
+                if self.task_index > 0 {
+                    label.push_str(&format!(" · {}/{}", self.task_index, self.task_total));
+                }
+                if self.phase == Some(RunPhase::Transcoding)
+                    && let Some(percent) = self.progress_percent()
+                {
+                    label.push_str(&format!(" · {percent:.0}%"));
+                }
+                Some(TranscodeActivity::Running(label))
+            }
+            Stage::Cancelling => Some(TranscodeActivity::Cancelling),
+            Stage::Finished(status) => Some(TranscodeActivity::Finished(status)),
+        }
+    }
+
+    pub(super) fn set_page_visible(
+        &self,
+        visible: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.messages.update(cx, |messages, cx| {
+            messages.set_page_visible(visible, window, cx);
+        });
+    }
+
     fn progress_percent(&self) -> Option<f32> {
         let duration = self.duration?;
         let elapsed = self.progress.out_time_us?;
@@ -463,41 +515,62 @@ impl TranscodePage {
         Some((elapsed.max(0) as f64 / duration.as_micros() as f64 * 100.).clamp(0.0, 100.0) as f32)
     }
 
-    fn render_results(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_run_summary(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let status = match self.stage {
-            Stage::Idle => "Ready",
-            Stage::Running => self.phase_label(),
-            Stage::Cancelling => "Cancelling",
-            Stage::Finished(RunStatus::Success) => "Completed",
-            Stage::Finished(RunStatus::Failure) => "Failed",
-            Stage::Finished(RunStatus::Cancelled) => "Cancelled",
+        let (headline, state, tag) = match self.stage {
+            Stage::Idle => unreachable!("idle runs have no summary"),
+            Stage::Running => (self.phase_label(), "Running", Tag::info()),
+            Stage::Cancelling => ("Cancelling transcode", "Cancelling", Tag::warning()),
+            Stage::Finished(RunStatus::Success) => {
+                ("Transcode complete", "Completed", Tag::success())
+            }
+            Stage::Finished(RunStatus::Failure) => ("Transcode failed", "Failed", Tag::danger()),
+            Stage::Finished(RunStatus::Cancelled) => {
+                ("Transcode cancelled", "Cancelled", Tag::secondary())
+            }
         };
         let active = matches!(self.stage, Stage::Running | Stage::Cancelling);
         let progress = (self.phase == Some(RunPhase::Transcoding))
             .then(|| self.progress_percent())
             .flatten();
+        let current_file = (if active || self.task_total == 1 {
+            self.current_name.as_ref()
+        } else {
+            None
+        })
+        .and_then(|name| {
+            Path::new(name)
+                .file_name()
+                .map(|file| file.to_string_lossy().into_owned())
+        });
         let mut metrics = Vec::new();
         if let Some(elapsed) = self
             .finished_elapsed
             .or_else(|| self.started.map(|time| time.elapsed()))
         {
-            metrics.push(format!("Run elapsed {}", format_duration(elapsed)));
+            metrics.push(("Elapsed", format_duration(elapsed)));
         }
-        if self.phase == Some(RunPhase::Transcoding) {
-            if let Some(percent) = self.progress_percent() {
-                metrics.push(format!("{percent:.0}% complete"));
-            }
-            if let (Some(duration), Some(processed), Some(speed)) = (
+        if active && let Some(speed) = self.progress.speed {
+            metrics.push(("Speed", format!("{speed:.2}×")));
+        }
+        if active
+            && self.phase == Some(RunPhase::Transcoding)
+            && let (Some(duration), Some(processed), Some(speed)) = (
                 self.duration,
                 self.progress.out_time_us,
                 self.progress.speed,
-            ) && let Some(remaining) = estimate_remaining(duration, processed, speed)
-            {
-                metrics.push(format!("ETA {}", format_duration(remaining)));
-            }
+            )
+            && let Some(remaining) = estimate_remaining(duration, processed, speed)
+        {
+            metrics.push(("ETA", format_duration(remaining)));
         }
-        if let Some(processed) = self.progress.out_time_us {
+        if (active || self.task_total == 1)
+            && let Some(bytes) = self.progress.total_size
+        {
+            metrics.push(("Output size", format_size(bytes)));
+        }
+        let mut details = Vec::new();
+        if active && let Some(processed) = self.progress.out_time_us {
             let processed = Duration::from_micros(processed.max(0) as u64);
             let value = match self.duration {
                 Some(duration) => format!(
@@ -507,124 +580,234 @@ impl TranscodePage {
                 ),
                 None => format!("Processed {}", format_duration(processed)),
             };
-            metrics.push(value);
+            details.push(value);
         }
-        if let Some(frame) = self.progress.frame {
-            metrics.push(format!("Frame {frame}"));
+        if active && let Some(frame) = self.progress.frame {
+            details.push(format!("Frame {frame}"));
         }
-        if let Some(fps) = self.progress.fps {
-            metrics.push(format!("{fps:.1} fps"));
+        if active && let Some(fps) = self.progress.fps {
+            details.push(format!("{fps:.1} fps"));
         }
-        if let Some(speed) = self.progress.speed {
-            metrics.push(format!("{speed:.2}× speed"));
+        if active && let Some(duplicates) = self.progress.dup_frames {
+            details.push(format!("{duplicates} duplicate frames"));
         }
-        if let Some(bytes) = self.progress.total_size {
-            metrics.push(format!("Output {}", format_size(bytes)));
+        if active && let Some(dropped) = self.progress.drop_frames {
+            details.push(format!("{dropped} dropped frames"));
         }
-        if let Some(duplicates) = self.progress.dup_frames {
-            metrics.push(format!("Duplicate frames {duplicates}"));
-        }
-        if let Some(dropped) = self.progress.drop_frames {
-            metrics.push(format!("Dropped frames {dropped}"));
-        }
-
+        let headline = div().text_lg().font_medium().child(headline);
+        #[cfg(test)]
+        let headline = headline.id("transcode-summary-headline").test_support();
         div()
+            .rounded(theme.radius)
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.group_box)
+            .p_5()
             .flex()
             .flex_col()
             .gap_4()
-            .child(div().font_medium().child("Results"))
-            .when(matches!(self.stage, Stage::Idle), |this| {
-                this.child(components::empty_results(cx))
-            })
-            .when(!matches!(self.stage, Stage::Idle), |this| {
+            .child(
+                div()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(div().flex().child(tag.small().outline().child(state)))
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(headline)
+                            .when_some(current_file, |this, file| {
+                                this.child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(theme.muted_foreground)
+                                        .truncate()
+                                        .child(file),
+                                )
+                            }),
+                    ),
+            )
+            .when(active, |this| {
                 this.child(
                     div()
-                        .rounded(theme.radius)
-                        .border_1()
-                        .border_color(theme.border)
-                        .p_5()
                         .flex()
-                        .flex_col()
-                        .gap_4()
-                        .child(div().font_medium().child(status))
-                        .when_some(self.current_name.clone(), |this, name| {
-                            this.child(
-                                div()
-                                    .text_sm()
-                                    .text_color(theme.muted_foreground)
-                                    .truncate()
-                                    .child(name),
-                            )
-                        })
-                        .when(active, |this| {
-                            this.child(
-                                ProgressBar::new("transcode-progress")
-                                    .loading(progress.is_none())
-                                    .value(progress.unwrap_or_default())
-                                    .accessibility_label("Transcode progress"),
-                            )
-                        })
+                        .items_center()
+                        .gap_3()
                         .child(
-                            div()
-                                .text_sm()
-                                .text_color(theme.muted_foreground)
-                                .child(format!(
-                                    "{} of {} · {} completed · {} failed · {} skipped",
-                                    self.task_index,
-                                    self.task_total,
-                                    self.succeeded,
-                                    self.failed,
-                                    self.skipped
-                                )),
+                            ProgressBar::new("transcode-progress")
+                                .loading(progress.is_none())
+                                .value(progress.unwrap_or_default())
+                                .accessibility_label("Transcode progress")
+                                .flex_1(),
                         )
-                        .child(div().flex().flex_wrap().gap_x_4().gap_y_2().children(
-                            metrics.into_iter().map(|metric| {
-                                div()
-                                    .text_sm()
-                                    .text_color(theme.muted_foreground)
-                                    .child(metric)
-                            }),
-                        ))
-                        .when_some(self.notice.clone(), |this, notice| {
-                            this.child(div().text_sm().child(notice))
-                        })
-                        .when_some(self.completed_output.clone(), |this, path| {
-                            this.child(
-                                Button::new("reveal-output")
-                                    .ghost()
-                                    .label("Reveal output")
-                                    .on_click(move |_, _, cx| cx.reveal_path(&path)),
-                            )
+                        .when_some(progress, |this, percent| {
+                            this.child(div().font_medium().child(format!("{percent:.0}%")))
                         }),
                 )
             })
-            .children(self.results.iter().map(|result| {
-                let (label, color) = match result.status {
-                    ResultStatus::Success => ("Completed", theme.success),
-                    ResultStatus::Failure => ("Failed", theme.danger),
-                    ResultStatus::Cancelled => ("Cancelled", theme.muted_foreground),
-                    ResultStatus::Skipped => ("Skipped", theme.warning),
+            .when(!metrics.is_empty(), |this| {
+                this.child(
+                    div()
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .pt_4()
+                        .flex()
+                        .flex_wrap()
+                        .gap_5()
+                        .children(metrics.into_iter().map(|(label, value)| {
+                            div()
+                                .min_w_24()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child(label),
+                                )
+                                .child(div().font_medium().child(value))
+                        })),
+                )
+            })
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child(format!(
+                        "{}{} completed · {} failed · {} skipped",
+                        if self.task_index > 0 {
+                            format!("Task {} of {} · ", self.task_index, self.task_total)
+                        } else {
+                            String::new()
+                        },
+                        self.succeeded,
+                        self.failed,
+                        self.skipped
+                    )),
+            )
+            .when(!details.is_empty(), |this| {
+                this.child(div().flex().flex_wrap().gap_x_4().gap_y_1().children(
+                    details.into_iter().map(|detail| {
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(detail)
+                    }),
+                ))
+            })
+            .when_some(self.notice.clone(), |this, (level, notice)| {
+                let color = match level {
+                    MessageLevel::Error => theme.danger,
+                    MessageLevel::Warning => theme.warning,
+                    MessageLevel::Debug | MessageLevel::Info => theme.border,
                 };
+                this.child(
+                    div()
+                        .border_l_2()
+                        .border_color(color)
+                        .bg(theme.muted)
+                        .px_3()
+                        .py_2()
+                        .text_sm()
+                        .child(notice),
+                )
+            })
+            .when_some(self.completed_output.clone(), |this, path| {
+                this.child(
+                    Button::new("reveal-output")
+                        .outline()
+                        .label("Reveal output")
+                        .on_click(move |_, _, cx| cx.reveal_path(&path)),
+                )
+            })
+    }
+
+    fn render_task_outcomes(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let results_len = self.results.len();
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(div().font_medium().child("Task outcomes"))
+            .child(
                 div()
                     .rounded(theme.radius)
                     .border_1()
                     .border_color(theme.border)
-                    .p_4()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(
+                    .children(self.results.iter().enumerate().map(|(index, result)| {
+                        let (label, tag) = match result.status {
+                            ResultStatus::Success => ("Completed", Tag::success()),
+                            ResultStatus::Failure => ("Failed", Tag::danger()),
+                            ResultStatus::Cancelled => ("Cancelled", Tag::secondary()),
+                            ResultStatus::Skipped => ("Skipped", Tag::warning()),
+                        };
+                        let file = Path::new(&result.name)
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| result.name.clone());
+                        let show_path = file != result.name;
                         div()
+                            .p_4()
                             .flex()
-                            .justify_between()
-                            .gap_3()
-                            .child(div().min_w_0().truncate().child(result.name.clone()))
-                            .child(div().flex_shrink_0().text_color(color).child(label)),
-                    )
-                    .when_some(result.error.clone(), |this, error| {
-                        this.child(div().text_sm().text_color(theme.danger).child(error))
-                    })
-            }))
+                            .flex_col()
+                            .gap_2()
+                            .when(index + 1 < results_len, |this| {
+                                this.border_b_1().border_color(theme.border)
+                            })
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_start()
+                                    .justify_between()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_1()
+                                            .child(div().font_medium().truncate().child(file))
+                                            .when(show_path, |this| {
+                                                this.child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(theme.muted_foreground)
+                                                        .truncate()
+                                                        .child(result.name.clone()),
+                                                )
+                                            }),
+                                    )
+                                    .child(tag.small().outline().child(label)),
+                            )
+                            .when_some(result.error.clone(), |this, error| {
+                                this.child(div().text_sm().text_color(theme.danger).child(error))
+                            })
+                    })),
+            )
+    }
+
+    fn render_results(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(div().text_lg().font_medium().child("Results"))
+            .when(matches!(self.stage, Stage::Idle), |this| {
+                this.child(components::empty_results(cx))
+            })
+            .when(!matches!(self.stage, Stage::Idle), |this| {
+                this.child(self.render_run_summary(cx))
+            })
+            .when(!self.results.is_empty(), |this| {
+                this.child(self.render_task_outcomes(cx))
+            })
     }
 
     fn render_work_area(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -643,15 +826,27 @@ impl TranscodePage {
                     .child(self.source.clone())
                     .child(self.render_results(cx)),
             );
-        v_resizable("transcode-work-and-messages")
-            .child(resizable_panel().child(results))
-            .child(
-                resizable_panel()
-                    .size(rem * 18.0)
-                    .size_range(rem * 12.0..rem * 32.0)
-                    .flex_none()
-                    .child(self.messages.clone()),
-            )
+        if self.messages.read(cx).is_expanded() {
+            v_resizable("transcode-work-and-messages")
+                .child(resizable_panel().child(results))
+                .child(
+                    resizable_panel()
+                        .size(rem * 18.0)
+                        .size_range(rem * 12.0..rem * 32.0)
+                        .flex_none()
+                        .child(self.messages.clone()),
+                )
+                .into_any_element()
+        } else {
+            div()
+                .size_full()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .child(div().flex_1().min_h_0().child(results))
+                .child(self.messages.clone())
+                .into_any_element()
+        }
     }
 
     fn render_inspector(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -737,8 +932,17 @@ impl Render for TranscodePage {
 
 #[cfg(test)]
 mod tests {
-    use super::{estimate_remaining, format_duration, format_size};
+    use super::{Stage, WorkerMessage, estimate_remaining, format_duration, format_size};
+    use crate::workspace::{Mode, Workspace};
+    use gpui_kit::{
+        AppContext as _, TestAppContext, component::Root, px, size, test::TestWindowExt as _,
+    };
     use std::time::Duration;
+    use yog_core::ffmpeg::progress::Progress;
+    use yog_runtime::{
+        RunStatus,
+        event::{RunEvent, RunPhase},
+    };
 
     #[test]
     fn progress_uses_adaptive_video_size_units() {
@@ -758,5 +962,126 @@ mod tests {
             Some(Duration::from_secs(45))
         );
         assert_eq!(estimate_remaining(Duration::from_secs(120), 0, 0.0), None);
+    }
+
+    #[gpui_kit::test]
+    fn messages_collapse_and_background_transcode_remains_visible(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut workspace = None;
+        let handle = cx.open_window(size(px(820.), px(640.)), |window, cx| {
+            let view = cx.new(|cx| Workspace::new(window, cx));
+            workspace = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let workspace = workspace.unwrap();
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("messages-filter").is_none());
+            let collapsed_top = window.find("toggle-messages").bounds().top();
+
+            window.click("toggle-messages", cx);
+            assert!(window.find("messages-filter").visible());
+            assert!(window.find("toggle-messages").bounds().top() < collapsed_top);
+            window.click("toggle-messages", cx);
+            assert!(window.try_find("messages-filter").is_none());
+
+            let transcode = workspace.read(cx).transcode.clone();
+            transcode.update(cx, |transcode, cx| {
+                transcode.stage = Stage::Running;
+                transcode.phase = Some(RunPhase::Transcoding);
+                transcode.task_index = 2;
+                transcode.task_total = 8;
+                transcode.duration = Some(Duration::from_secs(100));
+                transcode.progress.out_time_us = Some(25_000_000);
+                cx.notify();
+            });
+            workspace.update(cx, |workspace, cx| {
+                workspace.change_mode(Mode::Predict, window, cx);
+            });
+            window.render_frame(cx);
+            assert!(window.find("view-transcode").visible());
+            assert_eq!(
+                window.find("view-transcode").label(),
+                Some("View transcode: Running, Transcoding · 2/8 · 25%")
+            );
+
+            transcode.update(cx, |transcode, cx| {
+                transcode.handle_message(
+                    WorkerMessage::Event(RunEvent::Progress {
+                        duration: Some(Duration::from_secs(100)),
+                        progress: Progress {
+                            out_time_us: Some(50_000_000),
+                            ..Progress::default()
+                        },
+                    }),
+                    window,
+                    cx,
+                );
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("view-transcode").label(),
+                Some("View transcode: Running, Transcoding · 2/8 · 50%")
+            );
+
+            window.click("view-transcode", cx);
+            assert!(matches!(workspace.read(cx).mode, Mode::Transcode));
+            assert!(window.try_find("view-transcode").is_none());
+
+            let transcode = workspace.read(cx).transcode.clone();
+            transcode.update(cx, |transcode, cx| {
+                transcode.stage = Stage::Finished(RunStatus::Failure);
+                cx.notify();
+            });
+            workspace.update(cx, |workspace, cx| {
+                workspace.change_mode(Mode::Emulate, window, cx);
+            });
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("view-transcode").label(),
+                Some("View transcode: Failed, Transcode")
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn narrow_results_keep_the_headline_readable(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut workspace = None;
+        let handle = cx.open_window(size(px(600.), px(580.)), |window, cx| {
+            let view = cx.new(|cx| Workspace::new(window, cx));
+            workspace = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let workspace = workspace.unwrap();
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            let transcode = workspace.read(cx).transcode.clone();
+            transcode.update(cx, |transcode, cx| {
+                transcode.stage = Stage::Finished(RunStatus::Cancelled);
+                transcode.current_name = Some("test.mkv".into());
+                cx.notify();
+            });
+            window.render_frame(cx);
+            let headline = window.find("transcode-summary-headline");
+            assert!(
+                headline.bounds().size.width >= px(110.),
+                "headline bounds: {:?}",
+                headline.bounds()
+            );
+            assert!(
+                headline.bounds().size.height <= px(60.),
+                "headline bounds: {:?}",
+                headline.bounds()
+            );
+        })
+        .unwrap();
     }
 }

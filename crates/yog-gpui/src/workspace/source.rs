@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use gpui_kit::component::{
-    ActiveTheme, Icon, IconName, StyledExt as _,
+    ActiveTheme, Icon, IconName, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants},
 };
 use gpui_kit::{
@@ -102,6 +102,73 @@ impl Render for SourcePicker {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let path = self.path.clone();
         let invalid_for_mode = self.is_directory && !self.allow_directory;
+        let source = if let Some(path) = path.as_ref() {
+            div()
+                .w_full()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap_4()
+                .child(
+                    Icon::new(if self.is_directory {
+                        IconName::FolderOpen
+                    } else {
+                        IconName::File
+                    })
+                    .size_7(),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div().font_medium().max_w_full().truncate().child(
+                                path.file_name()
+                                    .map(|name| name.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| path.display().to_string()),
+                            ),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(if invalid_for_mode {
+                                    cx.theme().danger
+                                } else {
+                                    cx.theme().muted_foreground
+                                })
+                                .max_w_full()
+                                .truncate()
+                                .child(if invalid_for_mode {
+                                    "Select a video file for this workflow".into()
+                                } else {
+                                    path.display().to_string()
+                                }),
+                        ),
+                )
+                .child(
+                    Button::new("reveal-source")
+                        .ghost()
+                        .small()
+                        .label("Reveal")
+                        .on_click({
+                            let path = path.clone();
+                            move |_, _, cx| cx.reveal_path(&path)
+                        }),
+                )
+                .into_any_element()
+        } else {
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_3()
+                .child(Icon::new(IconName::File).size_8())
+                .child(div().text_lg().font_medium().child("Drop a video here"))
+                .into_any_element()
+        };
 
         div()
             .flex()
@@ -140,8 +207,10 @@ impl Render for SourcePicker {
                     .items_center()
                     .justify_center()
                     .gap_3()
-                    .min_h_56()
+                    .when(path.is_some(), |this| this.min_h_32())
+                    .when(path.is_none(), |this| this.min_h_56())
                     .w_full()
+                    .p_5()
                     .rounded(cx.theme().radius)
                     .border_1()
                     .border_color(cx.theme().border)
@@ -154,51 +223,10 @@ impl Render for SourcePicker {
                             cx.notify();
                         }
                     }))
-                    .child(
-                        Icon::new(if self.is_directory {
-                            IconName::FolderOpen
-                        } else {
-                            IconName::File
-                        })
-                        .size_8(),
-                    )
-                    .child(
-                        div().text_lg().font_medium().max_w_full().truncate().child(
-                            path.as_ref()
-                                .and_then(|path| path.file_name())
-                                .map(|name| name.to_string_lossy().to_string())
-                                .unwrap_or_else(|| "Drop a video here".into()),
-                        ),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(if invalid_for_mode {
-                                cx.theme().danger
-                            } else {
-                                cx.theme().muted_foreground
-                            })
-                            .max_w_full()
-                            .truncate()
-                            .child(if invalid_for_mode {
-                                "Select a video file for this workflow".into()
-                            } else {
-                                path.as_ref()
-                                    .map(|path| path.display().to_string())
-                                    .unwrap_or_default()
-                            }),
-                    )
+                    .child(source)
                     .when_some(self.error.clone(), |this, error| {
                         this.child(div().text_sm().text_color(cx.theme().danger).child(error))
                     }),
             )
-            .when_some(path, |this, path| {
-                this.child(
-                    Button::new("reveal-source")
-                        .ghost()
-                        .label("Reveal in file manager")
-                        .on_click(move |_, _, cx| cx.reveal_path(&path)),
-                )
-            })
     }
 }

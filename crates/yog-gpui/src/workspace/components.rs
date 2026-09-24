@@ -6,8 +6,8 @@ use gpui_kit::component::{
     resizable::{h_resizable, resizable_panel},
 };
 use gpui_kit::{
-    AnyElement, App, ClickEvent, Entity, IntoElement, ParentElement as _, Styled as _, Window, div,
-    px,
+    AnyElement, App, ClickEvent, Entity, IntoElement, ParentElement as _, Pixels, Styled as _,
+    Window, div, px,
 };
 
 pub fn page_layout(
@@ -35,7 +35,11 @@ pub fn page_layout(
         )
         .child(
             h_resizable(id)
-                .child(resizable_panel().child(work_area))
+                .child(
+                    resizable_panel()
+                        .size_range(cx.theme().font_size * 20.0..Pixels::MAX)
+                        .child(work_area),
+                )
                 .child(
                     resizable_panel()
                         .size(px(300.))
@@ -95,6 +99,7 @@ pub fn empty_results(cx: &App) -> impl IntoElement {
         .rounded(cx.theme().radius)
         .border_1()
         .border_color(cx.theme().border)
+        .bg(cx.theme().group_box)
         .min_h_48()
         .flex()
         .flex_col()
@@ -103,5 +108,10 @@ pub fn empty_results(cx: &App) -> impl IntoElement {
         .gap_2()
         .text_color(cx.theme().muted_foreground)
         .child(Icon::new(IconName::Inbox).size_6())
-        .child("No results yet")
+        .child(
+            div()
+                .font_medium()
+                .text_color(cx.theme().foreground)
+                .child("No results yet"),
+        )
 }

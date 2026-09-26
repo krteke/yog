@@ -21,11 +21,12 @@ use yog_core::ffmpeg::{
     plan::{Container, TranscodeRequest, VideoAction},
     vmaf::VmafOptions,
 };
-use yog_runtime::{Command, Config, Operation, Options, Validate};
+use yog_runtime::{Command, Operation, Validate};
 
 use super::super::{
     components,
     execution::{self, RunRequest},
+    settings::SettingsPanel,
     source::SourcePicker,
     video::{
         CONTAINERS, Choice, DECODERS, ENCODERS, MULTIPASS, X26X_PRESETS, container, decoding,
@@ -41,6 +42,7 @@ enum Destination {
 
 pub struct TranscodeSettings {
     source: Entity<SourcePicker>,
+    preferences: Entity<SettingsPanel>,
     output: Entity<InputState>,
     report: Entity<InputState>,
     decoder: Choice,
@@ -67,7 +69,12 @@ pub struct TranscodeSettings {
 }
 
 impl TranscodeSettings {
-    pub fn new(source: Entity<SourcePicker>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        source: Entity<SourcePicker>,
+        preferences: Entity<SettingsPanel>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut select = |items: &[&'static str], selected, cx: &mut Context<Self>| {
             cx.new(|cx| {
                 SelectState::new(
@@ -126,6 +133,7 @@ impl TranscodeSettings {
 
         Self {
             source,
+            preferences,
             output,
             report: cx.new(|cx| InputState::new(window, cx).placeholder("Optional report path")),
             decoder,
@@ -241,14 +249,10 @@ impl TranscodeSettings {
         }) {
             return Err("Report path must differ from the source and output".into());
         }
-        let options = Options {
-            verify: self.verify,
-            vmaf,
-            terminal_output: false,
-            report,
-            ..Options::default()
-        };
-        let config = Config::load(None).map_err(|error| format!("{error:#}"))?;
+        let (mut options, config) = self.preferences.read(cx).run_defaults()?;
+        options.verify = self.verify;
+        options.vmaf = vmaf;
+        options.report = report;
         Ok(RunRequest {
             command,
             options,

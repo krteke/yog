@@ -4,12 +4,14 @@ mod execution;
 pub mod logging;
 pub mod messages;
 mod predict;
+mod settings;
 mod source;
 mod transcode;
 mod video;
 
 use gpui_kit::component::{
     ActiveTheme, Icon, IconName, Root, Sizable as _, StyledExt as _, Theme, ThemeMode, TitleBar,
+    WindowExt as _,
     button::{Button, ButtonVariants},
     menu::DropdownMenu,
     resizable::{h_resizable, resizable_panel},
@@ -28,6 +30,7 @@ use self::{
     emulate::EmulatePage,
     execution::{Activity, ActivityChanged},
     predict::PredictPage,
+    settings::SettingsPanel,
     source::SourcePicker,
     transcode::TranscodePage,
 };
@@ -116,6 +119,7 @@ pub struct Workspace {
     transcode: Entity<TranscodePage>,
     predict: Entity<PredictPage>,
     emulate: Entity<EmulatePage>,
+    settings: Entity<SettingsPanel>,
     _source_observation: Subscription,
     _activity_subscriptions: Vec<Subscription>,
     _appearance_subscription: Subscription,
@@ -127,9 +131,11 @@ impl Workspace {
         window.focus(&focus, cx);
 
         let source = cx.new(|_| SourcePicker::new());
-        let transcode = cx.new(|cx| TranscodePage::new(source.clone(), window, cx));
-        let predict = cx.new(|cx| PredictPage::new(source.clone(), window, cx));
-        let emulate = cx.new(|cx| EmulatePage::new(source.clone(), window, cx));
+        let settings = cx.new(|cx| SettingsPanel::new(window, cx));
+        let transcode =
+            cx.new(|cx| TranscodePage::new(source.clone(), settings.clone(), window, cx));
+        let predict = cx.new(|cx| PredictPage::new(source.clone(), settings.clone(), window, cx));
+        let emulate = cx.new(|cx| EmulatePage::new(source.clone(), settings.clone(), window, cx));
         predict.update(cx, |page, cx| page.set_page_visible(false, window, cx));
         emulate.update(cx, |page, cx| page.set_page_visible(false, window, cx));
         let source_observation = cx.observe(&source, |_, _, cx| cx.notify());
@@ -158,6 +164,7 @@ impl Workspace {
             transcode,
             predict,
             emulate,
+            settings,
             _source_observation: source_observation,
             _activity_subscriptions: activity_subscriptions,
             _appearance_subscription: appearance_subscription,
@@ -198,6 +205,25 @@ impl Workspace {
         };
         Theme::change(theme, Some(window), cx);
         cx.notify();
+    }
+
+    fn open_settings(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let settings = self.settings.clone();
+        window.open_sheet(cx, move |sheet, window, cx| {
+            let width = (cx.theme().font_size * 36.0)
+                .min(window.viewport_size().width - cx.theme().font_size * 4.0);
+            let settings_on_close = settings.clone();
+            sheet
+                .title("Settings")
+                .size(width)
+                .p_0()
+                .on_close(move |_, window, cx| {
+                    settings_on_close.update(cx, |settings, cx| {
+                        settings.discard_changes(window, cx);
+                    });
+                })
+                .child(settings.clone())
+        });
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> Sidebar<SidebarMenu> {
@@ -445,7 +471,24 @@ impl Render for Workspace {
                             )
                             .child(div().font_medium().child("Yog")),
                     )
-                    .child(self.render_theme_menu()),
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(self.render_theme_menu())
+                            .child(
+                                Button::new("open-settings")
+                                    .ghost()
+                                    .small()
+                                    .icon(Icon::new(IconName::Settings))
+                                    .tooltip("Settings…")
+                                    .accessibility_label("Settings")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_settings(window, cx);
+                                    })),
+                            ),
+                    ),
             )
             .child(content)
             .child(status_bar)

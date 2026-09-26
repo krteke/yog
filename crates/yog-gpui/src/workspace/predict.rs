@@ -27,7 +27,7 @@ use yog_core::ffmpeg::{
     prediction::Prediction,
 };
 use yog_runtime::{
-    Command, Config, Operation, Options, RunOutcome, RunStatus, Validate,
+    Command, Operation, RunOutcome, RunStatus, Validate,
     event::{RunEvent, RunPhase, TaskStatus},
 };
 
@@ -35,6 +35,7 @@ use super::{
     components,
     execution::{self, Activity, ActivityChanged, RunRequest, WorkerMessage},
     messages::{ExpansionChanged, MessageLevel, MessageSource, Messages, NewMessage},
+    settings::SettingsPanel,
     source::SourcePicker,
     video::{CONTAINERS, Choice, VideoInputs, container, selected},
 };
@@ -54,6 +55,7 @@ struct ResultRow {
 
 pub struct PredictPage {
     source: Entity<SourcePicker>,
+    preferences: Entity<SettingsPanel>,
     video: Entity<VideoInputs>,
     container: Choice,
     rate: Choice,
@@ -82,7 +84,12 @@ pub struct PredictPage {
 impl EventEmitter<ActivityChanged> for PredictPage {}
 
 impl PredictPage {
-    pub fn new(source: Entity<SourcePicker>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        source: Entity<SourcePicker>,
+        preferences: Entity<SettingsPanel>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let video = cx.new(|cx| VideoInputs::new(window, cx));
         let video_observation = cx.observe(&video, |_, _, cx| cx.notify());
         let rate = cx.new(|cx| {
@@ -116,6 +123,7 @@ impl PredictPage {
             cx.subscribe(&messages, |_, _, _: &ExpansionChanged, cx| cx.notify());
         Self {
             source,
+            preferences,
             video,
             container,
             rate,
@@ -189,12 +197,8 @@ impl PredictPage {
         {
             return Err("Report path must differ from the source".into());
         }
-        let options = Options {
-            terminal_output: false,
-            report,
-            ..Options::default()
-        };
-        let config = Config::load(None).map_err(|error| format!("{error:#}"))?;
+        let (mut options, config) = self.preferences.read(cx).run_defaults()?;
+        options.report = report;
         Ok(RunRequest {
             command,
             options,
@@ -458,12 +462,7 @@ impl PredictPage {
         }
     }
 
-    pub fn set_page_visible(
-        &self,
-        visible: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn set_page_visible(&self, visible: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.messages.update(cx, |messages, cx| {
             messages.set_page_visible(visible, window, cx)
         });

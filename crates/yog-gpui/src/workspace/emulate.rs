@@ -30,8 +30,7 @@ use yog_core::ffmpeg::{
     plan::{TranscodeRequest, VideoAction},
 };
 use yog_runtime::{
-    Candidate, Command, Config, EmulationOptions, Operation, Options, RunOutcome, RunStatus,
-    Validate,
+    Candidate, Command, Config, EmulationOptions, Operation, RunOutcome, RunStatus, Validate,
     event::{RunEvent, RunPhase, TaskStatus},
     parse_quality_points,
 };
@@ -40,6 +39,7 @@ use super::{
     components,
     execution::{self, Activity, ActivityChanged, RunRequest, WorkerMessage},
     messages::{ExpansionChanged, MessageLevel, MessageSource, Messages, NewMessage},
+    settings::SettingsPanel,
     source::SourcePicker,
     video::{CONTAINERS, Choice, VideoInputs, container, selected},
 };
@@ -80,6 +80,7 @@ struct CurrentPoint {
 
 pub struct EmulatePage {
     source: Entity<SourcePicker>,
+    preferences: Entity<SettingsPanel>,
     video: Entity<VideoInputs>,
     container: Choice,
     quality_points: Entity<InputState>,
@@ -110,7 +111,12 @@ pub struct EmulatePage {
 impl EventEmitter<ActivityChanged> for EmulatePage {}
 
 impl EmulatePage {
-    pub fn new(source: Entity<SourcePicker>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        source: Entity<SourcePicker>,
+        preferences: Entity<SettingsPanel>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let video = cx.new(|cx| VideoInputs::new(window, cx));
         let video_observation = cx.observe(&video, |_, _, cx| cx.notify());
         let container = cx.new(|cx| {
@@ -132,6 +138,7 @@ impl EmulatePage {
         let chart_size = Config::default().emulation;
         Self {
             source,
+            preferences,
             video,
             container,
             quality_points: cx.new(|cx| InputState::new(window, cx).default_value("20,24,28,32")),
@@ -312,12 +319,8 @@ impl EmulatePage {
         }) {
             return Err("Report path must differ from the source and charts".into());
         }
-        let options = Options {
-            terminal_output: false,
-            report,
-            ..Options::default()
-        };
-        let config = Config::load(None).map_err(|error| format!("{error:#}"))?;
+        let (mut options, config) = self.preferences.read(cx).run_defaults()?;
+        options.report = report;
         Ok(RunRequest {
             command,
             options,
@@ -543,12 +546,7 @@ impl EmulatePage {
         }
     }
 
-    pub fn set_page_visible(
-        &self,
-        visible: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn set_page_visible(&self, visible: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.messages.update(cx, |messages, cx| {
             messages.set_page_visible(visible, window, cx)
         });

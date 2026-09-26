@@ -30,6 +30,7 @@ use super::{
     components,
     execution::{self, Activity, ActivityChanged, WorkerMessage},
     messages::{ExpansionChanged, MessageLevel, MessageSource, Messages, NewMessage},
+    settings::SettingsPanel,
     source::SourcePicker,
 };
 
@@ -83,8 +84,13 @@ pub struct TranscodePage {
 impl EventEmitter<ActivityChanged> for TranscodePage {}
 
 impl TranscodePage {
-    pub fn new(source: Entity<SourcePicker>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let settings = cx.new(|cx| TranscodeSettings::new(source.clone(), window, cx));
+    pub fn new(
+        source: Entity<SourcePicker>,
+        preferences: Entity<SettingsPanel>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let settings = cx.new(|cx| TranscodeSettings::new(source.clone(), preferences, window, cx));
         let messages = cx.new(|cx| Messages::new(window, cx));
         let source_observation = cx.observe(&source, |_, _, cx| cx.notify());
         let settings_observation = cx.observe(&settings, |_, _, cx| cx.notify());
@@ -422,12 +428,7 @@ impl TranscodePage {
         }
     }
 
-    pub fn set_page_visible(
-        &self,
-        visible: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn set_page_visible(&self, visible: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.messages.update(cx, |messages, cx| {
             messages.set_page_visible(visible, window, cx);
         });

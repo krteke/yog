@@ -1,4 +1,3 @@
-mod logging;
 mod workspace;
 
 use gpui_kit::component::{Root, Theme, TitleBar};
@@ -6,7 +5,7 @@ use gpui_kit::*;
 use workspace::Workspace;
 
 fn main() {
-    logging::init();
+    workspace::logging::init();
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
         .run(|cx| {

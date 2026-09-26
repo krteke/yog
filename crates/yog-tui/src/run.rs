@@ -303,6 +303,7 @@ impl RunState {
                     TaskStatus::Cancelled => state.last_status = Some(TaskStatus::Cancelled),
                 }
             }
+            RunEvent::EmulationChartRendered { .. } => {}
             RunEvent::VmafFinished {
                 options, outcome, ..
             } => match outcome {

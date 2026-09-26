@@ -9,7 +9,6 @@ use gpui_kit::component::{
     ActiveTheme, Disableable, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants},
     progress::Progress as ProgressBar,
-    resizable::{resizable_panel, v_resizable},
     scroll::ScrollableElement,
     tag::Tag,
 };
@@ -19,7 +18,6 @@ use gpui_kit::{
 };
 #[cfg(test)]
 use gpui_kit::{InteractiveElement as _, test::TestSupportExt as _};
-use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use yog_core::ffmpeg::progress::Progress;
 use yog_runtime::{
@@ -30,10 +28,10 @@ use yog_runtime::{
 use self::settings::TranscodeSettings;
 use super::{
     components,
+    execution::{self, Activity, ActivityChanged, WorkerMessage},
     messages::{ExpansionChanged, MessageLevel, MessageSource, Messages, NewMessage},
     source::SourcePicker,
 };
-use crate::logging;
 
 enum Stage {
     Idle,
@@ -41,14 +39,6 @@ enum Stage {
     Cancelling,
     Finished(RunStatus),
 }
-
-pub(super) enum TranscodeActivity {
-    Running(String),
-    Cancelling,
-    Finished(RunStatus),
-}
-
-pub(super) struct ActivityChanged;
 
 struct TaskResult {
     name: String,
@@ -61,11 +51,6 @@ enum ResultStatus {
     Failure,
     Cancelled,
     Skipped,
-}
-
-enum WorkerMessage {
-    Event(RunEvent),
-    Finished(RunOutcome),
 }
 
 pub struct TranscodePage {
@@ -179,73 +164,16 @@ impl TranscodePage {
 
         let cancellation = CancellationToken::new();
         self.cancellation = Some(cancellation.clone());
-        let (sender, mut receiver) = mpsc::unbounded_channel();
-        let (log_sender, mut log_receiver) = mpsc::unbounded_channel();
-        std::thread::spawn(move || {
-            let capture = logging::capture(log_sender);
-            let outcome = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(runtime) => runtime.block_on(yog_runtime::run_with_events(
-                    request.command,
-                    request.options,
-                    request.config,
-                    cancellation,
-                    |event| {
-                        _ = sender.send(WorkerMessage::Event(event));
-                    },
-                )),
-                Err(error) => RunOutcome::Failed(error.into()),
-            };
-            drop(capture);
-            _ = sender.send(WorkerMessage::Finished(outcome));
-        });
+        let mut receiver = execution::spawn(request, cancellation);
         cx.spawn(async move |this, cx| {
-            let mut events_open = true;
-            let mut logs_open = true;
-            while events_open || logs_open {
-                tokio::select! {
-                    message = receiver.recv(), if events_open => match message {
-                        Some(message) => {
-                            if matches!(message, WorkerMessage::Finished(_)) {
-                                // The worker closes the log sink before sending Finished. Drain
-                                // its remaining records before another run can clear the panel.
-                                while let Ok(log) = log_receiver.try_recv() {
-                                    if this.update_in(cx, |this, window, cx| {
-                                        this.messages.update(cx, |messages, cx| messages.push(log, window, cx));
-                                    }).is_err() {
-                                        return;
-                                    }
-                                }
-                                logs_open = false;
-                                if this.update_in(cx, |this, window, cx| {
-                                    this.messages.update(cx, |messages, cx| messages.finish(window, cx));
-                                }).is_err() {
-                                    return;
-                                }
-                            }
-                            if this.update_in(cx, |this, window, cx| this.handle_message(message, window, cx)).is_err() {
-                                break;
-                            }
-                        }
-                        None => events_open = false,
-                    },
-                    message = log_receiver.recv(), if logs_open => match message {
-                        Some(message) => {
-                            if this.update_in(cx, |this, window, cx| {
-                                this.messages.update(cx, |messages, cx| messages.push(message, window, cx));
-                            }).is_err() {
-                                break;
-                            }
-                        }
-                        None => {
-                            logs_open = false;
-                            _ = this.update_in(cx, |this, window, cx| {
-                                this.messages.update(cx, |messages, cx| messages.finish(window, cx));
-                            });
-                        }
-                    },
+            while let Some(message) = receiver.recv().await {
+                if this
+                    .update_in(cx, |this, window, cx| {
+                        this.handle_message(message, window, cx)
+                    })
+                    .is_err()
+                {
+                    break;
                 }
             }
         })
@@ -296,6 +224,10 @@ impl TranscodePage {
         cx: &mut Context<Self>,
     ) {
         match message {
+            WorkerMessage::Log(log) => {
+                self.messages
+                    .update(cx, |messages, cx| messages.push(log, window, cx));
+            }
             WorkerMessage::Event(event) => match event {
                 RunEvent::PhaseChanged(phase) => {
                     self.phase = Some(phase);
@@ -423,6 +355,8 @@ impl TranscodePage {
                 _ => {}
             },
             WorkerMessage::Finished(outcome) => {
+                self.messages
+                    .update(cx, |messages, cx| messages.finish(window, cx));
                 self.stage = Stage::Finished(outcome.status());
                 self.finished_elapsed = self.started.map(|started| started.elapsed());
                 self.cancellation = None;
@@ -461,21 +395,14 @@ impl TranscodePage {
     }
 
     fn phase_label(&self) -> &'static str {
-        match self.phase {
-            Some(RunPhase::Discovering) => "Discovering files",
-            Some(RunPhase::Probing) => "Probing media",
-            Some(RunPhase::Planning) => "Preparing transcode",
-            Some(RunPhase::Predicting) => "Predicting",
-            Some(RunPhase::Transcoding) => "Transcoding",
-            Some(RunPhase::Verifying) => "Verifying output",
-            Some(RunPhase::Publishing) => "Publishing output",
-            Some(RunPhase::CalculatingVmaf) => "Calculating VMAF",
-            Some(RunPhase::RenderingChart) => "Rendering chart",
-            None => "Starting",
+        if self.phase == Some(RunPhase::Planning) {
+            "Preparing transcode"
+        } else {
+            execution::phase_label(self.phase)
         }
     }
 
-    pub(super) fn activity(&self) -> Option<TranscodeActivity> {
+    pub fn activity(&self) -> Option<Activity> {
         match self.stage {
             Stage::Idle => None,
             Stage::Running => {
@@ -488,14 +415,14 @@ impl TranscodePage {
                 {
                     label.push_str(&format!(" · {percent:.0}%"));
                 }
-                Some(TranscodeActivity::Running(label))
+                Some(Activity::Running(label))
             }
-            Stage::Cancelling => Some(TranscodeActivity::Cancelling),
-            Stage::Finished(status) => Some(TranscodeActivity::Finished(status)),
+            Stage::Cancelling => Some(Activity::Cancelling),
+            Stage::Finished(status) => Some(Activity::Finished(status)),
         }
     }
 
-    pub(super) fn set_page_visible(
+    pub fn set_page_visible(
         &self,
         visible: bool,
         window: &mut Window,
@@ -548,7 +475,7 @@ impl TranscodePage {
             .finished_elapsed
             .or_else(|| self.started.map(|time| time.elapsed()))
         {
-            metrics.push(("Elapsed", format_duration(elapsed)));
+            metrics.push(("Elapsed", components::format_duration(elapsed)));
         }
         if active && let Some(speed) = self.progress.speed {
             metrics.push(("Speed", format!("{speed:.2}×")));
@@ -562,12 +489,12 @@ impl TranscodePage {
             )
             && let Some(remaining) = estimate_remaining(duration, processed, speed)
         {
-            metrics.push(("ETA", format_duration(remaining)));
+            metrics.push(("ETA", components::format_duration(remaining)));
         }
         if (active || self.task_total == 1)
             && let Some(bytes) = self.progress.total_size
         {
-            metrics.push(("Output size", format_size(bytes)));
+            metrics.push(("Output size", components::format_size(bytes)));
         }
         let mut details = Vec::new();
         if active && let Some(processed) = self.progress.out_time_us {
@@ -575,10 +502,10 @@ impl TranscodePage {
             let value = match self.duration {
                 Some(duration) => format!(
                     "Processed {} / {}",
-                    format_duration(processed),
-                    format_duration(duration)
+                    components::format_duration(processed),
+                    components::format_duration(duration)
                 ),
-                None => format!("Processed {}", format_duration(processed)),
+                None => format!("Processed {}", components::format_duration(processed)),
             };
             details.push(value);
         }
@@ -811,7 +738,6 @@ impl TranscodePage {
     }
 
     fn render_work_area(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let rem = cx.theme().font_size;
         let results = div()
             .size_full()
             .min_h_0()
@@ -826,27 +752,12 @@ impl TranscodePage {
                     .child(self.source.clone())
                     .child(self.render_results(cx)),
             );
-        if self.messages.read(cx).is_expanded() {
-            v_resizable("transcode-work-and-messages")
-                .child(resizable_panel().child(results))
-                .child(
-                    resizable_panel()
-                        .size(rem * 18.0)
-                        .size_range(rem * 12.0..rem * 32.0)
-                        .flex_none()
-                        .child(self.messages.clone()),
-                )
-                .into_any_element()
-        } else {
-            div()
-                .size_full()
-                .min_h_0()
-                .flex()
-                .flex_col()
-                .child(div().flex_1().min_h_0().child(results))
-                .child(self.messages.clone())
-                .into_any_element()
-        }
+        components::work_and_messages(
+            "transcode-work-and-messages",
+            results.into_any_element(),
+            self.messages.clone(),
+            cx,
+        )
     }
 
     fn render_inspector(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -885,33 +796,12 @@ impl TranscodePage {
     }
 }
 
-fn format_duration(duration: Duration) -> String {
-    let seconds = duration.as_secs();
-    format!(
-        "{:02}:{:02}:{:02}",
-        seconds / 3_600,
-        seconds / 60 % 60,
-        seconds % 60
-    )
-}
-
 fn estimate_remaining(duration: Duration, processed_us: i64, speed: f64) -> Option<Duration> {
     if speed <= 0.0 {
         return None;
     }
     let remaining = (duration.as_secs_f64() - processed_us.max(0) as f64 / 1_000_000.0).max(0.0);
     Duration::try_from_secs_f64(remaining / speed).ok()
-}
-
-fn format_size(bytes: u64) -> String {
-    let mib = bytes as f64 / 1_048_576.0;
-    if mib >= 1_024.0 {
-        format!("{:.1} GiB", mib / 1_024.0)
-    } else if mib >= 10.0 {
-        format!("{mib:.0} MiB")
-    } else {
-        format!("{mib:.1} MiB")
-    }
 }
 
 impl Drop for TranscodePage {
@@ -932,7 +822,7 @@ impl Render for TranscodePage {
 
 #[cfg(test)]
 mod tests {
-    use super::{Stage, WorkerMessage, estimate_remaining, format_duration, format_size};
+    use super::{Stage, WorkerMessage, components, estimate_remaining};
     use crate::workspace::{Mode, Workspace};
     use gpui_kit::{
         AppContext as _, TestAppContext, component::Root, px, size, test::TestWindowExt as _,
@@ -946,13 +836,16 @@ mod tests {
 
     #[test]
     fn progress_uses_adaptive_video_size_units() {
-        assert_eq!(format_size(800 * 1_048_576), "800 MiB");
-        assert_eq!(format_size(1_181_116_006), "1.1 GiB");
+        assert_eq!(components::format_size(800 * 1_048_576), "800 MiB");
+        assert_eq!(components::format_size(1_181_116_006), "1.1 GiB");
     }
 
     #[test]
     fn processed_time_keeps_hours_instead_of_wrapping_at_sixty_minutes() {
-        assert_eq!(format_duration(Duration::from_secs(3_661)), "01:01:01");
+        assert_eq!(
+            components::format_duration(Duration::from_secs(3_661)),
+            "01:01:01"
+        );
     }
 
     #[test]

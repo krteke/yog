@@ -3,12 +3,15 @@ use gpui_kit::component::{
     button::Button,
     form::Field,
     input::{Input, InputState},
+    resizable::v_resizable,
     resizable::{h_resizable, resizable_panel},
 };
 use gpui_kit::{
     AnyElement, App, ClickEvent, Entity, IntoElement, ParentElement as _, Pixels, Styled as _,
     Window, div, px,
 };
+
+use super::messages::Messages;
 
 pub fn page_layout(
     id: &'static str,
@@ -115,3 +118,55 @@ pub fn empty_results(cx: &App) -> impl IntoElement {
                 .child("No results yet"),
         )
 }
+
+pub fn work_and_messages(
+    id: &'static str,
+    results: AnyElement,
+    messages: Entity<Messages>,
+    cx: &App,
+) -> AnyElement {
+    if messages.read(cx).is_expanded() {
+        let rem = cx.theme().font_size;
+        v_resizable(id)
+            .child(resizable_panel().child(results))
+            .child(
+                resizable_panel()
+                    .size(rem * 18.0)
+                    .size_range(rem * 12.0..rem * 32.0)
+                    .flex_none()
+                    .child(messages),
+            )
+            .into_any_element()
+    } else {
+        div()
+            .size_full()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(div().flex_1().min_h_0().child(results))
+            .child(messages)
+            .into_any_element()
+    }
+}
+
+pub fn format_size(bytes: u64) -> String {
+    let mib = bytes as f64 / 1_048_576.0;
+    if mib >= 1_024.0 {
+        format!("{:.1} GiB", mib / 1_024.0)
+    } else if mib >= 10.0 {
+        format!("{mib:.0} MiB")
+    } else {
+        format!("{mib:.1} MiB")
+    }
+}
+
+pub fn format_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    format!(
+        "{:02}:{:02}:{:02}",
+        seconds / 3_600,
+        seconds / 60 % 60,
+        seconds % 60
+    )
+}
+use std::time::Duration;

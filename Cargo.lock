@@ -9765,6 +9765,7 @@ version = "0.1.0"
 dependencies = [
  "gpui-kit",
  "log",
+ "tempfile",
  "tokio",
  "tokio-util",
  "yog-core",

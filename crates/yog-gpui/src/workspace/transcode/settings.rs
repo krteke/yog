@@ -1,5 +1,4 @@
 use std::{
-    ffi::OsString,
     num::{NonZeroU32, NonZeroU64},
     path::{Path, PathBuf},
 };
@@ -18,120 +17,26 @@ use gpui_kit::{
     Subscription, Window, div, prelude::FluentBuilder as _,
 };
 use yog_core::ffmpeg::{
-    decoding::DecodingBackend,
-    encoding::{DEFAULT_VAAPI_DEVICE, NvencMultipass, RateControl, VideoEncoding},
+    encoding::{DEFAULT_VAAPI_DEVICE, RateControl, VideoEncoding},
     plan::{Container, TranscodeRequest, VideoAction},
     vmaf::VmafOptions,
 };
 use yog_runtime::{Command, Config, Operation, Options, Validate};
 
-use super::super::{components, source::SourcePicker};
-
-type Choice = Entity<SelectState<SearchableVec<&'static str>>>;
-
-const DECODERS: &[&str] = &["Software", "VAAPI", "CUDA", "QSV"];
-const ENCODERS: &[&str] = &[
-    "libx264",
-    "libx265",
-    "libsvtav1",
-    "libaom-av1",
-    "librav1e",
-    "h264_nvenc",
-    "hevc_nvenc",
-    "av1_nvenc",
-    "h264_qsv",
-    "hevc_qsv",
-    "av1_qsv",
-    "h264_vaapi",
-    "hevc_vaapi",
-    "av1_vaapi",
-];
-const CONTAINERS: &[(&str, Option<Container>)] = &[
-    ("Auto", None),
-    ("Matroska", Some(Container::Matroska)),
-    ("MP4", Some(Container::Mp4)),
-    ("MOV", Some(Container::Mov)),
-    ("M4A", Some(Container::M4a)),
-    ("3GP", Some(Container::ThreeGp)),
-    ("3G2", Some(Container::ThreeG2)),
-    ("F4V", Some(Container::F4v)),
-    ("ISMV", Some(Container::Ismv)),
-    ("PSP", Some(Container::Psp)),
-    ("WebM", Some(Container::Webm)),
-    ("MPEG-TS", Some(Container::MpegTs)),
-    ("M2TS", Some(Container::M2ts)),
-    ("AVI", Some(Container::Avi)),
-    ("FLV", Some(Container::Flv)),
-    ("ASF", Some(Container::Asf)),
-    ("WMV", Some(Container::Wmv)),
-    ("MPEG-PS", Some(Container::MpegPs)),
-    ("VOB", Some(Container::Vob)),
-    ("Ogg", Some(Container::Ogg)),
-    ("OGV", Some(Container::Ogv)),
-];
-const X26X_PRESETS: &[&str] = &[
-    "ultrafast",
-    "superfast",
-    "veryfast",
-    "faster",
-    "fast",
-    "medium",
-    "slow",
-    "slower",
-    "veryslow",
-];
-const SVT_PRESETS: &[&str] = &[
-    "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13",
-];
-const AOM_PRESETS: &[&str] = &["0", "1", "2", "3", "4", "5", "6", "7", "8"];
-const RAV1E_PRESETS: &[&str] = &["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"];
-const NVENC_PRESETS: &[&str] = &["p1", "p2", "p3", "p4", "p5", "p6", "p7"];
-const QSV_PRESETS: &[&str] = &[
-    "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow",
-];
-
-fn presets(encoder: &str) -> &'static [&'static str] {
-    match encoder {
-        "libx264" | "libx265" => X26X_PRESETS,
-        "libsvtav1" => SVT_PRESETS,
-        "libaom-av1" => AOM_PRESETS,
-        "librav1e" => RAV1E_PRESETS,
-        "h264_nvenc" | "hevc_nvenc" | "av1_nvenc" => NVENC_PRESETS,
-        "h264_qsv" | "hevc_qsv" | "av1_qsv" => QSV_PRESETS,
-        "h264_vaapi" | "hevc_vaapi" | "av1_vaapi" => &[],
-        _ => unreachable!("encoder choice is internal"),
-    }
-}
-
-fn selected(choice: &Choice, cx: &gpui_kit::App) -> &'static str {
-    choice
-        .read(cx)
-        .selected_value()
-        .expect("select choices always have a selection")
-}
-
-fn same_path(left: &Path, right: &Path) -> bool {
-    if left == right {
-        return true;
-    }
-    let resolve = |path: &Path| {
-        path.canonicalize()
-            .or_else(|_| std::path::absolute(path))
-            .ok()
-    };
-    matches!((resolve(left), resolve(right)), (Some(left), Some(right)) if left == right)
-}
+use super::super::{
+    components,
+    execution::{self, RunRequest},
+    source::SourcePicker,
+    video::{
+        CONTAINERS, Choice, DECODERS, ENCODERS, MULTIPASS, X26X_PRESETS, container, decoding,
+        default_preset, encoding, presets, selected,
+    },
+};
 
 #[derive(Clone, Copy)]
 enum Destination {
     Output,
     Report,
-}
-
-pub struct RunRequest {
-    pub command: Command,
-    pub options: Options,
-    pub config: Config,
 }
 
 pub struct TranscodeSettings {
@@ -182,16 +87,7 @@ impl TranscodeSettings {
         let encoder = select(ENCODERS, 1, cx);
         let preset = select(X26X_PRESETS, 5, cx);
         let rate = select(&["Quality", "Bitrate", "Encoder default"], 0, cx);
-        let multipass = select(
-            &[
-                "Default",
-                "Disabled",
-                "Quarter resolution",
-                "Full resolution",
-            ],
-            0,
-            cx,
-        );
+        let multipass = select(MULTIPASS, 0, cx);
         let vmaf = select(&["Off", "Full", "Subsample"], 0, cx);
 
         let encoder_subscription = cx.subscribe_in(
@@ -201,14 +97,7 @@ impl TranscodeSettings {
                 let encoder = selected(&this.encoder, cx);
                 let values = presets(encoder);
                 if !values.is_empty() {
-                    let default = match encoder {
-                        "libx264" | "libx265" => 5,
-                        "libsvtav1" => 6,
-                        "libaom-av1" => 4,
-                        "librav1e" => 6,
-                        "h264_nvenc" | "hevc_nvenc" | "av1_nvenc" => 3,
-                        _ => 3,
-                    };
+                    let default = default_preset(encoder);
                     this.preset.update(cx, |preset, cx| {
                         preset.set_items(SearchableVec::new(values.to_vec()), window, cx);
                         preset.set_selected_index(Some(IndexPath::new(default)), window, cx);
@@ -280,38 +169,18 @@ impl TranscodeSettings {
             return Err("Choose an output file or folder".into());
         }
 
-        let device = self.decode_device.read(cx).value();
-        let device = (!device.trim().is_empty()).then(|| OsString::from(device.trim()));
-        let decoding = match selected(&self.decoder, cx) {
-            "Software" => DecodingBackend::Software,
-            "VAAPI" => DecodingBackend::Vaapi(device),
-            "CUDA" => DecodingBackend::Cuda(device),
-            "QSV" => DecodingBackend::Qsv(device),
-            _ => unreachable!("decoder choice is internal"),
-        };
+        let decoding = decoding(
+            selected(&self.decoder, cx),
+            &self.decode_device.read(cx).value(),
+        );
 
         let video = if self.encode {
-            let encoder = selected(&self.encoder, cx);
-            let mut encoding = encoder
-                .parse::<VideoEncoding>()
-                .expect("encoder choices are accepted by yog-core");
-            if !presets(encoder).is_empty() {
-                encoding
-                    .try_set_preset(selected(&self.preset, cx))
-                    .expect("preset choices are accepted by yog-core");
-            }
-            if let VideoEncoding::Nvenc { multipass, .. } = &mut encoding {
-                *multipass = match selected(&self.multipass, cx) {
-                    "Default" => None,
-                    "Disabled" => Some(NvencMultipass::Disabled),
-                    "Quarter resolution" => Some(NvencMultipass::QuarterResolution),
-                    "Full resolution" => Some(NvencMultipass::FullResolution),
-                    _ => unreachable!("multipass choice is internal"),
-                };
-            }
-            if let VideoEncoding::Vaapi { device, .. } = &mut encoding {
-                *device = PathBuf::from(self.encode_device.read(cx).value().trim());
-            }
+            let mut encoding = encoding(
+                selected(&self.encoder, cx),
+                selected(&self.preset, cx),
+                selected(&self.multipass, cx),
+                &self.encode_device.read(cx).value(),
+            );
             let rate = match selected(&self.rate, cx) {
                 "Quality" => {
                     let quality = self.quality.read(cx).value();
@@ -340,12 +209,7 @@ impl TranscodeSettings {
             .with_decoding(decoding)
             .with_video(video)
             .with_overwrite(self.overwrite);
-        if let Some(container) = CONTAINERS
-            .iter()
-            .find(|(label, _)| *label == selected(&self.container, cx))
-            .expect("container choice is internal")
-            .1
-        {
+        if let Some(container) = container(selected(&self.container, cx)) {
             request = request.with_container(container);
         }
         let command = Command {
@@ -372,10 +236,9 @@ impl TranscodeSettings {
         };
         let report = self.report.read(cx).value();
         let report = (!report.trim().is_empty()).then(|| PathBuf::from(report.trim()));
-        if report
-            .as_ref()
-            .is_some_and(|report| same_path(report, input) || same_path(report, Path::new(output)))
-        {
+        if report.as_ref().is_some_and(|report| {
+            execution::same_path(report, input) || execution::same_path(report, Path::new(output))
+        }) {
             return Err("Report path must differ from the source and output".into());
         }
         let options = Options {
@@ -440,11 +303,8 @@ impl TranscodeSettings {
             .unwrap_or("output");
         let suggested_name = match target {
             Destination::Output => {
-                let extension = CONTAINERS
-                    .iter()
-                    .find(|(label, _)| *label == selected(&self.container, cx))
-                    .and_then(|(_, container)| *container)
-                    .map_or("mkv", Container::extension);
+                let extension =
+                    container(selected(&self.container, cx)).map_or("mkv", Container::extension);
                 format!("{name}-encoded.{extension}")
             }
             Destination::Report => format!("{name}-report.jsonl"),

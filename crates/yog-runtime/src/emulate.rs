@@ -342,6 +342,10 @@ impl Transcoder {
             ),
         )
         .context("cannot render emulation chart")?;
+        diagnostics.event(RunEvent::EmulationChartRendered {
+            png: options.png.clone(),
+            svg: options.svg.clone(),
+        });
         diagnostics.emulation(&request.input, &jobs, options, succeeded, failures.len());
 
         if failures.is_empty() {

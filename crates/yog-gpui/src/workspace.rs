@@ -1,9 +1,12 @@
 mod components;
 mod emulate;
-pub(crate) mod messages;
+mod execution;
+pub mod logging;
+pub mod messages;
 mod predict;
 mod source;
 mod transcode;
+mod video;
 
 use gpui_kit::component::{
     ActiveTheme, Icon, IconName, Root, Sizable as _, StyledExt as _, Theme, ThemeMode, TitleBar,
@@ -23,9 +26,10 @@ use yog_runtime::RunStatus;
 
 use self::{
     emulate::EmulatePage,
+    execution::{Activity, ActivityChanged},
     predict::PredictPage,
     source::SourcePicker,
-    transcode::{ActivityChanged, TranscodeActivity, TranscodePage},
+    transcode::TranscodePage,
 };
 
 actions!(
@@ -113,7 +117,7 @@ pub struct Workspace {
     predict: Entity<PredictPage>,
     emulate: Entity<EmulatePage>,
     _source_observation: Subscription,
-    _activity_subscription: Subscription,
+    _activity_subscriptions: Vec<Subscription>,
     _appearance_subscription: Subscription,
 }
 
@@ -126,9 +130,14 @@ impl Workspace {
         let transcode = cx.new(|cx| TranscodePage::new(source.clone(), window, cx));
         let predict = cx.new(|cx| PredictPage::new(source.clone(), window, cx));
         let emulate = cx.new(|cx| EmulatePage::new(source.clone(), window, cx));
+        predict.update(cx, |page, cx| page.set_page_visible(false, window, cx));
+        emulate.update(cx, |page, cx| page.set_page_visible(false, window, cx));
         let source_observation = cx.observe(&source, |_, _, cx| cx.notify());
-        let activity_subscription =
-            cx.subscribe(&transcode, |_, _, _: &ActivityChanged, cx| cx.notify());
+        let activity_subscriptions = vec![
+            cx.subscribe(&transcode, |_, _, _: &ActivityChanged, cx| cx.notify()),
+            cx.subscribe(&predict, |_, _, _: &ActivityChanged, cx| cx.notify()),
+            cx.subscribe(&emulate, |_, _, _: &ActivityChanged, cx| cx.notify()),
+        ];
 
         let weak = cx.weak_entity();
         let appearance_subscription = window.observe_window_appearance(move |window, cx| {
@@ -150,7 +159,7 @@ impl Workspace {
             predict,
             emulate,
             _source_observation: source_observation,
-            _activity_subscription: activity_subscription,
+            _activity_subscriptions: activity_subscriptions,
             _appearance_subscription: appearance_subscription,
         }
     }
@@ -161,6 +170,12 @@ impl Workspace {
         }
         self.transcode.update(cx, |transcode, cx| {
             transcode.set_page_visible(mode == Mode::Transcode, window, cx);
+        });
+        self.predict.update(cx, |predict, cx| {
+            predict.set_page_visible(mode == Mode::Predict, window, cx);
+        });
+        self.emulate.update(cx, |emulate, cx| {
+            emulate.set_page_visible(mode == Mode::Emulate, window, cx);
         });
         self.mode = mode;
         self.source.update(cx, |source, cx| {
@@ -252,43 +267,85 @@ impl Workspace {
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_else(|| "No source selected".into());
         let bar = StatusBar::new().right(div().max_w_48().truncate().child(source));
-        let Some(activity) = self.transcode.read(cx).activity() else {
-            return bar;
-        };
-        let (tag, state, detail) = match activity {
-            TranscodeActivity::Running(detail) => (Tag::info(), "Running", detail),
-            TranscodeActivity::Cancelling => (Tag::warning(), "Cancelling", "Transcode".into()),
-            TranscodeActivity::Finished(RunStatus::Success) => {
-                (Tag::success(), "Completed", "Transcode".into())
-            }
-            TranscodeActivity::Finished(RunStatus::Failure) => {
-                (Tag::danger(), "Failed", "Transcode".into())
-            }
-            TranscodeActivity::Finished(RunStatus::Cancelled) => {
-                (Tag::secondary(), "Cancelled", "Transcode".into())
-            }
-        };
-        let view_label = format!("View transcode: {state}, {detail}");
-        let status = div()
-            .min_w_0()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(tag.small().outline().child(state))
-            .child(div().min_w_0().truncate().child(detail))
-            .when(self.mode != Mode::Transcode, |this| {
-                this.child(
-                    Button::new("view-transcode")
-                        .ghost()
-                        .small()
-                        .label("View")
-                        .accessibility_label(view_label)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.change_mode(Mode::Transcode, window, cx);
-                        })),
-                )
-            });
-        bar.left(status)
+        let activities = [
+            (Mode::Transcode, self.transcode.read(cx).activity()),
+            (Mode::Predict, self.predict.read(cx).activity()),
+            (Mode::Emulate, self.emulate.read(cx).activity()),
+        ];
+        let active = activities.iter().any(|(_, activity)| {
+            matches!(activity, Some(Activity::Running(_) | Activity::Cancelling))
+        });
+        let items = activities
+            .into_iter()
+            .filter_map(|(mode, activity)| {
+                let activity = activity?;
+                if active && !matches!(activity, Activity::Running(_) | Activity::Cancelling) {
+                    return None;
+                }
+                let name = match mode {
+                    Mode::Transcode => "Transcode",
+                    Mode::Predict => "Predict",
+                    Mode::Emulate => "Emulate",
+                };
+                let (tag, state, detail) = match activity {
+                    Activity::Running(detail) => (Tag::info(), "Running", detail),
+                    Activity::Cancelling => (Tag::warning(), "Cancelling", String::new()),
+                    Activity::Finished(RunStatus::Success) => {
+                        (Tag::success(), "Completed", String::new())
+                    }
+                    Activity::Finished(RunStatus::Failure) => {
+                        (Tag::danger(), "Failed", String::new())
+                    }
+                    Activity::Finished(RunStatus::Cancelled) => {
+                        (Tag::secondary(), "Cancelled", String::new())
+                    }
+                };
+                let view_label = format!(
+                    "View {}: {state}, {}",
+                    name.to_lowercase(),
+                    if detail.is_empty() { name } else { &detail },
+                );
+                let status = div()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(tag.small().outline().child(state))
+                    .child(div().text_sm().child(name))
+                    .when(!detail.is_empty(), |this| {
+                        this.child(div().min_w_0().truncate().child(detail))
+                    })
+                    .when(self.mode != mode, |this| {
+                        this.child(
+                            Button::new(match mode {
+                                Mode::Transcode => "view-transcode",
+                                Mode::Predict => "view-predict",
+                                Mode::Emulate => "view-emulate",
+                            })
+                            .ghost()
+                            .small()
+                            .label("View")
+                            .accessibility_label(view_label)
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| this.change_mode(mode, window, cx),
+                            )),
+                        )
+                    });
+                Some(status)
+            })
+            .collect::<Vec<_>>();
+        if items.is_empty() {
+            bar
+        } else {
+            bar.left(
+                div()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap_4()
+                    .children(items),
+            )
+        }
     }
 }
 

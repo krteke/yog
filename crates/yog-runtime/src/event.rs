@@ -74,6 +74,10 @@ pub enum RunEvent {
         output_bytes: Option<u64>,
         error: Option<String>,
     },
+    EmulationChartRendered {
+        png: Option<PathBuf>,
+        svg: Option<PathBuf>,
+    },
     VmafFinished {
         output: PathBuf,
         options: VmafOptions,

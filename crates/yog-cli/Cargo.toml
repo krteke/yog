@@ -3,10 +3,6 @@ name = "yog-cli"
 version.workspace = true
 edition.workspace = true
 
-[[bin]]
-name = "yog"
-path = "src/main.rs"
-
 [dependencies]
 yog-core = { workspace = true, features = ["clap"] }
 yog-runtime.workspace = true

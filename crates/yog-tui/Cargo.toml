@@ -3,6 +3,10 @@ name = "yog-tui"
 version.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "yog"
+path = "src/main.rs"
+
 [dependencies]
 yog-cli = { workspace = true, optional = true }
 yog-core.workspace = true

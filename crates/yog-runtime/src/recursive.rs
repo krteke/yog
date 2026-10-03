@@ -50,7 +50,7 @@ pub async fn discover(
             Ok(media) => media,
             Err(RunError::Cancelled) => return Err(RunError::Cancelled),
             Err(RunError::Failed(error)) => {
-                diagnostics.skipped_probe(&input, &error);
+                diagnostics.skipped_input(&input, &error);
                 skipped.push(SkippedInput { input, error });
                 continue;
             }
@@ -66,15 +66,22 @@ pub async fn discover(
                 .input
                 .strip_prefix(&template.input)
                 .expect("walked entry must be below the input directory");
-            let output_container = request
-                .output_container(&media)
-                .with_context(|| {
-                    format!(
-                        "cannot select output container for {}",
-                        request.input.display()
-                    )
-                })
-                .map_err(RunError::from)?;
+            let output_container = match request.output_container(&media).with_context(|| {
+                format!(
+                    "cannot select output container for {}",
+                    request.input.display()
+                )
+            }) {
+                Ok(container) => container,
+                Err(error) => {
+                    diagnostics.skipped_input(&request.input, &error);
+                    skipped.push(SkippedInput {
+                        input: request.input,
+                        error,
+                    });
+                    continue;
+                }
+            };
             let mut output = template.output.join(relative);
             if request.container.is_some() {
                 output.set_extension(output_container.extension());

@@ -1103,7 +1103,7 @@ printf '{"streams":%s,"format":{"format_name":"%s","duration":"1"}}' "$streams" 
     assert!(!fixture.0.join("output/nested/movie.ts.part").exists());
     let stdout = String::from_utf8_lossy(&result.stdout);
     let stderr = String::from_utf8_lossy(&result.stderr);
-    assert!(stderr.contains("warning: skipping input/nested/notes.md because ffprobe failed"));
+    assert!(stderr.contains("warning: skipping input/nested/notes.md: probe failed"));
     assert!(stderr.contains("NOT-MEDIA"));
     assert!(stdout.contains("batch summary: total 2 | succeeded 2 | failed 0"));
 }
@@ -1353,6 +1353,81 @@ printf '{"streams":[{"index":0,"codec_type":"video"}],"format":{"format_name":"%
     assert_muxer("vob", "vob");
     assert_muxer("ogg", "ogg");
     assert_muxer("ogv", "ogv");
+}
+
+#[test]
+fn recursive_mode_skips_unsupported_input_containers_and_records_them() {
+    let fixture = Fixture::new(
+        r#"for last do :; done
+printf encoded > "$last""#,
+    );
+    fs::create_dir(fixture.0.join("input")).unwrap();
+    fs::write(fixture.0.join("input/cover.jpg"), b"image").unwrap();
+    fs::write(fixture.0.join("input/first.mkv"), b"video").unwrap();
+    fs::write(fixture.0.join("input/last.mkv"), b"video").unwrap();
+    fixture.tool(
+        "ffprobe",
+        r#"for last do :; done
+case "$last" in
+    *.jpg) format=image2 ;;
+    *) format=matroska,webm ;;
+esac
+printf '{"streams":[{"index":0,"codec_type":"video"}],"format":{"format_name":"%s","duration":"1"}}' "$format""#,
+    );
+
+    let result = fixture
+        .recursive_command("output")
+        .args(["--copy", "--report", "report.jsonl"])
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(result.status.success(), "{stderr}");
+    assert_eq!(
+        fs::read(fixture.0.join("output/first.mkv")).unwrap(),
+        b"encoded"
+    );
+    assert_eq!(
+        fs::read(fixture.0.join("output/last.mkv")).unwrap(),
+        b"encoded"
+    );
+    assert!(!fixture.0.join("output/cover.jpg").exists());
+    assert!(!fixture.0.join("output/cover.jpg.part").exists());
+    assert!(
+        stderr.contains("warning: skipping input/cover.jpg"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("cannot use input format Some(\"image2\")"),
+        "{stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(
+        stdout.ends_with("batch summary: total 2 | succeeded 2 | failed 0\n"),
+        "{stdout}"
+    );
+
+    let records = read_report(&fixture, "report.jsonl");
+    assert_eq!(records.len(), 3, "{records:?}");
+    let skipped: Vec<_> = records
+        .iter()
+        .filter_map(|row| row["skipped"].as_object())
+        .collect();
+    assert_eq!(skipped.len(), 1, "{records:?}");
+    assert!(skipped[0]["input"].as_str().unwrap().ends_with("cover.jpg"));
+    assert!(
+        skipped[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("cannot use input format Some(\"image2\")")
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|row| row["transcode"]["status"] == "success")
+            .count(),
+        2
+    );
 }
 
 #[test]

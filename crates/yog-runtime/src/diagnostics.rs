@@ -321,7 +321,7 @@ impl<'a> Diagnostics<'a> {
         }
     }
 
-    pub fn skipped_probe(&self, input: &Path, error: &anyhow::Error) {
+    pub fn skipped_input(&self, input: &Path, error: &anyhow::Error) {
         self.event(RunEvent::InputSkipped {
             input: input.to_path_buf(),
             error: format!("{error:#}"),
@@ -330,10 +330,7 @@ impl<'a> Diagnostics<'a> {
             return;
         }
 
-        eprintln!(
-            "warning: skipping {} because ffprobe failed: {error:#}",
-            input.display()
-        );
+        eprintln!("warning: skipping {}: {error:#}", input.display());
         if let Some(error) = Self::program_error(error) {
             Self::print_program_stderr(error, false);
         }

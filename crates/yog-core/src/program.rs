@@ -3,6 +3,7 @@ use crate::process::Output;
 
 use futures_util::FutureExt;
 use std::{
+    collections::VecDeque,
     ffi::{OsStr, OsString},
     fmt,
     future::{Future, pending},
@@ -16,6 +17,9 @@ use tokio::{
     process::{ChildStdout, Command as TokioCommand},
 };
 use tokio_util::sync::CancellationToken;
+
+const MAX_STDERR_BYTES: usize = 1_048_576;
+const STDERR_TRUNCATED: &[u8] = b"[earlier stderr truncated]\n";
 
 #[derive(Debug, Clone)]
 pub struct Program {
@@ -101,6 +105,8 @@ impl Command<'_> {
         let mut value = None;
         let mut reason = None;
         let mut panic = None;
+        let mut stderr_tail = VecDeque::<u8>::new();
+        let mut stderr_truncated = false;
         {
             let decoded = AssertUnwindSafe(async { decode(stdout).await }).catch_unwind();
             let diagnostics = AssertUnwindSafe(async {
@@ -110,7 +116,11 @@ impl Command<'_> {
                     if length == 0 {
                         return Ok::<_, std::io::Error>(());
                     }
-                    failure.stderr.extend_from_slice(&buffer[..length]);
+                    let excess = (stderr_tail.len() + length)
+                        .saturating_sub(MAX_STDERR_BYTES - STDERR_TRUNCATED.len());
+                    stderr_tail.drain(..excess);
+                    stderr_truncated |= excess > 0;
+                    stderr_tail.extend(&buffer[..length]);
                     on_stderr(&buffer[..length]);
                 }
             })
@@ -177,6 +187,10 @@ impl Command<'_> {
         if let Some(payload) = panic {
             resume_unwind(payload);
         }
+        if stderr_truncated {
+            failure.stderr.extend_from_slice(STDERR_TRUNCATED);
+        }
+        failure.stderr.extend(stderr_tail);
         if let Some(reason) = reason {
             failure.reason = reason;
             return Err(failure);

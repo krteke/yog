@@ -95,7 +95,7 @@ impl PredictPage {
             .to_string_lossy()
             .into_owned();
         let prediction = row.prediction.as_ref();
-        div()
+        let row_element = div()
             .min_w_0()
             .rounded(theme.radius)
             .border_1()
@@ -181,38 +181,53 @@ impl PredictPage {
                     .text_color(theme.muted_foreground)
                     .truncate()
                     .child(row.path.display().to_string()),
-            )
-            .into_any_element()
+            );
+        #[cfg(test)]
+        let row_element = row_element
+            .id(format!("predict-result-{}", row.path.display()))
+            .test_support();
+        row_element.into_any_element()
     }
 
     pub fn render_work_area(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let results = div()
-            .size_full()
-            .min_h_0()
-            .min_w_0()
-            .overflow_y_scrollbar()
-            .child(
-                div()
-                    .p_6()
-                    .flex()
-                    .flex_col()
-                    .gap_6()
-                    .child(self.source.clone())
-                    .child(
+        let view = cx.entity();
+        let results = components::virtual_list(
+            "predict-results",
+            self.work_list.clone(),
+            cx.theme().font_size * 10.,
+            move |index, _, cx| {
+                view.update(cx, |page, cx| {
+                    if index == 0 {
                         div()
+                            .p_6()
                             .flex()
                             .flex_col()
-                            .gap_4()
-                            .child(div().text_lg().font_medium().child("Results"))
-                            .when(matches!(self.stage, Stage::Idle), |this| {
-                                this.child(components::empty_results(cx))
-                            })
-                            .when(!matches!(self.stage, Stage::Idle), |this| {
-                                this.child(self.render_summary(cx))
-                            })
-                            .children(self.results.iter().map(|row| self.render_result(row, cx))),
-                    ),
-            );
+                            .gap_6()
+                            .child(page.source.clone())
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_4()
+                                    .child(div().text_lg().font_medium().child("Results"))
+                                    .when(matches!(page.stage, Stage::Idle), |this| {
+                                        this.child(components::empty_results(cx))
+                                    })
+                                    .when(!matches!(page.stage, Stage::Idle), |this| {
+                                        this.child(page.render_summary(cx))
+                                    }),
+                            )
+                            .into_any_element()
+                    } else {
+                        div()
+                            .px_6()
+                            .pb_4()
+                            .child(page.render_result(&page.results[index - 1], cx))
+                            .into_any_element()
+                    }
+                })
+            },
+        );
         components::work_and_messages(
             "predict-work-and-messages",
             results.into_any_element(),

@@ -9,12 +9,12 @@ use gpui_kit::component::{
     ActiveTheme, Disableable, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants},
     progress::Progress as ProgressBar,
-    scroll::ScrollableElement,
     tag::Tag,
 };
 use gpui_kit::{
-    AppContext as _, Context, Entity, EventEmitter, IntoElement, ParentElement as _, Render,
-    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _,
+    AppContext as _, Context, Entity, EventEmitter, IntoElement, ListAlignment, ListState,
+    ParentElement as _, Render, Styled as _, Subscription, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 #[cfg(test)]
 use gpui_kit::{InteractiveElement as _, test::TestSupportExt as _};
@@ -76,6 +76,7 @@ pub struct TranscodePage {
     started: Option<Instant>,
     finished_elapsed: Option<Duration>,
     results: Vec<TaskResult>,
+    work_list: ListState,
     _source_observation: Subscription,
     _settings_observation: Subscription,
     _messages_subscription: Subscription,
@@ -118,6 +119,7 @@ impl TranscodePage {
             started: None,
             finished_elapsed: None,
             results: Vec::new(),
+            work_list: ListState::new(1, ListAlignment::Top, px(300.)),
             _source_observation: source_observation,
             _settings_observation: settings_observation,
             _messages_subscription: messages_subscription,
@@ -155,6 +157,7 @@ impl TranscodePage {
         self.started = Some(Instant::now());
         self.finished_elapsed = None;
         self.results.clear();
+        self.work_list.reset(1);
         self.messages.update(cx, |messages, cx| {
             messages.clear(window, cx);
             messages.push(
@@ -172,10 +175,12 @@ impl TranscodePage {
         self.cancellation = Some(cancellation.clone());
         let mut receiver = execution::spawn(request, cancellation);
         cx.spawn(async move |this, cx| {
-            while let Some(message) = receiver.recv().await {
+            while let Some(batch) = receiver.recv(cx.background_executor()).await {
                 if this
                     .update_in(cx, |this, window, cx| {
-                        this.handle_message(message, window, cx)
+                        for message in batch {
+                            this.handle_message(message, window, cx);
+                        }
                     })
                     .is_err()
                 {
@@ -233,6 +238,7 @@ impl TranscodePage {
             WorkerMessage::Log(log) => {
                 self.messages
                     .update(cx, |messages, cx| messages.push(log, window, cx));
+                return;
             }
             WorkerMessage::Event(event) => match event {
                 RunEvent::PhaseChanged(phase) => {
@@ -396,6 +402,12 @@ impl TranscodePage {
                 );
             }
         }
+        let count = self.results.len() + 1;
+        let previous = self.work_list.item_count();
+        if count > previous {
+            self.work_list.splice(previous..previous, count - previous);
+        }
+        self.work_list.remeasure_items(0..1);
         cx.emit(ActivityChanged);
         cx.notify();
     }
@@ -656,69 +668,60 @@ impl TranscodePage {
             })
     }
 
-    fn render_task_outcomes(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_task_outcome(&self, index: usize, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let results_len = self.results.len();
-        div()
+        let result = &self.results[index];
+        let (label, tag) = match result.status {
+            ResultStatus::Success => ("Completed", Tag::success()),
+            ResultStatus::Failure => ("Failed", Tag::danger()),
+            ResultStatus::Cancelled => ("Cancelled", Tag::secondary()),
+            ResultStatus::Skipped => ("Skipped", Tag::warning()),
+        };
+        let file = Path::new(&result.name)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| result.name.clone());
+        let show_path = file != result.name;
+        let row = div()
+            .min_w_0()
+            .rounded(theme.radius)
+            .border_1()
+            .border_color(theme.border)
+            .p_4()
             .flex()
             .flex_col()
-            .gap_3()
-            .child(div().font_medium().child("Task outcomes"))
+            .gap_2()
             .child(
                 div()
-                    .rounded(theme.radius)
-                    .border_1()
-                    .border_color(theme.border)
-                    .children(self.results.iter().enumerate().map(|(index, result)| {
-                        let (label, tag) = match result.status {
-                            ResultStatus::Success => ("Completed", Tag::success()),
-                            ResultStatus::Failure => ("Failed", Tag::danger()),
-                            ResultStatus::Cancelled => ("Cancelled", Tag::secondary()),
-                            ResultStatus::Skipped => ("Skipped", Tag::warning()),
-                        };
-                        let file = Path::new(&result.name)
-                            .file_name()
-                            .map(|name| name.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| result.name.clone());
-                        let show_path = file != result.name;
+                    .flex()
+                    .items_start()
+                    .justify_between()
+                    .gap_3()
+                    .child(
                         div()
-                            .p_4()
+                            .min_w_0()
                             .flex()
                             .flex_col()
-                            .gap_2()
-                            .when(index + 1 < results_len, |this| {
-                                this.border_b_1().border_color(theme.border)
-                            })
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_start()
-                                    .justify_between()
-                                    .gap_3()
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .flex()
-                                            .flex_col()
-                                            .gap_1()
-                                            .child(div().font_medium().truncate().child(file))
-                                            .when(show_path, |this| {
-                                                this.child(
-                                                    div()
-                                                        .text_xs()
-                                                        .text_color(theme.muted_foreground)
-                                                        .truncate()
-                                                        .child(result.name.clone()),
-                                                )
-                                            }),
-                                    )
-                                    .child(tag.small().outline().child(label)),
-                            )
-                            .when_some(result.error.clone(), |this, error| {
-                                this.child(div().text_sm().text_color(theme.danger).child(error))
-                            })
-                    })),
+                            .gap_1()
+                            .child(div().font_medium().truncate().child(file))
+                            .when(show_path, |this| {
+                                this.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .truncate()
+                                        .child(result.name.clone()),
+                                )
+                            }),
+                    )
+                    .child(tag.small().outline().child(label)),
             )
+            .when_some(result.error.clone(), |this, error| {
+                this.child(div().text_sm().text_color(theme.danger).child(error))
+            });
+        #[cfg(test)]
+        let row = row.id(("transcode-result", index)).test_support();
+        row
     }
 
     fn render_results(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -734,25 +737,37 @@ impl TranscodePage {
                 this.child(self.render_run_summary(cx))
             })
             .when(!self.results.is_empty(), |this| {
-                this.child(self.render_task_outcomes(cx))
+                this.child(div().font_medium().child("Task outcomes"))
             })
     }
 
     fn render_work_area(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let results = div()
-            .size_full()
-            .min_h_0()
-            .min_w_0()
-            .overflow_y_scrollbar()
-            .child(
-                div()
-                    .p_6()
-                    .flex()
-                    .flex_col()
-                    .gap_6()
-                    .child(self.source.clone())
-                    .child(self.render_results(cx)),
-            );
+        let view = cx.entity();
+        let results = components::virtual_list(
+            "transcode-results",
+            self.work_list.clone(),
+            cx.theme().font_size * 10.,
+            move |index, _, cx| {
+                view.update(cx, |page, cx| {
+                    if index == 0 {
+                        div()
+                            .p_6()
+                            .flex()
+                            .flex_col()
+                            .gap_6()
+                            .child(page.source.clone())
+                            .child(page.render_results(cx))
+                            .into_any_element()
+                    } else {
+                        div()
+                            .px_6()
+                            .pb_4()
+                            .child(page.render_task_outcome(index - 1, cx))
+                            .into_any_element()
+                    }
+                })
+            },
+        );
         components::work_and_messages(
             "transcode-work-and-messages",
             results.into_any_element(),
@@ -859,6 +874,109 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn large_task_results_only_materialize_near_the_viewport(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut workspace = None;
+        let handle = cx.open_window(size(px(900.), px(700.)), |window, cx| {
+            let view = cx.new(|cx| Workspace::new(window, cx));
+            workspace = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let workspace = workspace.unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            let page = workspace.read(cx).transcode.clone();
+            page.update(cx, |page, cx| {
+                page.stage = Stage::Running;
+                for index in 0..10_000 {
+                    page.handle_message(
+                        WorkerMessage::Event(RunEvent::InputSkipped {
+                            input: format!("input-{index}.mkv").into(),
+                            error: "Invalid input".into(),
+                        }),
+                        window,
+                        cx,
+                    );
+                }
+            });
+            page.read(cx).work_list.scroll_to(gpui_kit::ListOffset {
+                item_ix: 1,
+                offset_in_item: px(0.),
+            });
+            let started = std::time::Instant::now();
+            window.render_frame(cx);
+            let row_count = gpui_kit::base::test_support::snapshots(window)
+                .iter()
+                .filter(|item| {
+                    matches!(
+                        item.path().last(),
+                        Some(gpui_kit::ElementId::NamedInteger(name, _))
+                            if name.as_ref() == "transcode-result"
+                    )
+                })
+                .count();
+            eprintln!(
+                "10,000 task results: {row_count} visible cards in {:?}",
+                started.elapsed()
+            );
+            assert!(
+                row_count > 0 && row_count < 30,
+                "materialized {row_count} rows"
+            );
+            assert!(
+                window.try_find(("transcode-result", 9_999usize)).is_none(),
+                "offscreen task was materialized"
+            );
+            assert_eq!(page.read(cx).results.len(), 10_000);
+            window.scroll(
+                "transcode-results",
+                gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-10_000_000.))),
+                cx,
+            );
+            window.render_frame(cx);
+            assert!(
+                window.find(("transcode-result", 9_999usize)).visible(),
+                "last result is unreachable"
+            );
+            assert!(window.try_find(("transcode-result", 0usize)).is_none());
+            page.update(cx, |page, cx| {
+                page.handle_message(
+                    WorkerMessage::Event(RunEvent::Progress {
+                        duration: Some(Duration::from_secs(100)),
+                        progress: Progress {
+                            out_time_us: Some(10_000_000),
+                            ..Progress::default()
+                        },
+                    }),
+                    window,
+                    cx,
+                );
+            });
+            window.render_frame(cx);
+            assert!(
+                window.find(("transcode-result", 9_999usize)).visible(),
+                "progress reset the reader's position"
+            );
+        })
+        .unwrap();
+        cx.simulate_window_resize(handle.into(), size(px(680.), px(600.)));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.find(("transcode-result", 9_999usize)).visible(),
+                "resize lost the last result"
+            );
+            window.scroll(
+                "transcode-results",
+                gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(10_000_000.))),
+                cx,
+            );
+            assert!(window.find("open-video").visible());
+            assert!(window.try_find(("transcode-result", 9_999usize)).is_none());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
     fn messages_collapse_and_background_transcode_remains_visible(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let mut workspace = None;
@@ -940,6 +1058,51 @@ mod tests {
             assert_eq!(
                 window.find("view-transcode").label(),
                 Some("View transcode: Failed, Transcode")
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn wide_work_area_stretches_source_summary_and_result_cards(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut workspace = None;
+        let handle = cx.open_window(size(px(1_600.), px(1_100.)), |window, cx| {
+            let view = cx.new(|cx| Workspace::new(window, cx));
+            workspace = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let workspace = workspace.unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            let transcode = workspace.read(cx).transcode.clone();
+            transcode.update(cx, |page, cx| {
+                page.stage = Stage::Running;
+                page.phase = Some(RunPhase::Discovering);
+                page.handle_message(
+                    WorkerMessage::Event(RunEvent::InputSkipped {
+                        input: "input.mkv".into(),
+                        error: "Invalid input".into(),
+                    }),
+                    window,
+                    cx,
+                );
+            });
+            window.render_frame(cx);
+            let viewport = window.find("transcode-results").bounds();
+            let open_folder = window.find("open-folder").bounds();
+            assert!(
+                open_folder.right() >= viewport.right() - px(32.),
+                "source did not fill the work area: button {open_folder:?}, viewport {viewport:?}"
+            );
+            let headline = window.find("transcode-summary-headline").bounds();
+            assert!(
+                headline.size.width >= viewport.size.width - px(200.),
+                "summary did not fill the work area: headline {headline:?}, viewport {viewport:?}"
+            );
+            let result = window.find(("transcode-result", 0usize)).bounds();
+            assert!(
+                result.size.width >= viewport.size.width - px(64.),
+                "result did not fill the work area: card {result:?}, viewport {viewport:?}"
             );
         })
         .unwrap();

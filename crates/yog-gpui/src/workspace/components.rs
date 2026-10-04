@@ -5,13 +5,66 @@ use gpui_kit::component::{
     input::{Input, InputState},
     resizable::v_resizable,
     resizable::{h_resizable, resizable_panel},
+    scroll::Scrollbar,
 };
 use gpui_kit::{
-    AnyElement, App, ClickEvent, Entity, IntoElement, ParentElement as _, Pixels, Styled as _,
-    Window, div, px,
+    AnyElement, App, ClickEvent, Entity, InteractiveElement as _, IntoElement, ListState,
+    ParentElement as _, Pixels, Styled as _, Window, canvas, div, list, px,
 };
 
 use super::messages::Messages;
+
+/// A bounded viewport for variable-height items, with the component scrollbar.
+pub fn virtual_list(
+    id: &'static str,
+    state: ListState,
+    estimated_item_height: Pixels,
+    mut render_item: impl FnMut(usize, &mut Window, &mut App) -> AnyElement + 'static,
+) -> impl IntoElement {
+    let heights = state.clone();
+    let viewport = div()
+        .id(id)
+        .size_full()
+        .min_w_0()
+        .min_h_0()
+        .relative()
+        .overflow_hidden()
+        .child(
+            list(state.clone(), move |index, window, cx| {
+                // List items are independent layout roots; stretch their contents explicitly.
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(render_item(index, window, cx))
+                    .into_any_element()
+            })
+            .size_full(),
+        )
+        .child(
+            canvas(
+                move |_, _, _| {
+                    // GPUI discards height hints during width changes. Restore them after
+                    // list layout, before the scrollbar reads the total content height.
+                    // ponytail: this rebuilds O(n) lightweight height entries after inserts
+                    // or resizes; switch to range hints if GPUI exposes that API.
+                    if heights.is_scrolled_to_end().is_none() {
+                        heights.with_uniform_item_height(estimated_item_height);
+                    }
+                },
+                |_, _, _, _| {},
+            )
+            .absolute(),
+        )
+        .child(Scrollbar::vertical(&state));
+    #[cfg(test)]
+    let viewport = {
+        use gpui_kit::test::TestSupportExt as _;
+        viewport.test_support()
+    };
+    viewport
+}
 
 pub fn page_layout(
     id: &'static str,

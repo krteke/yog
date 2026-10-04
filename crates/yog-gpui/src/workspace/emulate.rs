@@ -13,17 +13,16 @@ use gpui_kit::component::{
     form::{Field, Form},
     input::{Input, InputState},
     progress::Progress as ProgressBar,
-    scroll::ScrollableElement,
     select::{SearchableVec, Select, SelectState},
     tag::Tag,
 };
-use gpui_kit::{
-    App, AppContext as _, Context, Entity, EventEmitter, ImageSource, IntoElement, ObjectFit,
-    ParentElement as _, Render, Styled as _, StyledImage as _, Subscription, Window, div, img,
-    prelude::FluentBuilder as _,
-};
 #[cfg(test)]
-use gpui_kit::{InteractiveElement as _, test::TestSupportExt as _};
+use gpui_kit::test::TestSupportExt as _;
+use gpui_kit::{
+    App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable as _, ImageSource,
+    IntoElement, ListAlignment, ListState, ObjectFit, ParentElement as _, Render, Styled as _,
+    StyledImage as _, Subscription, Window, div, img, prelude::FluentBuilder as _, px,
+};
 use tokio_util::sync::CancellationToken;
 use yog_core::ffmpeg::{
     decoding::DecodingBackend,
@@ -85,6 +84,8 @@ pub struct EmulatePage {
     container: Choice,
     quality_points: Entity<InputState>,
     candidates: Vec<Entity<CandidateEditor>>,
+    candidate_list: ListState,
+    inspector_focus: FocusHandle,
     png: Entity<InputState>,
     svg: Entity<InputState>,
     report: Entity<InputState>,
@@ -100,6 +101,7 @@ pub struct EmulatePage {
     succeeded: usize,
     failed: usize,
     points: Vec<Point>,
+    work_list: ListState,
     chart_paths: Vec<PathBuf>,
     chart_aspect_ratio: f32,
     started: Option<Instant>,
@@ -136,6 +138,9 @@ impl EmulatePage {
         let messages_subscription =
             cx.subscribe(&messages, |_, _, _: &ExpansionChanged, cx| cx.notify());
         let chart_size = Config::default().emulation;
+        let inspector_focus = cx.focus_handle();
+        let candidate_list = ListState::new(2, ListAlignment::Top, px(300.));
+        candidate_list.splice_focusable(0..1, [Some(inspector_focus.clone())]);
         Self {
             source,
             preferences,
@@ -143,6 +148,8 @@ impl EmulatePage {
             container,
             quality_points: cx.new(|cx| InputState::new(window, cx).default_value("20,24,28,32")),
             candidates: Vec::new(),
+            candidate_list,
+            inspector_focus,
             png: cx.new(|cx| InputState::new(window, cx).placeholder("Save PNG chart")),
             svg: cx.new(|cx| InputState::new(window, cx).placeholder("Save SVG chart")),
             report: cx.new(|cx| InputState::new(window, cx).placeholder("Optional report path")),
@@ -158,6 +165,7 @@ impl EmulatePage {
             succeeded: 0,
             failed: 0,
             points: Vec::new(),
+            work_list: ListState::new(1, ListAlignment::Top, px(300.)),
             chart_paths: Vec::new(),
             chart_aspect_ratio: chart_size.width.get() as f32 / chart_size.height.get() as f32,
             started: None,
@@ -225,8 +233,12 @@ impl EmulatePage {
             return;
         }
         let qualities = self.quality_points.read(cx).value().to_string();
-        self.candidates
-            .push(cx.new(|cx| CandidateEditor::new(qualities, window, cx)));
+        let candidate = cx.new(|cx| CandidateEditor::new(qualities, window, cx));
+        let focus = candidate.focus_handle(cx);
+        self.candidates.push(candidate);
+        self.candidate_list
+            .splice_focusable(self.candidates.len()..self.candidates.len(), [Some(focus)]);
+        self.candidate_list.remeasure_items(0..1);
         cx.notify();
     }
 
@@ -235,6 +247,8 @@ impl EmulatePage {
             return;
         }
         self.candidates.remove(index);
+        self.candidate_list.splice(index + 1..index + 2, 0);
+        self.candidate_list.remeasure_items(0..1);
         cx.notify();
     }
 
@@ -352,6 +366,7 @@ impl EmulatePage {
         self.succeeded = 0;
         self.failed = 0;
         self.points.clear();
+        self.work_list.reset(1);
         self.started = Some(Instant::now());
         self.elapsed = None;
         self.messages
@@ -361,10 +376,12 @@ impl EmulatePage {
         self.cancellation = Some(cancellation.clone());
         let mut receiver = execution::spawn(request, cancellation);
         cx.spawn(async move |this, cx| {
-            while let Some(message) = receiver.recv().await {
+            while let Some(batch) = receiver.recv(cx.background_executor()).await {
                 if this
                     .update_in(cx, |this, window, cx| {
-                        this.handle_message(message, window, cx)
+                        for message in batch {
+                            this.handle_message(message, window, cx);
+                        }
                     })
                     .is_err()
                 {
@@ -419,9 +436,11 @@ impl EmulatePage {
         cx: &mut Context<Self>,
     ) {
         match message {
-            WorkerMessage::Log(log) => self
-                .messages
-                .update(cx, |messages, cx| messages.push(log, window, cx)),
+            WorkerMessage::Log(log) => {
+                self.messages
+                    .update(cx, |messages, cx| messages.push(log, window, cx));
+                return;
+            }
             WorkerMessage::Event(event) => match event {
                 RunEvent::PhaseChanged(phase) => self.phase = Some(phase),
                 RunEvent::EmulationPointStarted {
@@ -528,6 +547,13 @@ impl EmulatePage {
                 );
             }
         }
+        let count = self.points.len() + 1;
+        let previous = self.work_list.item_count();
+        if count > previous {
+            // Newest points appear first; splice preserves the reader's older item.
+            self.work_list.splice(1..1, count - previous);
+        }
+        self.work_list.remeasure_items(0..1);
         cx.emit(ActivityChanged);
         cx.notify();
     }
@@ -578,6 +604,202 @@ mod tests {
     use super::*;
     use crate::workspace::Workspace;
     use gpui_kit::{TestAppContext, component::Root, px, size, test::TestWindowExt as _};
+
+    #[gpui_kit::test]
+    fn large_emulation_results_only_materialize_near_the_viewport(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut workspace = None;
+        let handle = cx.open_window(size(px(900.), px(700.)), |window, cx| {
+            let view = cx.new(|cx| Workspace::new(window, cx));
+            workspace = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let workspace = workspace.unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            let page = workspace.read(cx).emulate.clone();
+            page.update(cx, |page, cx| {
+                page.stage = Stage::Running;
+                for index in 1..=1_000 {
+                    page.handle_message(
+                        WorkerMessage::Event(RunEvent::EmulationPointStarted {
+                            index,
+                            total: 1_000,
+                            candidate: Some(index),
+                            label: "x265".into(),
+                            parameter: "CRF",
+                            quality: 28,
+                        }),
+                        window,
+                        cx,
+                    );
+                    page.handle_message(
+                        WorkerMessage::Event(RunEvent::EmulationPointFinished {
+                            index,
+                            total: 1_000,
+                            candidate: Some(index),
+                            quality: 28,
+                            status: TaskStatus::Success,
+                            vmaf: Some(95.),
+                            output_bytes: Some(1_000_000),
+                            error: None,
+                        }),
+                        window,
+                        cx,
+                    );
+                }
+            });
+            workspace.update(cx, |workspace, cx| {
+                workspace.change_mode(super::super::Mode::Emulate, window, cx)
+            });
+            page.read(cx).work_list.scroll_to(gpui_kit::ListOffset {
+                item_ix: 1,
+                offset_in_item: px(0.),
+            });
+            window.render_frame(cx);
+            assert!(window.try_find("emulate-point-1000-28").is_some());
+            let viewport = window.find("emulate-results").bounds();
+            let result = window.find("emulate-point-1000-28").bounds();
+            assert!(
+                result.size.width >= viewport.size.width - px(64.),
+                "quality point did not fill the work area: card {result:?}, viewport {viewport:?}"
+            );
+            assert!(
+                window.try_find("emulate-point-1-28").is_none(),
+                "offscreen quality point was materialized"
+            );
+            assert_eq!(page.read(cx).points.len(), 1_000);
+            window.scroll(
+                "emulate-results",
+                gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-1_000_000.))),
+                cx,
+            );
+            window.render_frame(cx);
+            assert!(window.find("emulate-point-1-28").visible());
+            let previous_top = window.find("emulate-point-1-28").bounds().top();
+            page.update(cx, |page, cx| {
+                page.handle_message(
+                    WorkerMessage::Event(RunEvent::EmulationPointStarted {
+                        index: 1_001,
+                        total: 1_001,
+                        candidate: Some(1_001),
+                        label: "x265".into(),
+                        parameter: "CRF",
+                        quality: 28,
+                    }),
+                    window,
+                    cx,
+                );
+                page.handle_message(
+                    WorkerMessage::Event(RunEvent::EmulationPointFinished {
+                        index: 1_001,
+                        total: 1_001,
+                        candidate: Some(1_001),
+                        quality: 28,
+                        status: TaskStatus::Success,
+                        vmaf: Some(95.),
+                        output_bytes: Some(1_000_000),
+                        error: None,
+                    }),
+                    window,
+                    cx,
+                );
+            });
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("emulate-point-1-28").bounds().top(),
+                previous_top,
+                "new point moved the older point being read"
+            );
+            assert!(window.try_find("emulate-point-1001-28").is_none());
+            page.read(cx).work_list.scroll_to(gpui_kit::ListOffset {
+                item_ix: 1,
+                offset_in_item: px(0.),
+            });
+            window.render_frame(cx);
+            assert!(window.find("emulate-point-1001-28").visible());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn large_candidate_list_only_materializes_near_the_viewport(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut workspace = None;
+        let handle = cx.open_window(size(px(900.), px(700.)), |window, cx| {
+            let view = cx.new(|cx| Workspace::new(window, cx));
+            workspace = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let workspace = workspace.unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            let page = workspace.read(cx).emulate.clone();
+            page.update(cx, |page, cx| {
+                for _ in 0..100 {
+                    page.add_candidate(window, cx);
+                }
+            });
+            workspace.update(cx, |workspace, cx| {
+                workspace.change_mode(super::super::Mode::Emulate, window, cx)
+            });
+            window.render_frame(cx);
+            assert!(
+                window.try_find("remove-candidate-99").is_none(),
+                "offscreen editor was materialized"
+            );
+            assert_eq!(page.read(cx).candidates.len(), 100);
+            window.scroll(
+                "emulate-candidates",
+                gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-1_000_000.))),
+                cx,
+            );
+            window.render_frame(cx);
+            assert!(window.find("remove-candidate-99").visible());
+            window.click("remove-candidate-99", cx);
+            assert_eq!(page.read(cx).candidates.len(), 99);
+            assert!(window.try_find("remove-candidate-99").is_none());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn primary_candidate_keeps_keyboard_editing_when_scrolled_offscreen(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut workspace = None;
+        let handle = cx.open_window(size(px(900.), px(700.)), |window, cx| {
+            let view = cx.new(|cx| Workspace::new(window, cx));
+            workspace = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let workspace = workspace.unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            let page = workspace.read(cx).emulate.clone();
+            page.update(cx, |page, cx| {
+                for _ in 0..20 {
+                    page.add_candidate(window, cx);
+                }
+            });
+            workspace.update(cx, |workspace, cx| {
+                workspace.change_mode(super::super::Mode::Emulate, window, cx)
+            });
+            window.render_frame(cx);
+            let qualities = page.read(cx).quality_points.clone();
+            window.focus(&qualities.focus_handle(cx), cx);
+            window.render_frame(cx);
+            window.scroll(
+                "emulate-candidates",
+                gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-1_000_000.))),
+                cx,
+            );
+            assert!(
+                window.try_find(("input", qualities.entity_id())).is_some(),
+                "primary editor disappeared from the keyboard dispatch tree"
+            );
+            window.press("secondary-a", cx);
+            window.input("18,30", cx);
+            assert_eq!(qualities.read(cx).value().as_ref(), "18,30");
+        })
+        .unwrap();
+    }
 
     #[gpui_kit::test]
     fn chart_preview_contains_its_image(cx: &mut TestAppContext) {

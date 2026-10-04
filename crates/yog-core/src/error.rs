@@ -19,6 +19,7 @@ pub struct Error {
     pub program: PathBuf,
     pub reason: Failure,
     pub status: Option<ExitStatus>,
+    /// Bounded stderr tail; a marker indicates when earlier bytes were discarded.
     pub stderr: Vec<u8>,
     /// Additional errors encountered reading diagnostics or killing/waiting.
     pub secondary_io: Vec<io::Error>,

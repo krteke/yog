@@ -1,10 +1,9 @@
 use std::{sync::Mutex, thread::ThreadId};
 
 use log::{Level, LevelFilter, Log, Metadata, Record};
-use tokio::sync::mpsc::UnboundedSender;
 
 use super::{
-    execution::WorkerMessage,
+    execution::WorkerSender,
     messages::{MessageLevel, MessageSource, NewMessage},
 };
 
@@ -13,7 +12,7 @@ static LOGGER: GuiLogger = GuiLogger {
 };
 
 struct GuiLogger {
-    sinks: Mutex<Vec<(ThreadId, UnboundedSender<WorkerMessage>)>>,
+    sinks: Mutex<Vec<(ThreadId, WorkerSender)>>,
 }
 
 pub fn init() {
@@ -23,7 +22,7 @@ pub fn init() {
 
 pub struct Capture(ThreadId);
 
-pub fn capture(sender: UnboundedSender<WorkerMessage>) -> Capture {
+pub(super) fn capture(sender: WorkerSender) -> Capture {
     let thread = std::thread::current().id();
     let mut sinks = LOGGER.sinks.lock().unwrap();
     assert!(
@@ -80,7 +79,7 @@ impl Log for GuiLogger {
             .iter()
             .find(|(thread, _)| *thread == std::thread::current().id())
         {
-            _ = sender.send(WorkerMessage::Log(message));
+            sender.log(message);
         }
     }
 
@@ -89,12 +88,42 @@ impl Log for GuiLogger {
 
 #[cfg(test)]
 mod tests {
+    use super::super::execution::{self, WorkerMessage};
     use super::*;
     use std::sync::{Arc, Barrier};
 
     #[test]
+    fn ffmpeg_log_flood_does_not_accumulate_an_unbounded_queue() {
+        let (sender, mut receiver) = execution::channel();
+        let capture = capture(sender);
+        for index in 0..4_096 {
+            LOGGER.log(
+                &Record::builder()
+                    .level(Level::Debug)
+                    .target("yog::ffmpeg")
+                    .args(format_args!("diagnostic {index}\n"))
+                    .build(),
+            );
+        }
+        drop(capture);
+        let messages: Vec<_> = std::iter::from_fn(|| receiver.next_batch())
+            .flatten()
+            .collect();
+        let WorkerMessage::Log(latest) = messages.last().unwrap() else {
+            panic!("expected the latest diagnostic");
+        };
+        assert_eq!(latest.text, "diagnostic 4095\n");
+        assert_eq!(messages.len(), 258);
+        let WorkerMessage::Log(warning) = &messages[0] else {
+            panic!("expected dropped-log warning");
+        };
+        assert_eq!(warning.level, MessageLevel::Warning);
+        assert!(warning.text.contains("Dropped 3839 log chunks"));
+    }
+
+    #[test]
     fn routes_command_and_ffmpeg_records_to_separate_sources() {
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = execution::channel();
         let _capture = capture(sender);
 
         LOGGER.log(
@@ -112,13 +141,14 @@ mod tests {
                 .build(),
         );
 
-        let WorkerMessage::Log(command) = receiver.try_recv().unwrap() else {
+        let mut messages = receiver.next_batch().unwrap().into_iter();
+        let WorkerMessage::Log(command) = messages.next().unwrap() else {
             panic!("expected a log")
         };
         assert_eq!(command.source, MessageSource::Command);
         assert_eq!(command.text, "executing command: ffmpeg -i input");
 
-        let WorkerMessage::Log(ffmpeg) = receiver.try_recv().unwrap() else {
+        let WorkerMessage::Log(ffmpeg) = messages.next().unwrap() else {
             panic!("expected a log")
         };
         assert_eq!(ffmpeg.source, MessageSource::Ffmpeg);
@@ -130,7 +160,7 @@ mod tests {
         let barrier = Arc::new(Barrier::new(3));
         let worker = |name: &'static str, barrier: Arc<Barrier>| {
             std::thread::spawn(move || {
-                let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+                let (sender, mut receiver) = execution::channel();
                 let _capture = capture(sender);
                 barrier.wait();
                 LOGGER.log(
@@ -141,11 +171,12 @@ mod tests {
                         .build(),
                 );
                 barrier.wait();
-                let WorkerMessage::Log(message) = receiver.try_recv().unwrap() else {
+                let WorkerMessage::Log(message) = receiver.next_batch().unwrap().pop().unwrap()
+                else {
                     panic!("expected a log")
                 };
                 assert_eq!(message.text, name);
-                assert!(receiver.try_recv().is_err());
+                assert!(receiver.next_batch().is_none());
             })
         };
         let first = worker("predict", barrier.clone());

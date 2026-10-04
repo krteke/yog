@@ -13,8 +13,9 @@ use crate::{
     program::Command,
 };
 
-/// Diagnostics retained after successful execution. Failures carry the same
-/// diagnostics and exit status in [`Error`].
+/// At most 1 MiB of stderr, retaining the tail after successful execution. Failures carry
+/// the same bounded diagnostics and exit status in [`Error`]. The stderr callback
+/// still receives every byte, including diagnostics no longer retained here.
 #[derive(Debug)]
 pub struct ExecutionResult {
     pub status: ExitStatus,

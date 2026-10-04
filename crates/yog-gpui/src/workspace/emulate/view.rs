@@ -1,4 +1,5 @@
 use super::*;
+use gpui_kit::InteractiveElement as _;
 
 impl EmulatePage {
     fn render_summary(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -112,7 +113,7 @@ impl EmulatePage {
             TaskStatus::Failure => ("Failed", Tag::danger()),
             TaskStatus::Cancelled => ("Cancelled", Tag::secondary()),
         };
-        div()
+        let row = div()
             .min_w_0()
             .rounded(theme.radius)
             .border_1()
@@ -154,65 +155,81 @@ impl EmulatePage {
             })
             .when_some(point.error.clone(), |this, error| {
                 this.child(div().text_sm().text_color(theme.danger).child(error))
-            })
-            .into_any_element()
+            });
+        #[cfg(test)]
+        let row = row
+            .id(format!(
+                "emulate-point-{}-{}",
+                point.candidate.unwrap_or(0),
+                point.quality
+            ))
+            .test_support();
+        row.into_any_element()
     }
 
     pub fn render_work_area(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let results = div()
-            .size_full()
-            .min_h_0()
-            .min_w_0()
-            .overflow_y_scrollbar()
-            .child(
-                div()
-                    .p_6()
-                    .flex()
-                    .flex_col()
-                    .gap_6()
-                    .child(self.source.clone())
-                    .child(
+        let view = cx.entity();
+        let results = components::virtual_list(
+            "emulate-results",
+            self.work_list.clone(),
+            cx.theme().font_size * 10.,
+            move |index, _, cx| {
+                view.update(cx, |page, cx| {
+                    if index == 0 {
                         div()
+                            .p_6()
                             .flex()
                             .flex_col()
-                            .gap_4()
-                            .child(div().text_lg().font_medium().child("Results"))
-                            .when(matches!(self.stage, Stage::Idle), |this| {
-                                this.child(components::empty_results(cx))
-                            })
-                            .when(!matches!(self.stage, Stage::Idle), |this| {
-                                this.child(self.render_summary(cx))
-                            })
-                            .when_some(self.chart_paths.first().cloned(), |this, path| {
-                                let image = img(path).object_fit(ObjectFit::Contain).size_full();
-                                #[cfg(test)]
-                                let image = image.id("emulate-chart-image").test_support();
-                                let preview = div()
-                                    .min_w_0()
-                                    .rounded(cx.theme().radius)
-                                    .border_1()
-                                    .border_color(cx.theme().border)
-                                    .bg(cx.theme().group_box)
-                                    .p_3()
-                                    .overflow_hidden()
-                                    .child(
-                                        div()
-                                            .w_full()
-                                            .aspect_ratio(self.chart_aspect_ratio)
-                                            .child(image),
-                                    );
-                                #[cfg(test)]
-                                let preview = preview.id("emulate-chart-preview").test_support();
-                                this.child(preview)
-                            })
-                            .children(
-                                self.points
-                                    .iter()
-                                    .rev()
-                                    .map(|point| self.render_point(point, cx)),
-                            ),
-                    ),
-            );
+                            .gap_6()
+                            .child(page.source.clone())
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_4()
+                                    .child(div().text_lg().font_medium().child("Results"))
+                                    .when(matches!(page.stage, Stage::Idle), |this| {
+                                        this.child(components::empty_results(cx))
+                                    })
+                                    .when(!matches!(page.stage, Stage::Idle), |this| {
+                                        this.child(page.render_summary(cx))
+                                    })
+                                    .when_some(page.chart_paths.first().cloned(), |this, path| {
+                                        let image =
+                                            img(path).object_fit(ObjectFit::Contain).size_full();
+                                        #[cfg(test)]
+                                        let image = image.id("emulate-chart-image").test_support();
+                                        let preview = div()
+                                            .min_w_0()
+                                            .rounded(cx.theme().radius)
+                                            .border_1()
+                                            .border_color(cx.theme().border)
+                                            .bg(cx.theme().group_box)
+                                            .p_3()
+                                            .overflow_hidden()
+                                            .child(
+                                                div()
+                                                    .w_full()
+                                                    .aspect_ratio(page.chart_aspect_ratio)
+                                                    .child(image),
+                                            );
+                                        #[cfg(test)]
+                                        let preview =
+                                            preview.id("emulate-chart-preview").test_support();
+                                        this.child(preview)
+                                    }),
+                            )
+                            .into_any_element()
+                    } else {
+                        div()
+                            .px_6()
+                            .pb_4()
+                            .child(page.render_point(&page.points[page.points.len() - index], cx))
+                            .into_any_element()
+                    }
+                })
+            },
+        );
         components::work_and_messages(
             "emulate-work-and-messages",
             results.into_any_element(),
@@ -221,10 +238,46 @@ impl EmulatePage {
         )
     }
 
-    pub fn render_inspector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_candidate(&self, index: usize, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let active = matches!(self.stage, Stage::Running | Stage::Cancelling);
+        div()
+            .min_w_0()
+            .rounded(theme.radius)
+            .border_1()
+            .border_color(theme.border)
+            .p_3()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .font_medium()
+                            .child(format!("Candidate {}", index + 2)),
+                    )
+                    .child(
+                        Button::new(format!("remove-candidate-{index}"))
+                            .ghost()
+                            .small()
+                            .label("Remove")
+                            .disabled(active)
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.remove_candidate(index, cx)),
+                            ),
+                    ),
+            )
+            .child(self.candidates[index].clone())
+    }
+
+    fn render_inspector_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let candidate_mode = !self.candidates.is_empty();
-        let active = matches!(self.stage, Stage::Running | Stage::Cancelling);
         let output = Form::new()
             .child(components::path_field(
                 "PNG chart",
@@ -261,107 +314,99 @@ impl EmulatePage {
                         })),
                 ),
             );
-        let candidates = self
-            .candidates
-            .iter()
-            .enumerate()
-            .map(|(index, editor)| {
+        div()
+            .p_5()
+            .track_focus(&self.inspector_focus)
+            .flex()
+            .flex_col()
+            .gap_5()
+            .child(div().font_medium().child("Chart output"))
+            .child(output)
+            .child(
+                div()
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .pt_4()
+                    .font_medium()
+                    .child("Encoding"),
+            )
+            .child(
+                Form::new().child(
+                    Field::new()
+                        .label("Container")
+                        .child(Select::new(&self.container).w_full()),
+                ),
+            )
+            .child(
                 div()
                     .min_w_0()
-                    .rounded(theme.radius)
-                    .border_1()
-                    .border_color(theme.border)
-                    .p_3()
                     .flex()
                     .flex_col()
                     .gap_3()
+                    .when(candidate_mode, |this| {
+                        this.rounded(theme.radius)
+                            .border_1()
+                            .border_color(theme.border)
+                            .p_3()
+                            .child(div().font_medium().child("Candidate 1"))
+                    })
+                    .child(self.video.clone())
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .font_medium()
-                                    .child(format!("Candidate {}", index + 2)),
-                            )
-                            .child(
-                                Button::new(format!("remove-candidate-{index}"))
-                                    .ghost()
-                                    .small()
-                                    .label("Remove")
-                                    .disabled(active)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.remove_candidate(index, cx)
-                                    })),
-                            ),
-                    )
-                    .child(editor.clone())
-            })
-            .collect::<Vec<_>>();
-        let body = div().size_full().min_h_0().overflow_y_scrollbar().child(
-            div()
-                .p_5()
-                .flex()
-                .flex_col()
-                .gap_5()
-                .child(div().font_medium().child("Chart output"))
-                .child(output)
-                .child(
-                    div()
-                        .border_t_1()
-                        .border_color(theme.border)
-                        .pt_4()
-                        .font_medium()
-                        .child("Encoding"),
-                )
-                .child(
-                    Form::new().child(
-                        Field::new()
-                            .label("Container")
-                            .child(Select::new(&self.container).w_full()),
+                        Form::new().child(
+                            Field::new()
+                                .label(format!(
+                                    "Quality points ({})",
+                                    self.video.read(cx).quality_parameter(cx)
+                                ))
+                                .child(Input::new(&self.quality_points)),
+                        ),
                     ),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .when(candidate_mode, |this| {
-                            this.rounded(theme.radius)
-                                .border_1()
-                                .border_color(theme.border)
-                                .p_3()
-                                .child(div().font_medium().child("Candidate 1"))
-                        })
-                        .child(self.video.clone())
-                        .child(
-                            Form::new().child(
-                                Field::new()
-                                    .label(format!(
-                                        "Quality points ({})",
-                                        self.video.read(cx).quality_parameter(cx)
+            )
+    }
+
+    pub fn render_inspector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let active = matches!(self.stage, Stage::Running | Stage::Cancelling);
+        self.candidate_list.remeasure_items(0..1);
+        let view = cx.entity();
+        let body = components::virtual_list(
+            "emulate-candidates",
+            self.candidate_list.clone(),
+            cx.theme().font_size * 40.,
+            move |index, _, cx| {
+                view.update(cx, |page, cx| {
+                    if index == 0 {
+                        page.render_inspector_header(cx).into_any_element()
+                    } else if index <= page.candidates.len() {
+                        div()
+                            .px_5()
+                            .pb_5()
+                            .child(page.render_candidate(index - 1, cx))
+                            .into_any_element()
+                    } else {
+                        div()
+                            .px_5()
+                            .pb_5()
+                            .child(
+                                Button::new("add-candidate")
+                                    .outline()
+                                    .label(if !page.candidates.is_empty() {
+                                        "Add candidate"
+                                    } else {
+                                        "Compare candidates"
+                                    })
+                                    .disabled(matches!(
+                                        page.stage,
+                                        Stage::Running | Stage::Cancelling
                                     ))
-                                    .child(Input::new(&self.quality_points)),
-                            ),
-                        ),
-                )
-                .children(candidates)
-                .child(
-                    Button::new("add-candidate")
-                        .outline()
-                        .label(if candidate_mode {
-                            "Add candidate"
-                        } else {
-                            "Compare candidates"
-                        })
-                        .disabled(active)
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.add_candidate(window, cx)),
-                        ),
-                ),
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.add_candidate(window, cx)
+                                    })),
+                            )
+                            .into_any_element()
+                    }
+                })
+            },
         );
         let ready = self.source.read(cx).valid_path().is_some()
             && !self.source.read(cx).is_directory()

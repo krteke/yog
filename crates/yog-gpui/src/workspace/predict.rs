@@ -17,9 +17,12 @@ use gpui_kit::component::{
     tag::Tag,
 };
 use gpui_kit::{
-    AppContext as _, Context, Entity, EventEmitter, Hsla, IntoElement, ParentElement as _, Render,
-    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _,
+    AppContext as _, Context, Entity, EventEmitter, Hsla, IntoElement, ListAlignment, ListState,
+    ParentElement as _, Render, Styled as _, Subscription, Window, div,
+    prelude::FluentBuilder as _, px,
 };
+#[cfg(test)]
+use gpui_kit::{InteractiveElement as _, test::TestSupportExt as _};
 use tokio_util::sync::CancellationToken;
 use yog_core::ffmpeg::{
     encoding::RateControl,
@@ -76,6 +79,7 @@ pub struct PredictPage {
     started: Option<Instant>,
     elapsed: Option<Duration>,
     results: Vec<ResultRow>,
+    work_list: ListState,
     _rate_subscription: Subscription,
     _video_observation: Subscription,
     _messages_subscription: Subscription,
@@ -144,6 +148,7 @@ impl PredictPage {
             started: None,
             elapsed: None,
             results: Vec::new(),
+            work_list: ListState::new(1, ListAlignment::Top, px(300.)),
             _rate_subscription: rate_subscription,
             _video_observation: video_observation,
             _messages_subscription: messages_subscription,
@@ -270,6 +275,7 @@ impl PredictPage {
         self.started = Some(Instant::now());
         self.elapsed = None;
         self.results.clear();
+        self.work_list.reset(1);
         self.messages
             .update(cx, |messages, cx| messages.clear(window, cx));
         self.message(MessageLevel::Info, "Starting prediction".into(), window, cx);
@@ -277,10 +283,12 @@ impl PredictPage {
         self.cancellation = Some(cancellation.clone());
         let mut receiver = execution::spawn(request, cancellation);
         cx.spawn(async move |this, cx| {
-            while let Some(message) = receiver.recv().await {
+            while let Some(batch) = receiver.recv(cx.background_executor()).await {
                 if this
                     .update_in(cx, |this, window, cx| {
-                        this.handle_message(message, window, cx)
+                        for message in batch {
+                            this.handle_message(message, window, cx);
+                        }
                     })
                     .is_err()
                 {
@@ -335,9 +343,11 @@ impl PredictPage {
         cx: &mut Context<Self>,
     ) {
         match message {
-            WorkerMessage::Log(log) => self
-                .messages
-                .update(cx, |messages, cx| messages.push(log, window, cx)),
+            WorkerMessage::Log(log) => {
+                self.messages
+                    .update(cx, |messages, cx| messages.push(log, window, cx));
+                return;
+            }
             WorkerMessage::Event(event) => match event {
                 RunEvent::PhaseChanged(phase) => self.phase = Some(phase),
                 RunEvent::BatchDiscovered { total, skipped } => {
@@ -444,6 +454,12 @@ impl PredictPage {
                 );
             }
         }
+        let count = self.results.len() + 1;
+        let previous = self.work_list.item_count();
+        if count > previous {
+            self.work_list.splice(previous..previous, count - previous);
+        }
+        self.work_list.remeasure_items(0..1);
         cx.emit(ActivityChanged);
         cx.notify();
     }
@@ -494,6 +510,62 @@ mod tests {
     use super::*;
     use crate::workspace::{Mode, Workspace};
     use gpui_kit::{TestAppContext, component::Root, px, size, test::TestWindowExt as _};
+
+    #[gpui_kit::test]
+    fn large_prediction_results_only_materialize_near_the_viewport(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut workspace = None;
+        let handle = cx.open_window(size(px(900.), px(700.)), |window, cx| {
+            let view = cx.new(|cx| Workspace::new(window, cx));
+            workspace = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let workspace = workspace.unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            let page = workspace.read(cx).predict.clone();
+            page.update(cx, |page, cx| {
+                page.stage = Stage::Running;
+                for index in 0..1_000 {
+                    page.handle_message(
+                        WorkerMessage::Event(RunEvent::InputSkipped {
+                            input: format!("input-{index}.mkv").into(),
+                            error: "Invalid input".into(),
+                        }),
+                        window,
+                        cx,
+                    );
+                }
+            });
+            workspace.update(cx, |workspace, cx| {
+                workspace.change_mode(Mode::Predict, window, cx)
+            });
+            page.read(cx).work_list.scroll_to(gpui_kit::ListOffset {
+                item_ix: 1,
+                offset_in_item: px(0.),
+            });
+            window.render_frame(cx);
+            assert!(window.try_find("predict-result-input-0.mkv").is_some());
+            let viewport = window.find("predict-results").bounds();
+            let result = window.find("predict-result-input-0.mkv").bounds();
+            assert!(
+                result.size.width >= viewport.size.width - px(64.),
+                "prediction card did not fill the work area: card {result:?}, viewport {viewport:?}"
+            );
+            assert!(
+                window.try_find("predict-result-input-999.mkv").is_none(),
+                "offscreen prediction was materialized"
+            );
+            assert_eq!(page.read(cx).results.len(), 1_000);
+            window.scroll(
+                "predict-results",
+                gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-1_000_000.))),
+                cx,
+            );
+            window.render_frame(cx);
+            assert!(window.find("predict-result-input-999.mkv").visible());
+        })
+        .unwrap();
+    }
 
     #[gpui_kit::test]
     fn background_prediction_is_visible_and_reopenable(cx: &mut TestAppContext) {

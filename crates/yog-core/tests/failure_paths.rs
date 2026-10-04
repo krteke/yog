@@ -345,6 +345,35 @@ async fn ffmpeg_drains_both_pipes_and_end_record_does_not_hide_failure() {
 }
 
 #[tokio::test]
+async fn stderr_flood_streams_every_byte_but_retains_only_a_bounded_failure_tail() {
+    let tool = Tool::new(
+        "head -c 4194304 /dev/zero | tr '\\000' x >&2; printf '\\nFINAL-ERROR\\n' >&2; exit 7",
+    )
+    .await;
+    let ffmpeg = Ffmpeg::new(&tool.path, Some(Duration::from_secs(5)));
+    let plan = tool.plan().await;
+    let mut delivered = 0;
+
+    let error = ffmpeg
+        .build(&plan)
+        .unwrap()
+        .run(|_| {}, |bytes| delivered += bytes.len())
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error.reason, Failure::Exit));
+    assert_eq!(error.status.unwrap().code(), Some(7));
+    assert_eq!(delivered, 4_194_304 + b"\nFINAL-ERROR\n".len());
+    assert!(
+        error.stderr.len() <= 1_048_576,
+        "retained {} bytes",
+        error.stderr.len()
+    );
+    assert!(error.stderr.ends_with(b"\nFINAL-ERROR\n"));
+    assert!(error.stderr.starts_with(b"[earlier stderr truncated]\n"));
+}
+
+#[tokio::test]
 async fn ffmpeg_progress_callback_can_cancel_while_child_is_running() {
     assert_ffmpeg_callback_cancellation(false).await;
 }

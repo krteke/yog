@@ -5,6 +5,7 @@ pub struct Output<T> {
     pub program: PathBuf,
     pub status: ExitStatus,
     pub value: T,
+    /// At most 1 MiB of stderr; a marker precedes the tail if earlier bytes were discarded.
     pub stderr: Vec<u8>,
 }
 

@@ -1,5 +1,6 @@
 use rustix::fs::{CWD, RenameFlags, renameat_with};
 use std::{
+    ffi::OsString,
     fs::{self, File},
     io,
     path::{Path, PathBuf},
@@ -26,7 +27,11 @@ impl Output {
         }
 
         let target = target.to_path_buf();
-        let part = target.with_added_extension("part");
+        let mut part_name = OsString::from(".part.");
+        part_name.push(target.file_name().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "output path has no file name")
+        })?);
+        let part = target.with_file_name(part_name);
 
         File::create_new(&part).map_err(|error| {
             io::Error::new(

@@ -169,7 +169,7 @@ fn assert_quiet_output(ffmpeg: &str, expected_status: i32, output_exists: bool) 
     assert!(result.stdout.is_empty(), "{:?}", result.stdout);
     assert!(result.stderr.is_empty(), "{:?}", result.stderr);
     assert_eq!(fixture.0.join("output.mkv").exists(), output_exists);
-    assert!(!fixture.0.join("output.mkv.part").exists());
+    assert!(!fixture.0.join(".part.output.mkv").exists());
 }
 
 #[test]
@@ -243,7 +243,7 @@ esac"#,
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(result.status.success(), "{stderr}");
     assert!(!fixture.0.join("output.mkv").exists());
-    assert!(!fixture.0.join("output.mkv.part").exists());
+    assert!(!fixture.0.join(".part.output.mkv").exists());
     let commands = fs::read_to_string(fixture.0.join("ffmpeg-commands")).unwrap();
     assert!(commands.contains("-ss 0.000000000"));
     assert!(commands.contains("-ss 2.000000000"));
@@ -913,7 +913,7 @@ for argument do
 done
 if test -n "$filter"; then
     test -f output.mkv || exit 20
-    test ! -e output.mkv.part || exit 21
+    test ! -e .part.output.mkv || exit 21
     metrics=${filter#*log_path=\'}
     metrics=${metrics%%\':shortest=*}
     printf '%s' '{"pooled_metrics":{"vmaf":{"mean":95.25}}}' > "$metrics"
@@ -946,7 +946,7 @@ esac"#,
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(result.status.success(), "{stderr}");
     assert_eq!(fs::read(fixture.0.join("output.mkv")).unwrap(), b"encoded");
-    assert!(!fixture.0.join("output.mkv.part").exists());
+    assert!(!fixture.0.join(".part.output.mkv").exists());
     assert!(
         stdout.contains(&format!(
             "vmaf: output.mkv | score 95.250 | {expected_mode}"
@@ -1013,7 +1013,7 @@ esac"#,
     );
     assert_eq!(stderr.matches("cannot score").count(), 1, "{stderr}");
     assert_eq!(fs::read(fixture.0.join("output.mkv")).unwrap(), b"encoded");
-    assert!(!fixture.0.join("output.mkv.part").exists());
+    assert!(!fixture.0.join(".part.output.mkv").exists());
 }
 
 #[test]
@@ -1030,7 +1030,7 @@ fn verbose_vmaf_failure_does_not_fail_or_roll_back_the_transcode() {
 fn only_the_part_file_is_written_and_success_is_published_by_rename() {
     let fixture = Fixture::new(
         r#"for last do :; done
-case "$last" in output.mkv.part|*/output.mkv.part) ;; *) exit 8 ;; esac
+case "$last" in .part.output.mkv|*/.part.output.mkv) ;; *) exit 8 ;; esac
 test -f "$last" || exit 9
 test ! -e output.mkv || exit 10
 printf encoded > "$last"
@@ -1039,7 +1039,7 @@ printf 'frame=1\nout_time_us=1000000\nprogress=end\n'"#,
     let result = fixture.command().arg("--copy").output().unwrap();
     assert!(result.status.success(), "{:?}", result.stderr);
     assert_eq!(fs::read(fixture.0.join("output.mkv")).unwrap(), b"encoded");
-    assert!(!fixture.0.join("output.mkv.part").exists());
+    assert!(!fixture.0.join(".part.output.mkv").exists());
     assert_eq!(fs::read_dir(&fixture.0).unwrap().count(), 4);
     assert!(String::from_utf8_lossy(&result.stdout).contains("complete:"));
     assert!(!result.stderr.contains(&0x1b));
@@ -1261,8 +1261,8 @@ printf '{"streams":%s,"format":{"format_name":"%s","duration":"1"}}' "$streams" 
     );
     assert!(!fixture.0.join("output/nested/audio").exists());
     assert!(!fixture.0.join("output/nested/notes.md").exists());
-    assert!(!fixture.0.join("output/first.ts.part").exists());
-    assert!(!fixture.0.join("output/nested/movie.ts.part").exists());
+    assert!(!fixture.0.join("output/.part.first.ts").exists());
+    assert!(!fixture.0.join("output/nested/.part.movie.ts").exists());
     let stdout = String::from_utf8_lossy(&result.stdout);
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(stderr.contains("warning: skipping input/nested/notes.md: probe failed"));
@@ -1306,7 +1306,7 @@ printf encoded > "$argument""#,
         b"encoded"
     );
     assert!(!fixture.0.join("output/bad.mkv").exists());
-    assert!(!fixture.0.join("output/bad.mkv.part").exists());
+    assert!(!fixture.0.join("output/.part.bad.mkv").exists());
     assert_eq!(
         fs::read_to_string(fixture.0.join("started"))
             .unwrap()
@@ -1490,7 +1490,7 @@ printf '{"streams":[{"index":0,"codec_type":"video"}],"format":{"format_name":"%
         assert!(
             commands
                 .lines()
-                .any(|line| line == format!("{muxer} output/video.{extension}.part")),
+                .any(|line| line == format!("{muxer} output/.part.video.{extension}")),
             "missing {muxer} mapping for {extension}:\n{commands}"
         );
     };
@@ -1554,7 +1554,7 @@ printf '{"streams":[{"index":0,"codec_type":"video"}],"format":{"format_name":"%
         b"encoded"
     );
     assert!(!fixture.0.join("output/cover.jpg").exists());
-    assert!(!fixture.0.join("output/cover.jpg.part").exists());
+    assert!(!fixture.0.join("output/.part.cover.jpg").exists());
     assert!(
         stderr.contains("warning: skipping input/cover.jpg"),
         "{stderr}"
@@ -1765,7 +1765,7 @@ printf encoded > "$arg"
             expected,
             "{failure}"
         );
-        assert!(!fixture.0.join("output.mkv.part").exists(), "{failure}");
+        assert!(!fixture.0.join(".part.output.mkv").exists(), "{failure}");
         assert_eq!(
             fs::read_dir(&temporary).unwrap().count(),
             0,
@@ -1817,7 +1817,7 @@ printf '%s\n' "$*" >> probe-calls
 for last do :; done
 case "$last" in
   input.mkv) printf '%s' '{"streams":[{"index":8,"codec_type":"audio","codec_name":"aac"}],"format":{"format_name":"matroska,webm","tags":{"title":"original"}}}' ;;
-  *.part)
+  .part.*|*/.part.*)
     test ! -e output.mkv || exit 8
     test "$(cat "$last")" = encoded || exit 9
     printf '%s' '{"streams":[],"format":{"tags":{"title":"changed"}}}' ;;
@@ -1846,7 +1846,7 @@ esac
             stdout.contains("complete: output.mkv"),
             "{flags:?}: {stdout}"
         );
-        assert!(!fixture.0.join("output.mkv.part").exists(), "{flags:?}");
+        assert!(!fixture.0.join(".part.output.mkv").exists(), "{flags:?}");
         assert_eq!(
             fs::read(fixture.0.join("output.mkv")).unwrap(),
             b"encoded",
@@ -1967,7 +1967,7 @@ case "$*" in *-show_packets*) cat "$prefix-packets.json" ;; *) cat "$prefix.json
             case == "unplanned mp4 tags",
             "{case}: {stderr}"
         );
-        assert!(!fixture.0.join("output.mkv.part").exists());
+        assert!(!fixture.0.join(".part.output.mkv").exists());
     };
     assert_case("ok", None);
     assert_case("missing filename", Some("metadata \"filename\""));
@@ -2019,7 +2019,7 @@ printf '%s' '{{"streams":[{{"index":0,"codec_type":"audio"}}],"format":{{"format
             stdout.contains("complete: output.mkv"),
             "{failure}: {stdout}"
         );
-        assert!(!fixture.0.join("output.mkv.part").exists(), "{failure}");
+        assert!(!fixture.0.join(".part.output.mkv").exists(), "{failure}");
         assert_eq!(
             fs::read(fixture.0.join("output.mkv")).unwrap(),
             b"encoded",
@@ -2043,7 +2043,7 @@ case "$*" in
         ;;
     *framehash*)
         printf '#format: frame checksums\n0, 0, 0, 1, 1, hash\n'
-        case "$*" in *output.mkv.part*) ;; *) printf '1, 0, 0, 1, 1, hash\n' ;; esac
+        case "$*" in *.part.output.mkv*) ;; *) printf '1, 0, 0, 1, 1, hash\n' ;; esac
         exit 0
         ;;
 esac
@@ -2088,7 +2088,7 @@ case "$last" in input.mkv) cat input.json ;; *) cat output.json ;; esac
         "{stderr}"
     );
     assert_eq!(fs::read(fixture.0.join("output.mkv")).unwrap(), b"previous");
-    assert!(!fixture.0.join("output.mkv.part").exists());
+    assert!(!fixture.0.join(".part.output.mkv").exists());
 }
 
 #[test]
@@ -2104,7 +2104,7 @@ fn failures_delete_only_our_part_and_preserve_existing_targets() {
             b"original",
             "{body}"
         );
-        assert!(!fixture.0.join("output.mkv.part").exists(), "{body}");
+        assert!(!fixture.0.join(".part.output.mkv").exists(), "{body}");
         assert!(
             !String::from_utf8_lossy(&result.stdout).contains("complete:"),
             "{body}"
@@ -2136,14 +2136,14 @@ fn failures_delete_only_our_part_and_preserve_existing_targets() {
         fs::read(fixture.0.join("output.mkv")).unwrap(),
         b"racing-writer"
     );
-    assert!(!fixture.0.join("output.mkv.part").exists());
+    assert!(!fixture.0.join(".part.output.mkv").exists());
 }
 
 #[test]
 fn an_existing_part_is_never_overwritten_or_deleted_even_with_overwrite() {
     let fixture = Fixture::new("touch ffmpeg-started");
     fixture.tool("ffprobe", "touch ffprobe-started");
-    fs::write(fixture.0.join("output.mkv.part"), b"another attempt").unwrap();
+    fs::write(fixture.0.join(".part.output.mkv"), b"another attempt").unwrap();
     let assert_preserved = |flags: &[&str]| {
         let result = fixture
             .command()
@@ -2152,7 +2152,7 @@ fn an_existing_part_is_never_overwritten_or_deleted_even_with_overwrite() {
             .unwrap();
         assert_eq!(result.status.code(), Some(1), "{flags:?}");
         assert_eq!(
-            fs::read(fixture.0.join("output.mkv.part")).unwrap(),
+            fs::read(fixture.0.join(".part.output.mkv")).unwrap(),
             b"another attempt",
             "{flags:?}"
         );
@@ -2187,7 +2187,7 @@ fn probe_and_ffmpeg_diagnostics_are_emitted_once_in_both_output_modes() {
     assert_eq!(result.status.code(), Some(1));
     assert_eq!(error.matches("FFMPEG-DIAGNOSTIC").count(), 1, "{error}");
     assert_eq!(error.matches("process failed").count(), 1, "{error}");
-    assert!(!fixture.0.join("output.mkv.part").exists());
+    assert!(!fixture.0.join(".part.output.mkv").exists());
     fixture.tool(
         "ffprobe",
         "printf 'FFPROBE-DIAGNOSTIC\\n' >&2; printf '{}'; exit 8",
@@ -2202,7 +2202,7 @@ fn probe_and_ffmpeg_diagnostics_are_emitted_once_in_both_output_modes() {
         assert_eq!(result.status.code(), Some(1));
         assert_eq!(error.matches("FFPROBE-DIAGNOSTIC").count(), 1, "{error}");
         assert!(error.contains("probe failed"));
-        assert!(!fixture.0.join("output.mkv.part").exists());
+        assert!(!fixture.0.join(".part.output.mkv").exists());
     };
     assert_ffprobe_diagnostic(false);
     assert_ffprobe_diagnostic(true);
@@ -2290,7 +2290,7 @@ while :; do :; done"#,
         thread::sleep(Duration::from_millis(10));
     };
     assert_eq!(status.code(), Some(1));
-    assert!(!fixture.0.join("output.mkv.part").exists());
+    assert!(!fixture.0.join(".part.output.mkv").exists());
     assert!(!fixture.0.join("output.mkv").exists());
     let pid = fs::read_to_string(fixture.0.join("child-pid")).unwrap();
     assert!(
@@ -2406,7 +2406,7 @@ esac"#,
             0,
             "{phase}: leaked cover directory"
         );
-        assert!(!fixture.0.join("output.mkv.part").exists());
+        assert!(!fixture.0.join(".part.output.mkv").exists());
         let expected: &[u8] = if phase == "vmaf" {
             b"encoded"
         } else {

@@ -315,7 +315,7 @@ esac"#,
     assert!(recursive.status.success(), "{:?}", recursive.stderr);
     assert!(
         String::from_utf8_lossy(&recursive.stdout)
-            .ends_with("batch summary: total 1 | succeeded 1 | failed 0\n")
+            .ends_with("batch summary: total 1 | succeeded 1 | failed 0 | skipped 0\n")
     );
     assert!(!fixture.0.join("output").exists());
 }
@@ -1046,6 +1046,168 @@ printf 'frame=1\nout_time_us=1000000\nprogress=end\n'"#,
 }
 
 #[test]
+fn recursive_mode_probes_each_file_just_before_transcoding_it() {
+    let fixture = Fixture::new(
+        r#"previous=''
+for argument do
+    if test "$previous" = -i; then printf 'transcode %s\n' "$argument" >> execution-order; fi
+    previous=$argument
+done
+printf encoded > "$argument""#,
+    );
+    fs::create_dir(fixture.0.join("input")).unwrap();
+    fs::write(fixture.0.join("input/first.mkv"), b"first").unwrap();
+    fs::write(fixture.0.join("input/second.mkv"), b"second").unwrap();
+    fs::write(fixture.0.join("input/third.mkv"), b"third").unwrap();
+    fixture.tool(
+        "ffprobe",
+        r#"for last do :; done
+printf 'probe %s\n' "$last" >> execution-order
+printf '%s' '{"streams":[{"index":0,"codec_type":"video"}],"format":{"format_name":"matroska,webm","duration":"1"}}'"#,
+    );
+
+    let result = fixture
+        .recursive_command("output")
+        .arg("--copy")
+        .output()
+        .unwrap();
+
+    assert!(result.status.success(), "{:?}", result.stderr);
+    let order = fs::read_to_string(fixture.0.join("execution-order")).unwrap();
+    let phases: Vec<_> = order
+        .lines()
+        .map(|line| line.split_once(' ').unwrap().0)
+        .collect();
+    assert_eq!(
+        phases,
+        [
+            "probe",
+            "transcode",
+            "probe",
+            "transcode",
+            "probe",
+            "transcode"
+        ],
+        "{order}"
+    );
+}
+
+#[tokio::test]
+async fn recursive_events_count_all_candidates_and_each_kind_of_skipped_input() {
+    let fixture = Fixture::new("for last do :; done; printf encoded > \"$last\"");
+    fs::create_dir(fixture.0.join("input")).unwrap();
+    fs::write(fixture.0.join("input/movie.mkv"), b"video").unwrap();
+    fs::write(fixture.0.join("input/audio.mka"), b"audio").unwrap();
+    fs::write(fixture.0.join("input/notes.txt"), b"notes").unwrap();
+    fs::write(fixture.0.join("input/cover.jpg"), b"image").unwrap();
+    fixture.tool(
+        "ffprobe",
+        r#"for last do :; done
+streams='[{"index":0,"codec_type":"video"}]'
+format=matroska,webm
+case "$last" in
+    *.txt) printf NOT-MEDIA >&2; exit 1 ;;
+    *.mka) streams='[{"index":0,"codec_type":"audio"}]' ;;
+    *.jpg) format=image2 ;;
+esac
+printf '{"streams":%s,"format":{"format_name":"%s","duration":"1"}}' "$streams" "$format""#,
+    );
+    let events = Mutex::new(Vec::new());
+
+    let outcome = yog_runtime::run_with_events(
+        yog_runtime::Command {
+            request: yog_core::ffmpeg::plan::TranscodeRequest::new(
+                fixture.0.join("input"),
+                fixture.0.join("output"),
+            ),
+            operation: yog_runtime::Operation::Transcode,
+            recursive: true,
+        },
+        yog_runtime::Options {
+            ffmpeg: fixture.0.join("ffmpeg"),
+            ffprobe: fixture.0.join("ffprobe"),
+            terminal_output: false,
+            ..yog_runtime::Options::default()
+        },
+        yog_runtime::Config::default(),
+        tokio_util::sync::CancellationToken::new(),
+        |event| events.lock().unwrap().push(event),
+    )
+    .await;
+
+    let yog_runtime::RunOutcome::Batch(batch) = outcome else {
+        panic!("expected a batch outcome, got {outcome:?}");
+    };
+    assert_eq!(batch.total, 4);
+    assert_eq!(batch.succeeded, 1);
+    assert_eq!(batch.skipped, 3);
+    assert!(batch.failures.is_empty());
+    let events = events.into_inner().unwrap();
+    assert!(matches!(
+        events
+            .iter()
+            .find(|event| matches!(event, yog_runtime::event::RunEvent::BatchDiscovered { .. })),
+        Some(yog_runtime::event::RunEvent::BatchDiscovered { total: 4, .. })
+    ));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, yog_runtime::event::RunEvent::InputSkipped { .. }))
+            .count(),
+        3
+    );
+}
+
+#[tokio::test]
+async fn cancelling_before_the_first_batch_probe_does_not_probe_later_files() {
+    let fixture = Fixture::new("exit 99");
+    fs::create_dir(fixture.0.join("input")).unwrap();
+    fs::write(fixture.0.join("input/first.mkv"), b"video").unwrap();
+    fs::write(fixture.0.join("input/second.mkv"), b"video").unwrap();
+    fixture.tool(
+        "ffprobe",
+        &format!(
+            "touch '{}'\nprintf '%s' '{{\"streams\":[{{\"index\":0,\"codec_type\":\"video\"}}],\"format\":{{\"format_name\":\"matroska,webm\"}}}}'",
+            fixture.0.join("probe-started").display(),
+        ),
+    );
+    let cancellation = tokio_util::sync::CancellationToken::new();
+
+    let outcome = yog_runtime::run_with_events(
+        yog_runtime::Command {
+            request: yog_core::ffmpeg::plan::TranscodeRequest::new(fixture.0.join("input"), "")
+                .with_video(yog_core::ffmpeg::plan::VideoAction::encode_x264(None, None)),
+            operation: yog_runtime::Operation::Predict,
+            recursive: true,
+        },
+        yog_runtime::Options {
+            ffmpeg: fixture.0.join("ffmpeg"),
+            ffprobe: fixture.0.join("ffprobe"),
+            terminal_output: false,
+            ..yog_runtime::Options::default()
+        },
+        yog_runtime::Config::default(),
+        cancellation.clone(),
+        |event| {
+            if matches!(event, yog_runtime::event::RunEvent::TaskStarted { .. }) {
+                cancellation.cancel();
+            }
+        },
+    )
+    .await;
+
+    let yog_runtime::RunOutcome::Batch(batch) = outcome else {
+        panic!("expected a batch outcome, got {outcome:?}");
+    };
+    assert_eq!(batch.total, 2);
+    assert_eq!(batch.succeeded, 0);
+    assert_eq!(batch.skipped, 0);
+    assert!(batch.cancelled);
+    assert!(!fixture.0.join("probe-started").exists());
+    assert!(!fixture.0.join("output").exists());
+}
+
+#[test]
 fn recursive_mode_processes_video_files_serially_and_preserves_the_directory_tree() {
     let fixture = Fixture::new(
         r#"previous=''
@@ -1105,7 +1267,7 @@ printf '{"streams":%s,"format":{"format_name":"%s","duration":"1"}}' "$streams" 
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(stderr.contains("warning: skipping input/nested/notes.md: probe failed"));
     assert!(stderr.contains("NOT-MEDIA"));
-    assert!(stdout.contains("batch summary: total 2 | succeeded 2 | failed 0"));
+    assert!(stdout.contains("batch summary: total 4 | succeeded 2 | failed 0 | skipped 2"));
 }
 
 #[test]
@@ -1160,7 +1322,7 @@ printf encoded > "$argument""#,
     );
     assert_eq!(stderr.matches("BAD-TRANSCODE").count(), 1, "{stderr}");
     assert!(
-        stdout.ends_with("batch summary: total 3 | succeeded 2 | failed 1\n"),
+        stdout.ends_with("batch summary: total 3 | succeeded 2 | failed 1 | skipped 0\n"),
         "{stdout}"
     );
 }
@@ -1246,7 +1408,7 @@ while :; do :; done"#,
     assert_eq!(fs::read_dir(fixture.0.join("output")).unwrap().count(), 1);
     assert!(
         stdout.ends_with(
-            "batch summary: total 3 | succeeded 1 | failed 0 | not processed 2 | cancelled\n"
+            "batch summary: total 3 | succeeded 1 | failed 0 | skipped 0 | not processed 2 | cancelled\n"
         ),
         "{stdout}"
     );
@@ -1403,7 +1565,7 @@ printf '{"streams":[{"index":0,"codec_type":"video"}],"format":{"format_name":"%
     );
     let stdout = String::from_utf8_lossy(&result.stdout);
     assert!(
-        stdout.ends_with("batch summary: total 2 | succeeded 2 | failed 0\n"),
+        stdout.ends_with("batch summary: total 3 | succeeded 2 | failed 0 | skipped 1\n"),
         "{stdout}"
     );
 
@@ -1474,6 +1636,7 @@ fn recursive_mode_rejects_output_collisions_before_starting_ffmpeg() {
     fs::create_dir(fixture.0.join("input")).unwrap();
     fs::write(fixture.0.join("input/same.mkv"), b"first").unwrap();
     fs::write(fixture.0.join("input/same.avi"), b"second").unwrap();
+    fs::write(fixture.0.join("input/unrelated.mkv"), b"video").unwrap();
     fixture.tool(
         "ffprobe",
         r#"for last do :; done
@@ -1490,6 +1653,49 @@ printf '{"streams":[{"index":0,"codec_type":"video"}],"format":{"format_name":"%
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("output/same.webm"));
     assert!(!fixture.0.join("ffmpeg-started").exists());
+    assert!(!fixture.0.join("output").exists());
+}
+
+#[test]
+fn recursive_mode_does_not_treat_a_same_named_subtitle_as_an_output_collision() {
+    let fixture = Fixture::new("for last do :; done; printf encoded > \"$last\"");
+    fs::create_dir(fixture.0.join("input")).unwrap();
+    fs::write(fixture.0.join("input/movie.mkv"), b"video").unwrap();
+    fs::write(fixture.0.join("input/movie.srt"), b"subtitle").unwrap();
+    fixture.tool(
+        "ffprobe",
+        r#"for last do :; done
+case "$last" in
+    *.srt) streams='[{"index":0,"codec_type":"subtitle"}]' ;;
+    *) streams='[{"index":0,"codec_type":"video"}]' ;;
+esac
+printf '{"streams":%s,"format":{"format_name":"matroska,webm","duration":"1"}}' "$streams""#,
+    );
+
+    let result = fixture
+        .recursive_command("output")
+        .args(["-C", "webm", "--copy", "--report", "report.jsonl"])
+        .output()
+        .unwrap();
+
+    assert!(result.status.success(), "{:?}", result.stderr);
+    assert_eq!(
+        fs::read(fixture.0.join("output/movie.webm")).unwrap(),
+        b"encoded"
+    );
+    assert!(
+        String::from_utf8_lossy(&result.stdout)
+            .ends_with("batch summary: total 2 | succeeded 1 | failed 0 | skipped 1\n")
+    );
+    let records = read_report(&fixture, "report.jsonl");
+    assert_eq!(records.len(), 2, "{records:?}");
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record["skipped"].is_object())
+            .count(),
+        1
+    );
 }
 
 #[test]

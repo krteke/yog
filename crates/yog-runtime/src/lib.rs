@@ -18,7 +18,7 @@ use diagnostics::Diagnostics;
 use error::RunError;
 use event::{RunEvent, TaskStatus};
 use report::{Record, Report, Status};
-use std::{path::PathBuf, time::Duration};
+use std::{collections::HashSet, path::PathBuf, time::Duration};
 use tokio_util::sync::CancellationToken;
 use transcode::Transcoder;
 use yog_core::ffmpeg::{plan::TranscodeRequest, vmaf::VmafOptions};
@@ -92,7 +92,9 @@ impl RunOutcome {
             Self::Failed(_) => RunStatus::Failure,
             Self::Cancelled => RunStatus::Cancelled,
             Self::Batch(batch) if batch.cancelled => RunStatus::Cancelled,
-            Self::Batch(batch) if !batch.failures.is_empty() => RunStatus::Failure,
+            Self::Batch(batch) if !batch.failures.is_empty() || batch.total == batch.skipped => {
+                RunStatus::Failure
+            }
             Self::Batch(_) => RunStatus::Success,
         }
     }
@@ -100,8 +102,10 @@ impl RunOutcome {
 
 #[derive(Debug)]
 pub struct BatchOutcome {
+    /// Number of scanned input files, including files subsequently skipped.
     pub total: usize,
     pub succeeded: usize,
+    pub skipped: usize,
     pub failures: Vec<TaskFailure>,
     pub cancelled: bool,
 }
@@ -296,13 +300,21 @@ async fn run_batch(
     report: &mut Report,
 ) -> RunOutcome {
     let Command {
-        request, operation, ..
+        request: template,
+        operation,
+        ..
     } = command;
     let predict = matches!(operation, Operation::Predict);
-    let input_root = request.input.clone();
     diagnostics.event(RunEvent::PhaseChanged(event::RunPhase::Discovering));
-    let discovery = match recursive::discover(request, transcoder, diagnostics, predict).await {
-        Ok(discovery) => discovery,
+    let scan_template = template.clone();
+    let scan_cancellation = cancellation.clone();
+    let tasks = match tokio::task::spawn_blocking(move || {
+        recursive::scan(scan_template, scan_cancellation, predict)
+    })
+    .await
+    .expect("batch path scan panicked")
+    {
+        Ok(tasks) => tasks,
         Err(RunError::Cancelled) => {
             diagnostics.cancelled();
             return RunOutcome::Cancelled;
@@ -312,28 +324,45 @@ async fn run_batch(
             return RunOutcome::Failed(error);
         }
     };
-    let total = discovery.tasks.len();
-    diagnostics.event(RunEvent::BatchDiscovered {
-        total,
-        skipped: discovery.skipped.len(),
-    });
+    let total = tasks.len();
+    diagnostics.event(RunEvent::BatchDiscovered { total });
     let mut succeeded = 0;
     let mut failures = Vec::new();
-
-    for skipped in &discovery.skipped {
-        report.write(
-            &Record::Skipped(SkippedRecord::new(&skipped.input, &skipped.error)),
+    let mut preflight_skipped = HashSet::new();
+    // Without an explicit container, relative paths and suffixes are preserved,
+    // so distinct input paths cannot map to the same output path.
+    if !predict && template.container.is_some() {
+        match recursive::check_output_conflicts(
+            &tasks,
+            &template,
+            transcoder,
             diagnostics,
-        );
+            report,
+            &mut preflight_skipped,
+        )
+        .await
+        {
+            Ok(()) | Err(RunError::Cancelled) => {}
+            Err(RunError::Failed(error)) => {
+                diagnostics.error(&error);
+                return RunOutcome::Failed(error);
+            }
+        }
     }
+    let mut skipped = preflight_skipped.len();
 
-    if discovery.tasks.is_empty() {
-        let error = anyhow::anyhow!("no video files found in {}", input_root.display());
-        diagnostics.error(&error);
-        return RunOutcome::Failed(error);
-    }
-
-    for (offset, (request, media)) in discovery.tasks.into_iter().enumerate() {
+    for (offset, task) in tasks.into_iter().enumerate() {
+        if cancellation.is_cancelled() {
+            break;
+        }
+        if preflight_skipped.contains(&offset) {
+            continue;
+        }
+        let request = TranscodeRequest {
+            input: task.input,
+            output: task.output,
+            ..template.clone()
+        };
         let index = offset + 1;
         let input = request.input.clone();
         let output = (!request.output.as_os_str().is_empty()).then(|| request.output.clone());
@@ -344,28 +373,40 @@ async fn run_batch(
             output,
         });
         diagnostics.begin_task();
-        let (line, outcome) = match &operation {
-            Operation::Predict => {
-                let mut record = PredictRecord::new(&request, transcoder.prediction_options());
-                let result = transcoder
-                    .predict_probed(request, media, diagnostics, &mut record)
-                    .await;
-                let outcome = result.into();
-                let line = finish_record(record, &outcome);
-                (line, outcome)
+        diagnostics.event(RunEvent::PhaseChanged(event::RunPhase::Probing));
+        let outcome = match recursive::probe_task(&request, transcoder, predict).await {
+            Err(RunError::Failed(error)) => {
+                skipped += 1;
+                diagnostics.skipped_input(&input, &error);
+                report.write(
+                    &Record::Skipped(SkippedRecord::new(&input, &error)),
+                    diagnostics,
+                );
+                continue;
             }
-            Operation::Transcode => {
-                let mut record = TranscodeRecord::new(&request);
-                let result = transcoder
-                    .run_probed(request, media, diagnostics, &mut record)
-                    .await;
-                let outcome = result.into();
-                let line = finish_record(record, &outcome);
-                (line, outcome)
-            }
-            Operation::Emulate(_) => unreachable!("recursive emulation is unsupported"),
+            Err(RunError::Cancelled) => TaskOutcome::Cancelled,
+            Ok(media) => match &operation {
+                Operation::Predict => {
+                    let mut record = PredictRecord::new(&request, transcoder.prediction_options());
+                    let result = transcoder
+                        .predict_probed(request, media, diagnostics, &mut record)
+                        .await;
+                    let outcome = result.into();
+                    record_task(record, &outcome, report, diagnostics);
+                    outcome
+                }
+                Operation::Transcode => {
+                    let mut record = TranscodeRecord::new(&request);
+                    let result = transcoder
+                        .run_probed(request, media, diagnostics, &mut record)
+                        .await;
+                    let outcome = result.into();
+                    record_task(record, &outcome, report, diagnostics);
+                    outcome
+                }
+                Operation::Emulate(_) => unreachable!("recursive emulation is unsupported"),
+            },
         };
-        report.write(&line, diagnostics);
         diagnostics.event(RunEvent::TaskFinished {
             index,
             total,
@@ -387,10 +428,17 @@ async fn run_batch(
     }
 
     let cancelled = cancellation.is_cancelled();
-    diagnostics.batch_summary(total, succeeded, failures.len(), cancelled);
+    if total == skipped && !cancelled {
+        diagnostics.error(&anyhow::anyhow!(
+            "no video files found in {}",
+            template.input.display()
+        ));
+    }
+    diagnostics.batch_summary(total, succeeded, failures.len(), skipped, cancelled);
     RunOutcome::Batch(BatchOutcome {
         total,
         succeeded,
+        skipped,
         failures,
         cancelled,
     })

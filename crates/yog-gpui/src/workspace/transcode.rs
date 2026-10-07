@@ -245,17 +245,17 @@ impl TranscodePage {
                     self.phase = Some(phase);
                     self.message(MessageLevel::Info, self.phase_label().into(), window, cx);
                 }
-                RunEvent::BatchDiscovered { total, skipped } => {
+                RunEvent::BatchDiscovered { total } => {
                     self.task_total = total;
-                    self.skipped = skipped;
                     self.message(
                         MessageLevel::Info,
-                        format!("Discovered {total} video files; {skipped} skipped"),
+                        format!("Found {total} input files"),
                         window,
                         cx,
                     );
                 }
                 RunEvent::InputSkipped { input, error } => {
+                    self.skipped += 1;
                     self.message(
                         MessageLevel::Warning,
                         format!("Skipped {}: {error}", input.display()),
@@ -382,6 +382,7 @@ impl TranscodePage {
                         self.task_total = batch.total;
                         self.succeeded = batch.succeeded;
                         self.failed = batch.failures.len();
+                        self.skipped = batch.skipped;
                         None
                     }
                     RunOutcome::Completed | RunOutcome::Cancelled => None,
@@ -898,6 +899,7 @@ mod tests {
                     );
                 }
             });
+            assert_eq!(page.read(cx).skipped, 10_000);
             page.read(cx).work_list.scroll_to(gpui_kit::ListOffset {
                 item_ix: 1,
                 offset_in_item: px(0.),

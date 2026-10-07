@@ -350,11 +350,11 @@ impl PredictPage {
             }
             WorkerMessage::Event(event) => match event {
                 RunEvent::PhaseChanged(phase) => self.phase = Some(phase),
-                RunEvent::BatchDiscovered { total, skipped } => {
+                RunEvent::BatchDiscovered { total } => {
                     self.task_total = total;
-                    self.skipped = skipped;
                 }
                 RunEvent::InputSkipped { input, error } => {
+                    self.skipped += 1;
                     self.message(
                         MessageLevel::Warning,
                         format!("Skipped {}: {error}", input.display()),
@@ -429,6 +429,7 @@ impl PredictPage {
                         self.task_total = batch.total;
                         self.completed = batch.succeeded;
                         self.failed = batch.failures.len();
+                        self.skipped = batch.skipped;
                     }
                     RunOutcome::Completed | RunOutcome::Cancelled => {}
                 }
@@ -536,6 +537,7 @@ mod tests {
                     );
                 }
             });
+            assert_eq!(page.read(cx).skipped, 1_000);
             workspace.update(cx, |workspace, cx| {
                 workspace.change_mode(Mode::Predict, window, cx)
             });

@@ -272,18 +272,26 @@ impl<'a> Diagnostics<'a> {
         self.print_error_details(error);
     }
 
-    pub fn batch_summary(&self, total: usize, succeeded: usize, failed: usize, cancelled: bool) {
+    pub fn batch_summary(
+        &self,
+        total: usize,
+        succeeded: usize,
+        failed: usize,
+        skipped: usize,
+        cancelled: bool,
+    ) {
         if !self.terminal_output {
             return;
         }
 
-        let mut summary =
-            format!("batch summary: total {total} | succeeded {succeeded} | failed {failed}");
+        let mut summary = format!(
+            "batch summary: total {total} | succeeded {succeeded} | failed {failed} | skipped {skipped}"
+        );
         if cancelled {
             write!(
                 summary,
                 " | not processed {} | cancelled",
-                total - succeeded - failed,
+                total - succeeded - failed - skipped,
             )
             .unwrap();
         }

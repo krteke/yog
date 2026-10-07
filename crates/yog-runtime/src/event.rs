@@ -34,9 +34,10 @@ pub enum VmafOutcome {
 #[derive(Debug)]
 pub enum RunEvent {
     PhaseChanged(RunPhase),
+    /// The path scan has finished. `total` counts candidate files, not videos;
+    /// eligibility is determined by probing each file before execution.
     BatchDiscovered {
         total: usize,
-        skipped: usize,
     },
     InputSkipped {
         input: PathBuf,

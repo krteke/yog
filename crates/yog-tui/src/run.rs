@@ -187,11 +187,11 @@ impl RunState {
                     self.progress = Progress::default();
                 }
             }
-            RunEvent::BatchDiscovered { total, skipped } => {
+            RunEvent::BatchDiscovered { total } => {
                 self.task_total = total;
-                self.skipped = skipped;
             }
             RunEvent::InputSkipped { input, error } => {
+                self.skipped += 1;
                 self.push_notice(
                     NoticeKind::Warning,
                     format!("Skipped {}: {error}", input.display()),
@@ -373,6 +373,7 @@ impl RunState {
                 self.task_total = batch.total;
                 self.succeeded = batch.succeeded;
                 self.failed = batch.failures.len();
+                self.skipped = batch.skipped;
             }
             RunOutcome::Completed | RunOutcome::Cancelled => {}
         }
@@ -501,6 +502,32 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use yog_core::ffmpeg::prediction::{Estimate, QualityPrediction};
+
+    #[test]
+    fn batch_skips_update_immediately_and_are_not_counted_twice_at_completion() {
+        let mut state = RunState::new(&Operation::Transcode);
+        state.handle_event(RunEvent::BatchDiscovered { total: 2 });
+        state.handle_event(RunEvent::InputSkipped {
+            input: "notes.txt".into(),
+            error: "probe failed".into(),
+        });
+
+        assert_eq!(state.task_total, 2);
+        assert_eq!(state.skipped, 1);
+        assert_eq!(state.failed, 0);
+        assert_eq!(state.results[0].status, ResultStatus::Skipped);
+
+        state.finish(RunOutcome::Batch(yog_runtime::BatchOutcome {
+            total: 2,
+            succeeded: 1,
+            skipped: 1,
+            failures: Vec::new(),
+            cancelled: false,
+        }));
+
+        assert_eq!(state.skipped, 1);
+        assert_eq!(state.stage, RunStage::Finished(RunStatus::Success));
+    }
 
     #[test]
     fn task_progress_combines_completed_tasks_with_the_current_task() {

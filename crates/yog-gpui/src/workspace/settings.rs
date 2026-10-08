@@ -537,7 +537,7 @@ mod tests {
     use super::*;
     use crate::workspace::Workspace;
     use gpui_kit::{
-        ScrollDelta, TestAppContext,
+        Bounds, ScrollDelta, TestAppContext, WindowBounds, WindowOptions,
         component::{Root, WindowExt as _},
         point, px, size,
         test::TestWindowExt as _,
@@ -639,15 +639,22 @@ mod tests {
         cx.update(gpui_kit::init);
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("gui.toml");
-        let mut workspace = None;
-        let handle = cx.open_window(size(px(900.), px(700.)), |window, cx| {
-            let view = cx.new(|cx| Workspace::new(window, cx));
-            workspace = Some(view.clone());
-            Root::new(view, window, cx)
+        let (handle, workspace) = cx.update(|cx| {
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: point(px(0.), px(0.)),
+                        size: size(px(900.), px(700.)),
+                    })),
+                    ..Default::default()
+                },
+                cx,
+                |window, cx| cx.new(|cx| Workspace::new(window, cx)),
+            )
+            .unwrap()
         });
-        let workspace = workspace.unwrap();
 
-        cx.update_window(handle.into(), |_, window, cx| {
+        cx.update_window(handle, |_, window, cx| {
             let settings = workspace.read(cx).settings.clone();
             settings.update(cx, |settings, cx| {
                 settings.path = Some(path.clone());
@@ -656,6 +663,7 @@ mod tests {
             });
             window.render_frame(cx);
             assert!(!window.has_active_sheet(cx));
+            let previous_focus = window.focused(cx);
             window.click("open-settings", cx);
             assert!(window.has_active_sheet(cx));
             assert!(window.find("sheet-content").visible());
@@ -668,6 +676,7 @@ mod tests {
 
             window.press("escape", cx);
             assert!(!window.has_active_sheet(cx));
+            assert_eq!(window.focused(cx), previous_focus);
             window.click("open-settings", cx);
             assert_eq!(window.find("ffmpeg").value(), Some(original.as_str()));
 

@@ -11,7 +11,7 @@ mod transcode;
 mod video;
 
 use gpui_kit::component::{
-    ActiveTheme, Icon, IconName, Root, Sizable as _, StyledExt as _, Theme, ThemeMode, TitleBar,
+    ActiveTheme, Icon, IconName, Sizable as _, StyledExt as _, Theme, ThemeMode, TitleBar,
     WindowExt as _,
     button::{Button, ButtonVariants},
     menu::DropdownMenu,
@@ -377,7 +377,7 @@ impl Workspace {
 }
 
 impl Render for Workspace {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let status_bar = self.render_status_bar(cx);
         let page = match self.mode {
             Mode::Transcode => self.transcode.clone().into_any_element(),
@@ -493,8 +493,5 @@ impl Render for Workspace {
             )
             .child(content)
             .child(status_bar)
-            .children(Root::render_dialog_layer(window, cx))
-            .children(Root::render_sheet_layer(window, cx))
-            .children(Root::render_notification_layer(window, cx))
     }
 }

@@ -1,6 +1,6 @@
 mod workspace;
 
-use gpui_kit::component::{Root, Theme, TitleBar};
+use gpui_kit::component::{Theme, TitleBar};
 use gpui_kit::*;
 use workspace::Workspace;
 
@@ -28,13 +28,9 @@ fn main() {
 
             workspace::bind_keys(cx);
 
-            cx.spawn(async move |cx| {
-                cx.open_window(options, |window, cx| {
-                    let workspace = cx.new(|cx| Workspace::new(window, cx));
-                    cx.new(|cx| Root::new(workspace, window, cx))
-                })
-                .expect("failed to open Yog window");
+            gpui_kit::open_window(options, cx, |window, cx| {
+                cx.new(|cx| Workspace::new(window, cx))
             })
-            .detach();
+            .expect("failed to open window");
         });
 }

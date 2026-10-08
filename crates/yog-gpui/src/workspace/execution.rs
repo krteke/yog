@@ -150,6 +150,7 @@ pub fn phase_label(phase: Option<RunPhase>) -> &'static str {
     match phase {
         Some(RunPhase::Discovering) => "Discovering files",
         Some(RunPhase::Probing) => "Probing media",
+        Some(RunPhase::PreparingOutput) => "Preparing output",
         Some(RunPhase::Planning) => "Preparing run",
         Some(RunPhase::Predicting) => "Predicting",
         Some(RunPhase::Transcoding) => "Transcoding",
@@ -252,8 +253,8 @@ mod tests {
                 for message in batch {
                     match message {
                         WorkerMessage::Event(RunEvent::Progress { .. }) => progress += 1,
-                        WorkerMessage::Event(RunEvent::TaskFinished { status, .. }) => {
-                            assert_eq!(status, TaskStatus::Success);
+                        WorkerMessage::Event(RunEvent::TaskFinished { result, .. }) => {
+                            assert_eq!(result.status(), TaskStatus::Success);
                             task_finished = true;
                         }
                         WorkerMessage::Finished(outcome) => break 'receive outcome,

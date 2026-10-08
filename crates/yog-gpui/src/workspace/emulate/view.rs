@@ -108,10 +108,11 @@ impl EmulatePage {
 
     fn render_point(&self, point: &Point, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let theme = cx.theme();
-        let (state, tag) = match point.status {
+        let (state, tag) = match point.result.status() {
             TaskStatus::Success => ("Predicted", Tag::success()),
             TaskStatus::Failure => ("Failed", Tag::danger()),
             TaskStatus::Cancelled => ("Cancelled", Tag::secondary()),
+            TaskStatus::Skipped => unreachable!("emulation points do not skip"),
         };
         let row = div()
             .min_w_0()
@@ -153,17 +154,21 @@ impl EmulatePage {
                             .map_or("Unknown size".into(), components::format_size)
                     )))
             })
-            .when_some(point.error.clone(), |this, error| {
-                this.child(div().text_sm().text_color(theme.danger).child(error))
+            .when_some(point.result.message().map(str::to_owned), |this, error| {
+                this.child(
+                    div()
+                        .text_sm()
+                        .text_color(theme.danger)
+                        .child(format!("{}: {error}", point.result)),
+                )
             });
+        let row = row.id(format!(
+            "emulate-point-{}-{}",
+            point.candidate.unwrap_or(0),
+            point.quality
+        ));
         #[cfg(test)]
-        let row = row
-            .id(format!(
-                "emulate-point-{}-{}",
-                point.candidate.unwrap_or(0),
-                point.quality
-            ))
-            .test_support();
+        let row = row.test_support();
         row.into_any_element()
     }
 
@@ -193,6 +198,7 @@ impl EmulatePage {
                                     })
                                     .when(!matches!(page.stage, Stage::Idle), |this| {
                                         this.child(page.render_summary(cx))
+                                            .child(page.result_filter.clone())
                                     })
                                     .when_some(page.chart_paths.first().cloned(), |this, path| {
                                         let image =
@@ -224,7 +230,10 @@ impl EmulatePage {
                         div()
                             .px_6()
                             .pb_4()
-                            .child(page.render_point(&page.points[page.points.len() - index], cx))
+                            .child(page.render_point(
+                                &page.points[page.result_filter.read(cx).source_index(index - 1)],
+                                cx,
+                            ))
                             .into_any_element()
                     }
                 })

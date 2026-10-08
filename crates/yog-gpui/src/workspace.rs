@@ -4,6 +4,7 @@ mod execution;
 pub mod logging;
 pub mod messages;
 mod predict;
+mod result_filter;
 mod settings;
 mod source;
 mod transcode;

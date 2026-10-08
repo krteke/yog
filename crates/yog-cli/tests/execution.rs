@@ -518,8 +518,8 @@ fn emulation_candidates_are_measured_and_reported_individually() {
     #[track_caller]
     fn assert_point(row: &Value, candidate_index: u64, encoder: &str, preset: &str, quality: u64) {
         let record = &row["emulate"];
-        assert_eq!(record["status"], "success");
-        assert_eq!(record["error"], Value::Null);
+        assert_eq!(record["result"]["status"], "success");
+        assert_eq!(record["result"]["message"], Value::Null);
         assert_eq!(record["candidate_index"], candidate_index);
         assert_eq!(record["decoding"], "software");
         assert_eq!(record["source"]["bytes"], 20);
@@ -757,7 +757,7 @@ fi"#,
     assert_eq!(
         records
             .iter()
-            .map(|row| row["emulate"]["status"].clone())
+            .map(|row| row["emulate"]["result"]["status"].clone())
             .collect::<Vec<_>>(),
         vec![
             serde_json::json!("success"),
@@ -768,7 +768,7 @@ fi"#,
 
     let record = &records[0]["emulate"];
     assert!(record.get("predict").is_none(), "{record}");
-    assert_eq!(record["error"], Value::Null);
+    assert_eq!(record["result"]["message"], Value::Null);
     assert_eq!(record["container"], "mkv");
     assert_eq!(record["video"]["action"], "encode");
     assert_eq!(record["video"]["encoder"], "libsvtav1");
@@ -892,14 +892,15 @@ fi"#,
 
     let records = read_report(&fixture, "report.jsonl");
     assert_eq!(records.len(), 3, "{records:?}");
-    assert_eq!(records[0]["emulate"]["status"], "success");
+    assert_eq!(records[0]["emulate"]["result"]["status"], "success");
     assert_eq!(records[0]["emulate"]["video"]["rate"]["value"], 20);
-    assert_eq!(records[1]["emulate"]["status"], "failure");
+    assert_eq!(records[1]["emulate"]["result"]["status"], "failed");
+    assert_eq!(records[1]["emulate"]["result"]["phase"], "predicting");
     assert_eq!(records[1]["emulate"]["video"]["rate"]["value"], 21);
-    let error = records[1]["emulate"]["error"].as_str().unwrap();
+    let error = records[1]["emulate"]["result"]["message"].as_str().unwrap();
     assert!(error.contains("prediction failed at CRF 21"), "{error}");
     assert_eq!(records[1]["emulate"]["quality"], serde_json::Value::Null);
-    assert_eq!(records[2]["emulate"]["status"], "success");
+    assert_eq!(records[2]["emulate"]["result"]["status"], "success");
     assert_eq!(records[2]["emulate"]["video"]["rate"]["value"], 22);
 }
 
@@ -1127,6 +1128,7 @@ printf '{"streams":%s,"format":{"format_name":"%s","duration":"1"}}' "$streams" 
             ffmpeg: fixture.0.join("ffmpeg"),
             ffprobe: fixture.0.join("ffprobe"),
             terminal_output: false,
+            report: Some(fixture.0.join("results.jsonl")),
             ..yog_runtime::Options::default()
         },
         yog_runtime::Config::default(),
@@ -1142,6 +1144,20 @@ printf '{"streams":%s,"format":{"format_name":"%s","duration":"1"}}' "$streams" 
     assert_eq!(batch.succeeded, 1);
     assert_eq!(batch.skipped, 3);
     assert!(batch.failures.is_empty());
+    let records = fs::read_to_string(fixture.0.join("results.jsonl")).unwrap();
+    let rows: Vec<serde_json::Value> = records
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let audio = rows
+        .iter()
+        .find_map(|row| {
+            row.get("skipped")
+                .filter(|record| record["input"].as_str().unwrap().ends_with("audio.mka"))
+        })
+        .unwrap();
+    assert_eq!(audio["result"]["status"], "skipped");
+    assert_eq!(audio["result"]["reason"], "no_video");
     let events = events.into_inner().unwrap();
     assert!(matches!(
         events
@@ -1152,7 +1168,13 @@ printf '{"streams":%s,"format":{"format_name":"%s","duration":"1"}}' "$streams" 
     assert_eq!(
         events
             .iter()
-            .filter(|event| matches!(event, yog_runtime::event::RunEvent::InputSkipped { .. }))
+            .filter(|event| matches!(
+                event,
+                yog_runtime::event::RunEvent::TaskFinished {
+                    result: yog_runtime::event::TaskResult::Skipped { .. },
+                    ..
+                }
+            ))
             .count(),
         3
     );
@@ -1172,6 +1194,7 @@ async fn cancelling_before_the_first_batch_probe_does_not_probe_later_files() {
         ),
     );
     let cancellation = tokio_util::sync::CancellationToken::new();
+    let events = Mutex::new(Vec::new());
 
     let outcome = yog_runtime::run_with_events(
         yog_runtime::Command {
@@ -1184,6 +1207,7 @@ async fn cancelling_before_the_first_batch_probe_does_not_probe_later_files() {
             ffmpeg: fixture.0.join("ffmpeg"),
             ffprobe: fixture.0.join("ffprobe"),
             terminal_output: false,
+            report: Some(fixture.0.join("cancelled.jsonl")),
             ..yog_runtime::Options::default()
         },
         yog_runtime::Config::default(),
@@ -1192,6 +1216,7 @@ async fn cancelling_before_the_first_batch_probe_does_not_probe_later_files() {
             if matches!(event, yog_runtime::event::RunEvent::TaskStarted { .. }) {
                 cancellation.cancel();
             }
+            events.lock().unwrap().push(event);
         },
     )
     .await;
@@ -1205,6 +1230,149 @@ async fn cancelling_before_the_first_batch_probe_does_not_probe_later_files() {
     assert!(batch.cancelled);
     assert!(!fixture.0.join("probe-started").exists());
     assert!(!fixture.0.join("output").exists());
+    let records = read_report(&fixture, "cancelled.jsonl");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["predict"]["result"]["status"], "cancelled");
+    let completions: Vec<_> = events
+        .into_inner()
+        .unwrap()
+        .into_iter()
+        .filter_map(|event| match event {
+            yog_runtime::event::RunEvent::TaskFinished { result, .. } => Some(result),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(completions, [yog_runtime::event::TaskResult::Cancelled]);
+}
+
+#[tokio::test]
+async fn preflight_skip_has_one_completion_without_a_fake_start() {
+    use yog_runtime::event::{RunEvent, SkipReason, TaskResult};
+    let fixture = Fixture::new("for last do :; done; printf encoded > \"$last\"");
+    fs::create_dir(fixture.0.join("input")).unwrap();
+    fs::write(fixture.0.join("input/movie.txt"), b"notes").unwrap();
+    fs::write(fixture.0.join("input/movie.mkv"), b"video").unwrap();
+    fixture.tool("ffprobe", r#"for last do :; done
+case "$last" in *.txt) exit 1 ;; esac
+printf '%s' '{"streams":[{"index":0,"codec_type":"video"}],"format":{"format_name":"matroska,webm","duration":"1"}}'"#);
+    let mut request = yog_core::ffmpeg::plan::TranscodeRequest::new(
+        fixture.0.join("input"),
+        fixture.0.join("output"),
+    );
+    request.container = Some(yog_core::ffmpeg::plan::Container::Matroska);
+    let events = Mutex::new(Vec::new());
+    let outcome = yog_runtime::run_with_events(
+        yog_runtime::Command {
+            request,
+            operation: yog_runtime::Operation::Transcode,
+            recursive: true,
+        },
+        yog_runtime::Options {
+            ffmpeg: fixture.0.join("ffmpeg"),
+            ffprobe: fixture.0.join("ffprobe"),
+            terminal_output: false,
+            report: Some(fixture.0.join("report.jsonl")),
+            ..yog_runtime::Options::default()
+        },
+        yog_runtime::Config::default(),
+        tokio_util::sync::CancellationToken::new(),
+        |event| events.lock().unwrap().push(event),
+    )
+    .await;
+    let yog_runtime::RunOutcome::Batch(batch) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(batch.total, 2);
+    assert_eq!(batch.succeeded, 1);
+    assert_eq!(batch.skipped, 1);
+    assert!(batch.failures.is_empty());
+    let events = events.into_inner().unwrap();
+    let skipped_path = fixture.0.join("input/movie.txt");
+    assert!(!events.iter().any(
+        |event| matches!(event, RunEvent::TaskStarted { input, .. } if input == &skipped_path)
+    ));
+    let completions: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            RunEvent::TaskFinished { input, result, .. } if input == &skipped_path => Some(result),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(completions.len(), 1);
+    assert!(matches!(
+        completions[0],
+        TaskResult::Skipped {
+            reason: SkipReason::ProbeFailed,
+            ..
+        }
+    ));
+    let rows = read_report(&fixture, "report.jsonl");
+    assert_eq!(rows.len(), 2);
+    let skipped = rows.iter().find_map(|row| row.get("skipped")).unwrap();
+    assert_eq!(
+        skipped["result"],
+        serde_json::to_value(completions[0]).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn probe_timeout_is_a_skip_not_a_transcode_failure() {
+    use yog_runtime::event::{RunEvent, SkipReason, TaskResult};
+    let fixture = Fixture::new("touch ffmpeg-started");
+    fs::create_dir(fixture.0.join("input")).unwrap();
+    fs::write(fixture.0.join("input/stalled.mkv"), b"video").unwrap();
+    fixture.tool("ffprobe", "while :; do :; done");
+    let events = Mutex::new(Vec::new());
+    let outcome = yog_runtime::run_with_events(
+        yog_runtime::Command {
+            request: yog_core::ffmpeg::plan::TranscodeRequest::new(
+                fixture.0.join("input"),
+                fixture.0.join("output"),
+            ),
+            operation: yog_runtime::Operation::Transcode,
+            recursive: true,
+        },
+        yog_runtime::Options {
+            ffmpeg: fixture.0.join("ffmpeg"),
+            ffprobe: fixture.0.join("ffprobe"),
+            timeout: Some(Duration::from_millis(100)),
+            terminal_output: false,
+            report: Some(fixture.0.join("report.jsonl")),
+            ..yog_runtime::Options::default()
+        },
+        yog_runtime::Config::default(),
+        tokio_util::sync::CancellationToken::new(),
+        |event| events.lock().unwrap().push(event),
+    )
+    .await;
+    let yog_runtime::RunOutcome::Batch(batch) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(batch.total, 1);
+    assert_eq!(batch.skipped, 1);
+    assert!(batch.failures.is_empty());
+    assert!(!fixture.0.join("ffmpeg-started").exists());
+    let completions: Vec<_> = events
+        .into_inner()
+        .unwrap()
+        .into_iter()
+        .filter_map(|event| match event {
+            RunEvent::TaskFinished { result, .. } => Some(result),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(completions.len(), 1);
+    assert!(matches!(
+        completions[0],
+        TaskResult::Skipped {
+            reason: SkipReason::ProbeTimedOut,
+            ..
+        }
+    ));
+    assert_eq!(
+        read_report(&fixture, "report.jsonl")[0]["skipped"]["result"],
+        serde_json::to_value(&completions[0]).unwrap()
+    );
 }
 
 #[test]
@@ -1265,7 +1433,11 @@ printf '{"streams":%s,"format":{"format_name":"%s","duration":"1"}}' "$streams" 
     assert!(!fixture.0.join("output/nested/.part.movie.ts").exists());
     let stdout = String::from_utf8_lossy(&result.stdout);
     let stderr = String::from_utf8_lossy(&result.stderr);
-    assert!(stderr.contains("warning: skipping input/nested/notes.md: probe failed"));
+    assert!(
+        stderr.contains(
+            "warning: skipping input/nested/notes.md: Skipped · Probe failed: probe failed"
+        )
+    );
     assert!(stderr.contains("NOT-MEDIA"));
     assert!(stdout.contains("batch summary: total 4 | succeeded 2 | failed 0 | skipped 2"));
 }
@@ -1317,7 +1489,7 @@ printf encoded > "$argument""#,
     let stdout = String::from_utf8_lossy(&result.stdout);
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(
-        stderr.contains("failed: input/bad.mkv: transcode failed"),
+        stderr.contains("failed: input/bad.mkv: Failed · Transcoding: transcode failed"),
         "{stderr}"
     );
     assert_eq!(stderr.matches("BAD-TRANSCODE").count(), 1, "{stderr}");
@@ -1577,8 +1749,9 @@ printf '{"streams":[{"index":0,"codec_type":"video"}],"format":{"format_name":"%
         .collect();
     assert_eq!(skipped.len(), 1, "{records:?}");
     assert!(skipped[0]["input"].as_str().unwrap().ends_with("cover.jpg"));
+    assert_eq!(skipped[0]["result"]["reason"], "unsupported_container");
     assert!(
-        skipped[0]["reason"]
+        skipped[0]["result"]["message"]
             .as_str()
             .unwrap()
             .contains("cannot use input format Some(\"image2\")")
@@ -1586,7 +1759,7 @@ printf '{"streams":[{"index":0,"codec_type":"video"}],"format":{"format_name":"%
     assert_eq!(
         records
             .iter()
-            .filter(|row| row["transcode"]["status"] == "success")
+            .filter(|row| row["transcode"]["result"]["status"] == "success")
             .count(),
         2
     );
@@ -2076,7 +2249,13 @@ case "$last" in input.mkv) cat input.json ;; *) cat output.json ;; esac
 
     let result = fixture
         .command()
-        .args(["--encode-x264", "--verify", "-O"])
+        .args([
+            "--encode-x264",
+            "--verify",
+            "-O",
+            "--report",
+            "report.jsonl",
+        ])
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&result.stderr);
@@ -2089,6 +2268,10 @@ case "$last" in input.mkv) cat input.json ;; *) cat output.json ;; esac
     );
     assert_eq!(fs::read(fixture.0.join("output.mkv")).unwrap(), b"previous");
     assert!(!fixture.0.join(".part.output.mkv").exists());
+    assert_eq!(
+        read_report(&fixture, "report.jsonl")[0]["transcode"]["result"]["phase"],
+        "verifying"
+    );
 }
 
 #[test]
@@ -2272,6 +2455,8 @@ while :; do :; done"#,
                 "--timeout",
                 "1",
                 "--copy",
+                "--report",
+                "report.jsonl",
             ])
             .process_group(0)
             .stderr(Stdio::piped())
@@ -2290,6 +2475,9 @@ while :; do :; done"#,
         thread::sleep(Duration::from_millis(10));
     };
     assert_eq!(status.code(), Some(1));
+    let rows = read_report(&fixture, "report.jsonl");
+    assert_eq!(rows[0]["transcode"]["result"]["phase"], "transcoding");
+    assert_eq!(rows[0]["transcode"]["result"]["timed_out"], true);
     assert!(!fixture.0.join(".part.output.mkv").exists());
     assert!(!fixture.0.join("output.mkv").exists());
     let pid = fs::read_to_string(fixture.0.join("child-pid")).unwrap();
@@ -2420,7 +2608,7 @@ esac"#,
         if phase == "vmaf" {
             let records = read_report(&fixture, "report.jsonl");
             assert_eq!(records.len(), 1);
-            assert_eq!(records[0]["transcode"]["status"], "success");
+            assert_eq!(records[0]["transcode"]["result"]["status"], "success");
             assert_eq!(records[0]["transcode"]["vmaf"]["error"], "cancelled");
         }
         let pid = fs::read_to_string(fixture.0.join("child-pid")).unwrap();
@@ -2477,7 +2665,7 @@ esac"#,
     let records = read_report(&fixture, "report.jsonl");
     assert_eq!(records.len(), 1, "{records:?}");
     let record = &records[0]["transcode"];
-    assert_eq!(record["status"], "success");
+    assert_eq!(record["result"]["status"], "success");
     assert!(record["input"].as_str().unwrap().starts_with('/'));
     assert!(record["input"].as_str().unwrap().ends_with("input.mkv"));
     assert!(record["output"].as_str().unwrap().ends_with("output.mkv"));
@@ -2500,16 +2688,16 @@ esac"#,
         record["source"]["audio"],
         serde_json::json!([{"codec":"aac","channels":2,"sample_rate":"48000"}])
     );
-    assert_eq!(record["result"]["bytes"], 7);
-    assert_eq!(record["result"]["duration_seconds"], 1.0);
-    assert_eq!(record["result"]["size_percent"], 140.0);
-    assert_eq!(record["result"]["frames"], 25);
-    assert_eq!(record["result"]["fps"], 25.0);
-    assert!(record["result"]["elapsed_seconds"].as_f64().unwrap() > 0.0);
-    assert!(record["result"]["speed"].as_f64().unwrap() > 0.0);
+    assert_eq!(record["metrics"]["bytes"], 7);
+    assert_eq!(record["metrics"]["duration_seconds"], 1.0);
+    assert_eq!(record["metrics"]["size_percent"], 140.0);
+    assert_eq!(record["metrics"]["frames"], 25);
+    assert_eq!(record["metrics"]["fps"], 25.0);
+    assert!(record["metrics"]["elapsed_seconds"].as_f64().unwrap() > 0.0);
+    assert!(record["metrics"]["speed"].as_f64().unwrap() > 0.0);
     assert_eq!(record["verify"], Value::Null);
     assert_eq!(record["vmaf"], Value::Null);
-    assert_eq!(record["error"], Value::Null);
+    assert_eq!(record["result"]["message"], Value::Null);
 }
 
 #[test]
@@ -2585,7 +2773,7 @@ esac"#,
     let records = read_report(&fixture, "report.jsonl");
     assert_eq!(records.len(), 1, "{records:?}");
     let record = &records[0]["predict"];
-    assert_eq!(record["status"], "success");
+    assert_eq!(record["result"]["status"], "success");
     assert!(record["input"].as_str().unwrap().starts_with('/'));
     assert_eq!(record["container"], "mkv");
     assert_eq!(record["video"]["encoder"], "libx264");
@@ -2623,7 +2811,7 @@ esac"#,
     assert_eq!(record["samples"][0]["vmaf"], 96.5);
     assert_eq!(record["samples"][0]["scored_frames"], 1);
     assert_eq!(record["samples"][1]["start_seconds"], 2.0);
-    assert_eq!(record["error"], serde_json::Value::Null);
+    assert_eq!(record["result"]["message"], serde_json::Value::Null);
 }
 
 #[test]
@@ -2672,7 +2860,8 @@ printf '%s' '{"streams":[{"index":0,"codec_type":"video"}],"format":{"format_nam
         .collect();
     assert_eq!(skipped.len(), 1);
     assert!(skipped[0]["input"].as_str().unwrap().ends_with("notes.md"));
-    let reason = skipped[0]["reason"].as_str().unwrap();
+    assert_eq!(skipped[0]["result"]["reason"], "probe_failed");
+    let reason = skipped[0]["result"]["message"].as_str().unwrap();
     assert!(reason.contains("probe failed"), "{reason}");
 
     let items: Vec<_> = records
@@ -2683,30 +2872,31 @@ printf '%s' '{"streams":[{"index":0,"codec_type":"video"}],"format":{"format_nam
     assert_eq!(
         items
             .iter()
-            .filter(|item| item["status"] == "success")
+            .filter(|item| item["result"]["status"] == "success")
             .count(),
         2
     );
     let failed: Vec<_> = items
         .iter()
-        .filter(|item| item["status"] == "failure")
+        .filter(|item| item["result"]["status"] == "failed")
         .collect();
     assert_eq!(failed.len(), 1);
     assert!(failed[0]["input"].as_str().unwrap().ends_with("bad.mkv"));
+    assert_eq!(failed[0]["result"]["phase"], "transcoding");
     assert!(
-        failed[0]["error"]
+        failed[0]["result"]["message"]
             .as_str()
             .unwrap()
             .contains("transcode failed")
     );
     let succeeded: Vec<_> = items
         .iter()
-        .filter(|item| item["status"] == "success")
+        .filter(|item| item["result"]["status"] == "success")
         .collect();
     assert_eq!(succeeded.len(), 2);
-    assert_eq!(succeeded[0]["result"]["bytes"], 7);
+    assert_eq!(succeeded[0]["metrics"]["bytes"], 7);
     assert_eq!(succeeded[0]["source"]["bytes"], 5);
-    assert_eq!(succeeded[1]["result"]["bytes"], 7);
+    assert_eq!(succeeded[1]["metrics"]["bytes"], 7);
     assert_eq!(succeeded[1]["source"]["bytes"], 5);
 }
 
@@ -2722,13 +2912,85 @@ fn reports_survive_task_failures() {
     assert_eq!(result.status.code(), Some(1), "{:?}", result.stderr);
     let records = read_report(&fixture, "report.jsonl");
     assert_eq!(records.len(), 1, "{records:?}");
-    assert_eq!(records[0]["transcode"]["status"], "failure");
+    assert_eq!(records[0]["transcode"]["result"]["status"], "failed");
+    assert_eq!(records[0]["transcode"]["result"]["phase"], "transcoding");
+    assert_eq!(records[0]["transcode"]["result"]["timed_out"], false);
     assert!(
-        records[0]["transcode"]["error"]
+        records[0]["transcode"]["result"]["message"]
             .as_str()
             .unwrap()
             .contains("transcode failed"),
         "{}",
         records[0]
     );
+}
+
+#[test]
+fn output_preparation_failure_is_classified_before_probing() {
+    let fixture = Fixture::new("touch ffmpeg-started");
+    fixture.tool("ffprobe", "touch ffprobe-started");
+    fs::write(fixture.0.join(".part.output.mkv"), b"existing attempt").unwrap();
+    let result = fixture
+        .command()
+        .args(["--copy", "--report", "report.jsonl"])
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    assert!(!fixture.0.join("ffprobe-started").exists());
+    assert_eq!(
+        read_report(&fixture, "report.jsonl")[0]["transcode"]["result"]["phase"],
+        "preparing_output"
+    );
+    assert!(String::from_utf8_lossy(&result.stderr).contains("Failed · Output preparation"));
+}
+
+#[test]
+fn single_input_probe_failure_is_failed_not_skipped() {
+    let fixture = Fixture::new("touch ffmpeg-started");
+    fixture.tool("ffprobe", "exit 7");
+    let result = fixture
+        .command()
+        .args(["--copy", "--report", "report.jsonl"])
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    assert!(!fixture.0.join("ffmpeg-started").exists());
+    let rows = read_report(&fixture, "report.jsonl");
+    assert_eq!(rows[0]["transcode"]["result"]["status"], "failed");
+    assert_eq!(rows[0]["transcode"]["result"]["phase"], "probing");
+    assert!(String::from_utf8_lossy(&result.stderr).contains("Failed · Probing"));
+}
+
+#[test]
+fn encoder_capability_failure_is_classified_as_planning() {
+    let fixture = Fixture::new("exit 7");
+    let result = fixture
+        .command()
+        .args(["--encode-x264", "--report", "report.jsonl"])
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    assert_eq!(
+        read_report(&fixture, "report.jsonl")[0]["transcode"]["result"]["phase"],
+        "planning"
+    );
+    assert!(String::from_utf8_lossy(&result.stderr).contains("Failed · Planning"));
+}
+
+#[test]
+fn publication_failure_is_not_classified_as_transcoding() {
+    let fixture =
+        Fixture::new("for last do :; done; printf encoded > \"$last\"; printf other > output.mkv");
+    let result = fixture
+        .command()
+        .args(["--copy", "--report", "report.jsonl"])
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    assert_eq!(fs::read(fixture.0.join("output.mkv")).unwrap(), b"other");
+    assert_eq!(
+        read_report(&fixture, "report.jsonl")[0]["transcode"]["result"]["phase"],
+        "publishing"
+    );
+    assert!(String::from_utf8_lossy(&result.stderr).contains("Failed · Publishing"));
 }

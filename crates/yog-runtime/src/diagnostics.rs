@@ -11,6 +11,7 @@ use yog_core::ffmpeg::{
 
 use crate::{
     emulate::{EmulationJob, EmulationOptions},
+    error::RunError,
     event::{EventSink, RunEvent},
 };
 
@@ -262,13 +263,24 @@ impl<'a> Diagnostics<'a> {
         self.print_error_details(error);
     }
 
-    pub fn task_error(&self, input: &Path, error: &anyhow::Error) {
+    pub fn task_error(&self, input: Option<&Path>, failure: &RunError) {
         if !self.terminal_output {
             return;
         }
 
-        eprintln!("failed: {}: {error:#}", input.display());
-
+        let result = failure.result();
+        if let Some(input) = input {
+            eprintln!(
+                "failed: {}: {result}: {}",
+                input.display(),
+                result.message().unwrap()
+            );
+        } else {
+            eprintln!("{result}: {}", result.message().unwrap());
+        }
+        let RunError::Failed { error, .. } = failure else {
+            unreachable!("task_error expects a failure")
+        };
         self.print_error_details(error);
     }
 
@@ -329,16 +341,19 @@ impl<'a> Diagnostics<'a> {
         }
     }
 
-    pub fn skipped_input(&self, input: &Path, error: &anyhow::Error) {
-        self.event(RunEvent::InputSkipped {
-            input: input.to_path_buf(),
-            error: format!("{error:#}"),
-        });
+    pub fn skipped_input(&self, input: &Path, failure: &RunError) {
         if !self.terminal_output {
             return;
         }
-
-        eprintln!("warning: skipping {}: {error:#}", input.display());
+        let result = failure.result();
+        eprintln!(
+            "warning: skipping {}: {result}: {}",
+            input.display(),
+            result.message().unwrap()
+        );
+        let RunError::Skipped { error, .. } = failure else {
+            unreachable!("skipped_input expects a skip")
+        };
         if let Some(error) = Self::program_error(error) {
             Self::print_program_stderr(error, false);
         }

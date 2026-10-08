@@ -16,8 +16,8 @@ mod verify;
 
 use diagnostics::Diagnostics;
 use error::RunError;
-use event::{RunEvent, TaskStatus};
-use report::{Record, Report, Status};
+use event::{RunEvent, RunPhase, TaskResult};
+use report::{Record, Report};
 use std::{collections::HashSet, path::PathBuf, time::Duration};
 use tokio_util::sync::CancellationToken;
 use transcode::Transcoder;
@@ -113,6 +113,7 @@ pub struct BatchOutcome {
 #[derive(Debug)]
 pub struct TaskFailure {
     pub input: PathBuf,
+    pub phase: RunPhase,
     pub error: anyhow::Error,
 }
 
@@ -169,23 +170,14 @@ pub async fn run_with_events(
 
 pub(crate) enum TaskOutcome {
     Success,
-    Failed(anyhow::Error),
-    Cancelled,
+    Error(RunError),
 }
 
 impl TaskOutcome {
-    fn status(&self) -> TaskStatus {
+    fn result(&self) -> TaskResult {
         match self {
-            Self::Success => TaskStatus::Success,
-            Self::Failed(_) => TaskStatus::Failure,
-            Self::Cancelled => TaskStatus::Cancelled,
-        }
-    }
-
-    fn error(&self) -> Option<String> {
-        match self {
-            Self::Failed(error) => Some(format!("{error:#}")),
-            Self::Success | Self::Cancelled => None,
+            Self::Success => TaskResult::Success,
+            Self::Error(error) => error.result(),
         }
     }
 }
@@ -194,23 +186,8 @@ impl From<Result<(), RunError>> for TaskOutcome {
     fn from(value: Result<(), RunError>) -> Self {
         match value {
             Ok(()) => Self::Success,
-            Err(RunError::Cancelled) => Self::Cancelled,
-            Err(RunError::Failed(error)) => Self::Failed(error),
+            Err(error) => Self::Error(error),
         }
-    }
-}
-
-impl From<anyhow::Error> for TaskOutcome {
-    fn from(error: anyhow::Error) -> Self {
-        Err(RunError::from(error)).into()
-    }
-}
-
-fn finish_record<R: TaskRecord>(record: R, outcome: &TaskOutcome) -> Record {
-    match outcome {
-        TaskOutcome::Success => record.finish(Status::Success, None),
-        TaskOutcome::Cancelled => record.finish(Status::Cancelled, None),
-        TaskOutcome::Failed(error) => record.finish(Status::Failure, Some(format!("{error:#}"))),
     }
 }
 
@@ -220,19 +197,25 @@ pub(crate) fn record_task<R: TaskRecord>(
     report: &mut Report,
     diagnostics: &Diagnostics<'_>,
 ) {
-    report.write(&finish_record(record, outcome), diagnostics);
+    report.write(&record.finish(outcome.result()), diagnostics);
 }
 
 fn finish(outcome: TaskOutcome, diagnostics: &Diagnostics<'_>) -> RunOutcome {
     match outcome {
         TaskOutcome::Success => RunOutcome::Completed,
-        TaskOutcome::Cancelled => {
+        TaskOutcome::Error(RunError::Cancelled) => {
             diagnostics.cancelled();
             RunOutcome::Cancelled
         }
-        TaskOutcome::Failed(error) => {
-            diagnostics.error(&error);
+        TaskOutcome::Error(error @ RunError::Failed { .. }) => {
+            diagnostics.task_error(None, &error);
+            let RunError::Failed { error, .. } = error else {
+                unreachable!()
+            };
             RunOutcome::Failed(error)
+        }
+        TaskOutcome::Error(RunError::Skipped { .. }) => {
+            unreachable!("single tasks are never skipped")
         }
     }
 }
@@ -282,8 +265,7 @@ async fn run_single(
         index: 1,
         total: 1,
         input,
-        status: outcome.status(),
-        error: outcome.error(),
+        result: outcome.result(),
     });
     if matches!(outcome, TaskOutcome::Success) && transcoder.cancelled() {
         diagnostics.cancelled();
@@ -315,11 +297,12 @@ async fn run_batch(
     .expect("batch path scan panicked")
     {
         Ok(tasks) => tasks,
+        Err(RunError::Skipped { .. }) => unreachable!("scans do not probe files"),
         Err(RunError::Cancelled) => {
             diagnostics.cancelled();
             return RunOutcome::Cancelled;
         }
-        Err(RunError::Failed(error)) => {
+        Err(RunError::Failed { error, .. }) => {
             diagnostics.error(&error);
             return RunOutcome::Failed(error);
         }
@@ -343,7 +326,8 @@ async fn run_batch(
         .await
         {
             Ok(()) | Err(RunError::Cancelled) => {}
-            Err(RunError::Failed(error)) => {
+            Err(RunError::Skipped { .. }) => unreachable!("preflight consumes skips"),
+            Err(RunError::Failed { error, .. }) => {
                 diagnostics.error(&error);
                 return RunOutcome::Failed(error);
             }
@@ -375,16 +359,44 @@ async fn run_batch(
         diagnostics.begin_task();
         diagnostics.event(RunEvent::PhaseChanged(event::RunPhase::Probing));
         let outcome = match recursive::probe_task(&request, transcoder, predict).await {
-            Err(RunError::Failed(error)) => {
+            Err(error @ RunError::Skipped { .. }) => {
                 skipped += 1;
                 diagnostics.skipped_input(&input, &error);
+                let result = error.result();
                 report.write(
-                    &Record::Skipped(SkippedRecord::new(&input, &error)),
+                    &Record::Skipped(SkippedRecord::new(&input, result.clone())),
                     diagnostics,
                 );
+                diagnostics.event(RunEvent::TaskFinished {
+                    index,
+                    total,
+                    input,
+                    result,
+                });
                 continue;
             }
-            Err(RunError::Cancelled) => TaskOutcome::Cancelled,
+            Err(RunError::Failed { .. }) => {
+                unreachable!("batch probing classifies failures as skips")
+            }
+            Err(RunError::Cancelled) => {
+                let outcome = TaskOutcome::Error(RunError::Cancelled);
+                match &operation {
+                    Operation::Predict => record_task(
+                        PredictRecord::new(&request, transcoder.prediction_options()),
+                        &outcome,
+                        report,
+                        diagnostics,
+                    ),
+                    Operation::Transcode => record_task(
+                        TranscodeRecord::new(&request),
+                        &outcome,
+                        report,
+                        diagnostics,
+                    ),
+                    Operation::Emulate(_) => unreachable!("recursive emulation is unsupported"),
+                }
+                outcome
+            }
             Ok(media) => match &operation {
                 Operation::Predict => {
                     let mut record = PredictRecord::new(&request, transcoder.prediction_options());
@@ -411,16 +423,25 @@ async fn run_batch(
             index,
             total,
             input: input.clone(),
-            status: outcome.status(),
-            error: outcome.error(),
+            result: outcome.result(),
         });
         match outcome {
             TaskOutcome::Success => succeeded += 1,
-            TaskOutcome::Failed(error) => {
-                diagnostics.task_error(&input, &error);
-                failures.push(TaskFailure { input, error });
+            TaskOutcome::Error(error @ RunError::Failed { .. }) => {
+                diagnostics.task_error(Some(&input), &error);
+                let RunError::Failed { phase, error } = error else {
+                    unreachable!()
+                };
+                failures.push(TaskFailure {
+                    input,
+                    phase,
+                    error,
+                });
             }
-            TaskOutcome::Cancelled => break,
+            TaskOutcome::Error(RunError::Cancelled) => break,
+            TaskOutcome::Error(RunError::Skipped { .. }) => {
+                unreachable!("skips finish before execution")
+            }
         }
         if cancellation.is_cancelled() {
             break;
@@ -498,7 +519,7 @@ mod tests {
                     RunEvent::TaskFinished {
                         index: 1,
                         total: 1,
-                        status: TaskStatus::Cancelled,
+                        result: TaskResult::Cancelled,
                         ..
                     } => "cancelled",
                     _ => return,

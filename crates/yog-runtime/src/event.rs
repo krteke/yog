@@ -1,13 +1,16 @@
-use std::{path::PathBuf, time::Duration};
+use serde::Serialize;
+use std::{fmt, path::PathBuf, time::Duration};
 
 use yog_core::ffmpeg::{prediction::Prediction, progress::Progress, vmaf::VmafOptions};
 
 pub(crate) type EventSink<'a> = dyn Fn(RunEvent) + Send + Sync + 'a;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RunPhase {
     Discovering,
     Probing,
+    PreparingOutput,
     Planning,
     Predicting,
     Transcoding,
@@ -21,7 +24,110 @@ pub enum RunPhase {
 pub enum TaskStatus {
     Success,
     Failure,
+    Skipped,
     Cancelled,
+}
+
+impl TaskStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Success => "Success",
+            Self::Failure => "Failed",
+            Self::Skipped => "Skipped",
+            Self::Cancelled => "Cancelled",
+        }
+    }
+}
+
+impl RunPhase {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Discovering => "Discovering",
+            Self::Probing => "Probing",
+            Self::PreparingOutput => "Output preparation",
+            Self::Planning => "Planning",
+            Self::Predicting => "Predicting",
+            Self::Transcoding => "Transcoding",
+            Self::Verifying => "Verifying",
+            Self::Publishing => "Publishing",
+            Self::CalculatingVmaf => "VMAF",
+            Self::RenderingChart => "Chart rendering",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipReason {
+    NoVideo,
+    ProbeFailed,
+    ProbeTimedOut,
+    UnsupportedContainer,
+}
+
+impl SkipReason {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NoVideo => "No video",
+            Self::ProbeFailed => "Probe failed",
+            Self::ProbeTimedOut => "Probe timed out",
+            Self::UnsupportedContainer => "Unsupported container",
+        }
+    }
+}
+
+/// A terminal result shared by events, reports and frontends.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum TaskResult {
+    Success,
+    Skipped {
+        reason: SkipReason,
+        message: String,
+    },
+    Failed {
+        phase: RunPhase,
+        timed_out: bool,
+        message: String,
+    },
+    Cancelled,
+}
+
+impl TaskResult {
+    pub fn status(&self) -> TaskStatus {
+        match self {
+            Self::Success => TaskStatus::Success,
+            Self::Skipped { .. } => TaskStatus::Skipped,
+            Self::Failed { .. } => TaskStatus::Failure,
+            Self::Cancelled => TaskStatus::Cancelled,
+        }
+    }
+
+    pub fn message(&self) -> Option<&str> {
+        match self {
+            Self::Skipped { message, .. } | Self::Failed { message, .. } => Some(message),
+            Self::Success | Self::Cancelled => None,
+        }
+    }
+}
+
+impl fmt::Display for TaskResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.status().label())?;
+        match self {
+            Self::Skipped { reason, .. } => write!(f, " · {}", reason.label()),
+            Self::Failed {
+                phase, timed_out, ..
+            } => {
+                write!(f, " · {}", phase.label())?;
+                if *timed_out {
+                    f.write_str(" · Timed out")?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -38,10 +144,6 @@ pub enum RunEvent {
     /// eligibility is determined by probing each file before execution.
     BatchDiscovered {
         total: usize,
-    },
-    InputSkipped {
-        input: PathBuf,
-        error: String,
     },
     TaskStarted {
         index: usize,
@@ -70,10 +172,9 @@ pub enum RunEvent {
         total: usize,
         candidate: Option<usize>,
         quality: u8,
-        status: TaskStatus,
+        result: TaskResult,
         vmaf: Option<f64>,
         output_bytes: Option<u64>,
-        error: Option<String>,
     },
     EmulationChartRendered {
         png: Option<PathBuf>,
@@ -94,7 +195,6 @@ pub enum RunEvent {
         index: usize,
         total: usize,
         input: PathBuf,
-        status: TaskStatus,
-        error: Option<String>,
+        result: TaskResult,
     },
 }

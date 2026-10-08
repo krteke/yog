@@ -10,9 +10,7 @@ use ratatui::{
 use yog_runtime::{RunStatus, event::RunPhase};
 
 use crate::{
-    run::{
-        NoticeKind, ResultStatus, RunKind, RunPanel, RunStage, RunState, TaskResult, format_bytes,
-    },
+    run::{NoticeKind, RunKind, RunPanel, RunStage, RunState, TaskResult, format_bytes},
     ui::DrawApp,
 };
 
@@ -353,7 +351,7 @@ impl DrawRuning for Frame<'_> {
         }
 
         let selected = &state.results[state.result_cursor];
-        let has_detail = selected.error.is_some() || selected.output.is_some();
+        let has_detail = selected.result.message().is_some() || selected.output.is_some();
         let detail_height = if has_detail && content.height >= 3 {
             2
         } else {
@@ -376,13 +374,13 @@ impl DrawRuning for Frame<'_> {
         self.render_widget(Paragraph::new(lines), rows[0]);
 
         if detail_height > 0 {
-            let detail = selected.error.as_ref().map_or_else(
+            let detail = selected.result.message().map_or_else(
                 || format!("Output: {}", selected.output.as_ref().unwrap().display()),
                 |error| format!("Error: {error}"),
             );
             self.render_widget(
                 Paragraph::new(detail)
-                    .style(Style::default().fg(if selected.error.is_some() {
+                    .style(Style::default().fg(if selected.result.message().is_some() {
                         Color::LightRed
                     } else {
                         Color::Gray
@@ -474,11 +472,11 @@ fn window_start(cursor: usize, len: usize, visible: usize) -> usize {
 }
 
 fn result_line(result: &TaskResult, selected: bool, inline_detail: bool) -> Line<'static> {
-    let (marker, color) = match result.status {
-        ResultStatus::Success => ("✓", Color::Green),
-        ResultStatus::Failure => ("×", Color::LightRed),
-        ResultStatus::Cancelled => ("■", Color::Yellow),
-        ResultStatus::Skipped => ("·", Color::Yellow),
+    let (marker, color) = match result.result.status() {
+        yog_runtime::event::TaskStatus::Success => ("✓", Color::Green),
+        yog_runtime::event::TaskStatus::Failure => ("×", Color::LightRed),
+        yog_runtime::event::TaskStatus::Cancelled => ("■", Color::Yellow),
+        yog_runtime::event::TaskStatus::Skipped => ("·", Color::Yellow),
     };
     let position = result
         .position
@@ -496,9 +494,9 @@ fn result_line(result: &TaskResult, selected: bool, inline_detail: bool) -> Line
         ),
     ];
     if selected && inline_detail {
-        if let Some(error) = &result.error {
+        if let Some(error) = result.result.message() {
             spans.push(Span::styled(
-                format!(" — {error}"),
+                format!(" — {}: {error}", result.result),
                 Style::default().fg(Color::LightRed),
             ));
         } else if let Some(output) = &result.output {
@@ -529,6 +527,7 @@ fn phase_label(phase: RunPhase) -> &'static str {
     match phase {
         RunPhase::Discovering => "Discovering",
         RunPhase::Probing => "Probing",
+        RunPhase::PreparingOutput => "Preparing output",
         RunPhase::Planning => "Planning",
         RunPhase::Predicting => "Predicting",
         RunPhase::Transcoding => "Transcoding",

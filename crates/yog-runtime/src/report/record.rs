@@ -11,23 +11,26 @@ use yog_core::{
     ffprobe::types::{MediaInfo, MediaStream},
 };
 
-use crate::report::{Record, Status, ToAbsolute, container, percent, transcode::TranscodeResult};
+use crate::{
+    event::TaskResult,
+    report::{Record, ToAbsolute, container, percent, transcode::TranscodeResult},
+};
 
 pub trait TaskRecord {
-    fn finish(self, status: Status, error: Option<String>) -> Record;
+    fn finish(self, result: TaskResult) -> Record;
 }
 
 #[derive(Debug, Serialize)]
 pub struct SkippedRecord {
     input: String,
-    reason: String,
+    result: TaskResult,
 }
 
 impl SkippedRecord {
-    pub fn new(input: &Path, error: &anyhow::Error) -> Self {
+    pub fn new(input: &Path, result: TaskResult) -> Self {
         Self {
             input: input.to_absolute(),
-            reason: format!("{error:#}"),
+            result,
         }
     }
 }
@@ -247,7 +250,7 @@ impl From<&MediaStream> for AudioStreamRecord {
 #[derive(Debug, Serialize)]
 pub struct PredictRecord {
     input: String,
-    status: Status,
+    result: TaskResult,
     container: Option<String>,
     video: VideoRecord,
     decoding: String,
@@ -259,14 +262,13 @@ pub struct PredictRecord {
     size_percent: Option<f64>,
     quality: Option<QualityRecord>,
     samples: Vec<SampleRecord>,
-    error: Option<String>,
 }
 
 impl PredictRecord {
     pub fn new(request: &TranscodeRequest, options: PredictionOptions) -> Self {
         Self {
             input: request.input.to_absolute(),
-            status: Status::Success,
+            result: TaskResult::Success,
             container: None,
             video: VideoRecord::from(&request.video),
             decoding: request.decoding.to_string(),
@@ -283,7 +285,6 @@ impl PredictRecord {
             size_percent: None,
             quality: None,
             samples: Vec::new(),
-            error: None,
         }
     }
 
@@ -317,15 +318,14 @@ impl PredictRecord {
         });
     }
 
-    pub fn set_outcome(&mut self, status: Status, error: Option<String>) {
-        self.status = status;
-        self.error = error;
+    pub fn set_result(&mut self, result: TaskResult) {
+        self.result = result;
     }
 }
 
 impl TaskRecord for PredictRecord {
-    fn finish(mut self, status: Status, error: Option<String>) -> Record {
-        self.set_outcome(status, error);
+    fn finish(mut self, result: TaskResult) -> Record {
+        self.set_result(result);
         Record::Predict(self)
     }
 }
@@ -383,8 +383,8 @@ impl EmulateRecord {
 }
 
 impl TaskRecord for EmulateRecord {
-    fn finish(mut self, status: Status, error: Option<String>) -> Record {
-        self.predict.set_outcome(status, error);
+    fn finish(mut self, result: TaskResult) -> Record {
+        self.predict.set_result(result);
         Record::Emulate(self)
     }
 }
@@ -393,15 +393,14 @@ impl TaskRecord for EmulateRecord {
 pub struct TranscodeRecord {
     input: String,
     output: String,
-    status: Status,
+    result: TaskResult,
     container: Option<String>,
     video: VideoRecord,
     decoding: String,
     source: Option<SourceRecord>,
-    result: Option<TranscodeResult>,
+    metrics: Option<TranscodeResult>,
     verify: Option<VerifyRecord>,
     vmaf: Option<VmafRecord>,
-    error: Option<String>,
 }
 
 impl TranscodeRecord {
@@ -409,15 +408,14 @@ impl TranscodeRecord {
         Self {
             input: request.input.to_absolute(),
             output: request.output.to_absolute(),
-            status: Status::Success,
+            result: TaskResult::Success,
             container: None,
             video: VideoRecord::from(&request.video),
             decoding: request.decoding.to_string(),
             source: None,
-            result: None,
+            metrics: None,
             verify: None,
             vmaf: None,
-            error: None,
         }
     }
 
@@ -433,7 +431,7 @@ impl TranscodeRecord {
             .and_then(|source| source.bytes)
             .zip(result.bytes)
             .and_then(|(total, bytes)| percent(bytes, total));
-        self.result = Some(result);
+        self.metrics = Some(result);
     }
 
     pub fn fill_verify(&mut self, verify: VerifyRecord) {
@@ -446,9 +444,8 @@ impl TranscodeRecord {
 }
 
 impl TaskRecord for TranscodeRecord {
-    fn finish(mut self, status: Status, error: Option<String>) -> Record {
-        self.status = status;
-        self.error = error;
+    fn finish(mut self, result: TaskResult) -> Record {
+        self.result = result;
         Record::Transcode(self)
     }
 }

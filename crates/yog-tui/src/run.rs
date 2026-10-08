@@ -7,7 +7,7 @@ use std::{
 use yog_core::ffmpeg::{prediction::Prediction, progress::Progress};
 use yog_runtime::{
     Operation, RunOutcome, RunStatus,
-    event::{RunEvent, RunPhase, TaskStatus, VmafOutcome},
+    event::{RunEvent, RunPhase, TaskResult as RuntimeTaskResult, TaskStatus, VmafOutcome},
 };
 
 const MAX_NOTICES: usize = 100;
@@ -57,14 +57,6 @@ pub enum RunPanel {
     Events,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResultStatus {
-    Success,
-    Failure,
-    Cancelled,
-    Skipped,
-}
-
 pub struct Notice {
     pub kind: NoticeKind,
     pub text: String,
@@ -74,8 +66,7 @@ pub struct TaskResult {
     pub position: Option<(usize, usize)>,
     pub input: PathBuf,
     pub output: Option<PathBuf>,
-    pub status: ResultStatus,
-    pub error: Option<String>,
+    pub result: RuntimeTaskResult,
 }
 
 pub struct PredictionSummary {
@@ -190,20 +181,6 @@ impl RunState {
             RunEvent::BatchDiscovered { total } => {
                 self.task_total = total;
             }
-            RunEvent::InputSkipped { input, error } => {
-                self.skipped += 1;
-                self.push_notice(
-                    NoticeKind::Warning,
-                    format!("Skipped {}: {error}", input.display()),
-                );
-                self.push_result(TaskResult {
-                    position: None,
-                    input,
-                    output: None,
-                    status: ResultStatus::Skipped,
-                    error: Some(error),
-                });
-            }
             RunEvent::TaskStarted {
                 index,
                 total,
@@ -271,10 +248,9 @@ impl RunState {
                 total,
                 candidate,
                 quality,
-                status,
+                result,
                 vmaf,
                 output_bytes,
-                error,
             } => {
                 let state = self
                     .emulation
@@ -284,7 +260,7 @@ impl RunState {
                 debug_assert_eq!(state.total, total);
                 debug_assert_eq!(state.candidate, candidate);
                 debug_assert_eq!(state.quality, quality);
-                match status {
+                match result.status() {
                     TaskStatus::Success => {
                         state.completed = index;
                         state.succeeded += 1;
@@ -296,11 +272,12 @@ impl RunState {
                         state.completed = index;
                         state.failed += 1;
                         state.last_status = Some(TaskStatus::Failure);
-                        if let Some(error) = error {
-                            self.push_notice(NoticeKind::Error, error);
+                        if let Some(error) = result.message() {
+                            self.push_notice(NoticeKind::Error, format!("{result}: {error}"));
                         }
                     }
                     TaskStatus::Cancelled => state.last_status = Some(TaskStatus::Cancelled),
+                    TaskStatus::Skipped => unreachable!("emulation points do not skip"),
                 }
             }
             RunEvent::EmulationChartRendered { .. } => {}
@@ -326,25 +303,28 @@ impl RunState {
                 index,
                 total,
                 input,
-                status,
-                error,
+                result,
             } => {
-                let result_status = match status {
+                match result.status() {
                     TaskStatus::Success => {
                         self.succeeded += 1;
                         self.progress.finished = true;
-                        ResultStatus::Success
                     }
                     TaskStatus::Failure => {
                         self.failed += 1;
                         self.progress.finished = true;
-                        if let Some(error) = &error {
-                            self.push_notice(NoticeKind::Error, error.clone());
-                        }
-                        ResultStatus::Failure
                     }
-                    TaskStatus::Cancelled => ResultStatus::Cancelled,
-                };
+                    TaskStatus::Skipped => self.skipped += 1,
+                    TaskStatus::Cancelled => {}
+                }
+                if let Some(message) = result.message() {
+                    let kind = if result.status() == TaskStatus::Failure {
+                        NoticeKind::Error
+                    } else {
+                        NoticeKind::Warning
+                    };
+                    self.push_notice(kind, format!("{result}: {}: {message}", input.display()));
+                }
                 let output = (self.input.as_ref() == Some(&input))
                     .then(|| self.output.clone())
                     .flatten();
@@ -352,8 +332,7 @@ impl RunState {
                     position: Some((index, total)),
                     input,
                     output,
-                    status: result_status,
-                    error,
+                    result,
                 });
             }
         }
@@ -384,7 +363,7 @@ impl RunState {
             self.result_cursor = self
                 .results
                 .iter()
-                .position(|result| result.status == ResultStatus::Failure)
+                .position(|result| result.result.status() == TaskStatus::Failure)
                 .unwrap_or_else(|| self.results.len().saturating_sub(1));
         }
     }
@@ -507,15 +486,20 @@ mod tests {
     fn batch_skips_update_immediately_and_are_not_counted_twice_at_completion() {
         let mut state = RunState::new(&Operation::Transcode);
         state.handle_event(RunEvent::BatchDiscovered { total: 2 });
-        state.handle_event(RunEvent::InputSkipped {
+        state.handle_event(RunEvent::TaskFinished {
             input: "notes.txt".into(),
-            error: "probe failed".into(),
+            index: 1,
+            total: 1,
+            result: yog_runtime::event::TaskResult::Skipped {
+                reason: yog_runtime::event::SkipReason::NoVideo,
+                message: "probe failed".into(),
+            },
         });
 
         assert_eq!(state.task_total, 2);
         assert_eq!(state.skipped, 1);
         assert_eq!(state.failed, 0);
-        assert_eq!(state.results[0].status, ResultStatus::Skipped);
+        assert_eq!(state.results[0].result.status(), TaskStatus::Skipped);
 
         state.finish(RunOutcome::Batch(yog_runtime::BatchOutcome {
             total: 2,
@@ -561,8 +545,7 @@ mod tests {
             index: 1,
             total: 1,
             input: "input.mkv".into(),
-            status: TaskStatus::Success,
-            error: None,
+            result: yog_runtime::event::TaskResult::Success,
         });
 
         assert_eq!(state.succeeded, 1);
@@ -629,10 +612,9 @@ mod tests {
             total: 2,
             candidate: None,
             quality: 20,
-            status: TaskStatus::Success,
+            result: yog_runtime::event::TaskResult::Success,
             vmaf: Some(95.5),
             output_bytes: Some(838_860_800),
-            error: None,
         });
 
         assert_eq!(state.progress_ratio(), 0.5);
@@ -652,16 +634,22 @@ mod tests {
             total: 2,
             candidate: None,
             quality: 21,
-            status: TaskStatus::Failure,
+            result: yog_runtime::event::TaskResult::Failed {
+                phase: RunPhase::Predicting,
+                timed_out: false,
+                message: "prediction failed".to_owned(),
+            },
             vmaf: None,
             output_bytes: None,
-            error: Some("prediction failed".to_owned()),
         });
 
         assert_eq!(state.progress_ratio(), 1.0);
         assert_eq!(state.emulation.as_ref().unwrap().succeeded, 1);
         assert_eq!(state.emulation.as_ref().unwrap().failed, 1);
-        assert_eq!(state.notices[0].text, "prediction failed");
+        assert_eq!(
+            state.notices[0].text,
+            "Failed · Predicting: prediction failed"
+        );
     }
 
     #[test]
@@ -677,8 +665,11 @@ mod tests {
             index: 2,
             total: 3,
             input: "broken.mkv".into(),
-            status: TaskStatus::Failure,
-            error: Some("encoder failed".to_owned()),
+            result: yog_runtime::event::TaskResult::Failed {
+                phase: RunPhase::Transcoding,
+                timed_out: false,
+                message: "encoder failed".to_owned(),
+            },
         });
 
         let result = &state.results[0];
@@ -688,8 +679,8 @@ mod tests {
             result.output.as_deref(),
             Some(std::path::Path::new("broken.mp4"))
         );
-        assert_eq!(result.status, ResultStatus::Failure);
-        assert_eq!(result.error.as_deref(), Some("encoder failed"));
+        assert_eq!(result.result.status(), TaskStatus::Failure);
+        assert_eq!(result.result.message(), Some("encoder failed"));
     }
 
     #[test]
@@ -713,10 +704,9 @@ mod tests {
             total: 1,
             candidate: None,
             quality: 20,
-            status: TaskStatus::Cancelled,
+            result: yog_runtime::event::TaskResult::Cancelled,
             vmaf: None,
             output_bytes: None,
-            error: None,
         });
 
         assert_eq!(

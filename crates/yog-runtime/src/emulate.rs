@@ -201,22 +201,26 @@ impl Transcoder {
             return Err(RunError::Cancelled);
         }
         if !request.input.exists() {
-            return Err(RunError::Failed(anyhow::anyhow!(
-                "input file does not exist"
-            )));
+            return Err(RunError::at(
+                RunPhase::Probing,
+                anyhow::anyhow!("input file does not exist"),
+            ));
         }
         let source_bytes = request
             .input
             .metadata()
-            .with_context(|| format!("cannot read input metadata {}", request.input.display()))?
+            .with_context(|| format!("cannot read input metadata {}", request.input.display()))
+            .map_err(|error| RunError::at(RunPhase::Probing, error))?
             .len();
 
+        diagnostics.event(RunEvent::PhaseChanged(RunPhase::PreparingOutput));
         chart::check_paths(
             options.png.as_deref(),
             options.svg.as_deref(),
             request.overwrite,
         )
-        .context("cannot prepare emulation chart output")?;
+        .context("cannot prepare emulation chart output")
+        .map_err(|error| RunError::at(RunPhase::PreparingOutput, error))?;
         diagnostics.event(RunEvent::PhaseChanged(RunPhase::Probing));
         let media = self.probe(&request.input).await?;
         let prediction_options = self.config.prediction.into();
@@ -283,9 +287,10 @@ impl Transcoder {
                         (TaskOutcome::Success, Some(vmaf), Some(output_bytes))
                     }
                     Err(error) => (
-                        error
-                            .context(format!("prediction failed at {parameter} {quality}"))
-                            .into(),
+                        TaskOutcome::Error(RunError::at(
+                            RunPhase::Predicting,
+                            error.context(format!("prediction failed at {parameter} {quality}")),
+                        )),
                         None,
                         None,
                     ),
@@ -296,16 +301,18 @@ impl Transcoder {
                     total,
                     candidate: job.index,
                     quality,
-                    status: outcome.status(),
+                    result: outcome.result(),
                     vmaf,
                     output_bytes,
-                    error: outcome.error(),
                 });
 
                 match outcome {
                     TaskOutcome::Success => {}
-                    TaskOutcome::Failed(error) => failures.push(error),
-                    TaskOutcome::Cancelled => return Err(RunError::Cancelled),
+                    TaskOutcome::Error(error @ RunError::Failed { .. }) => failures.push(error),
+                    TaskOutcome::Error(RunError::Skipped { .. }) => {
+                        unreachable!("emulation points do not skip")
+                    }
+                    TaskOutcome::Error(RunError::Cancelled) => return Err(RunError::Cancelled),
                 }
             }
 
@@ -322,12 +329,17 @@ impl Transcoder {
             return Err(RunError::Cancelled);
         }
         if succeeded == 0 {
-            let error = failures
+            let failure = failures
                 .into_iter()
                 .next()
-                .expect("an emulation without successful points has a failure")
-                .context("emulation produced no successful points");
-            return Err(RunError::Failed(error));
+                .expect("an emulation without successful points has a failure");
+            let RunError::Failed { phase, error } = failure else {
+                unreachable!()
+            };
+            return Err(RunError::at(
+                phase,
+                error.context("emulation produced no successful points"),
+            ));
         }
 
         diagnostics.event(RunEvent::PhaseChanged(RunPhase::RenderingChart));
@@ -341,7 +353,8 @@ impl Transcoder {
                 self.config.emulation.height.get(),
             ),
         )
-        .context("cannot render emulation chart")?;
+        .context("cannot render emulation chart")
+        .map_err(|error| RunError::at(RunPhase::RenderingChart, error))?;
         diagnostics.event(RunEvent::EmulationChartRendered {
             png: options.png.clone(),
             svg: options.svg.clone(),
@@ -353,8 +366,12 @@ impl Transcoder {
         } else {
             let failed = failures.len();
             let first = failures.into_iter().next().expect("failures is not empty");
-            Err(RunError::Failed(
-                first.context(format!("{failed} emulation point(s) failed")),
+            let RunError::Failed { phase, error } = first else {
+                unreachable!()
+            };
+            Err(RunError::at(
+                phase,
+                error.context(format!("{failed} emulation point(s) failed")),
             ))
         }
     }

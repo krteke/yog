@@ -120,10 +120,13 @@ impl PredictPage {
                             .truncate()
                             .child(name),
                     )
-                    .child(if prediction.is_some() {
-                        Tag::success().small().outline().child("Predicted")
-                    } else {
-                        Tag::danger().small().outline().child("Failed")
+                    .child(match row.result.status() {
+                        TaskStatus::Success => Tag::success().small().outline().child("Predicted"),
+                        TaskStatus::Failure => Tag::danger().small().outline().child("Failed"),
+                        TaskStatus::Skipped => Tag::warning().small().outline().child("Skipped"),
+                        TaskStatus::Cancelled => {
+                            Tag::secondary().small().outline().child("Cancelled")
+                        }
                     }),
             )
             .when_some(prediction, |this, prediction| {
@@ -172,8 +175,17 @@ impl PredictPage {
                     )
                 })
             })
-            .when_some(row.error.clone(), |this, error| {
-                this.child(div().text_sm().text_color(theme.danger).child(error))
+            .when_some(row.result.message().map(str::to_owned), |this, error| {
+                this.child(
+                    div()
+                        .text_sm()
+                        .text_color(if row.result.status() == TaskStatus::Failure {
+                            theme.danger
+                        } else {
+                            theme.muted_foreground
+                        })
+                        .child(format!("{}: {error}", row.result)),
+                )
             })
             .child(
                 div()
@@ -182,10 +194,9 @@ impl PredictPage {
                     .truncate()
                     .child(row.path.display().to_string()),
             );
+        let row_element = row_element.id(format!("predict-result-{}", row.path.display()));
         #[cfg(test)]
-        let row_element = row_element
-            .id(format!("predict-result-{}", row.path.display()))
-            .test_support();
+        let row_element = row_element.test_support();
         row_element.into_any_element()
     }
 
@@ -215,6 +226,7 @@ impl PredictPage {
                                     })
                                     .when(!matches!(page.stage, Stage::Idle), |this| {
                                         this.child(page.render_summary(cx))
+                                            .child(page.result_filter.clone())
                                     }),
                             )
                             .into_any_element()
@@ -222,7 +234,10 @@ impl PredictPage {
                         div()
                             .px_6()
                             .pb_4()
-                            .child(page.render_result(&page.results[index - 1], cx))
+                            .child(page.render_result(
+                                &page.results[page.result_filter.read(cx).source_index(index - 1)],
+                                cx,
+                            ))
                             .into_any_element()
                     }
                 })

@@ -11,18 +11,18 @@ use gpui_kit::component::{
     progress::Progress as ProgressBar,
     tag::Tag,
 };
+#[cfg(test)]
+use gpui_kit::test::TestSupportExt as _;
 use gpui_kit::{
-    AppContext as _, Context, Entity, EventEmitter, IntoElement, ListAlignment, ListState,
-    ParentElement as _, Render, Styled as _, Subscription, Window, div,
+    AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
+    ListAlignment, ListState, ParentElement as _, Render, Styled as _, Subscription, Window, div,
     prelude::FluentBuilder as _, px,
 };
-#[cfg(test)]
-use gpui_kit::{InteractiveElement as _, test::TestSupportExt as _};
 use tokio_util::sync::CancellationToken;
 use yog_core::ffmpeg::progress::Progress;
 use yog_runtime::{
     RunOutcome, RunStatus,
-    event::{RunEvent, RunPhase, TaskStatus, VmafOutcome},
+    event::{RunEvent, RunPhase, TaskResult as RuntimeTaskResult, TaskStatus, VmafOutcome},
 };
 
 use self::settings::TranscodeSettings;
@@ -30,6 +30,7 @@ use super::{
     components,
     execution::{self, Activity, ActivityChanged, WorkerMessage},
     messages::{ExpansionChanged, MessageLevel, MessageSource, Messages, NewMessage},
+    result_filter::ResultFilter,
     settings::SettingsPanel,
     source::SourcePicker,
 };
@@ -43,15 +44,7 @@ enum Stage {
 
 struct TaskResult {
     name: String,
-    status: ResultStatus,
-    error: Option<String>,
-}
-
-enum ResultStatus {
-    Success,
-    Failure,
-    Cancelled,
-    Skipped,
+    result: RuntimeTaskResult,
 }
 
 pub struct TranscodePage {
@@ -77,6 +70,8 @@ pub struct TranscodePage {
     finished_elapsed: Option<Duration>,
     results: Vec<TaskResult>,
     work_list: ListState,
+    result_filter: Entity<ResultFilter>,
+    _filter_observation: Subscription,
     _source_observation: Subscription,
     _settings_observation: Subscription,
     _messages_subscription: Subscription,
@@ -97,6 +92,10 @@ impl TranscodePage {
         let settings_observation = cx.observe(&settings, |_, _, cx| cx.notify());
         let messages_subscription =
             cx.subscribe(&messages, |_, _, _: &ExpansionChanged, cx| cx.notify());
+        let work_list = ListState::new(1, ListAlignment::Top, px(300.));
+        let result_filter =
+            cx.new(|cx| ResultFilter::new(true, false, work_list.clone(), window, cx));
+        let filter_observation = cx.observe(&result_filter, |_, _, cx| cx.notify());
         Self {
             source,
             settings,
@@ -119,7 +118,9 @@ impl TranscodePage {
             started: None,
             finished_elapsed: None,
             results: Vec::new(),
-            work_list: ListState::new(1, ListAlignment::Top, px(300.)),
+            work_list,
+            result_filter,
+            _filter_observation: filter_observation,
             _source_observation: source_observation,
             _settings_observation: settings_observation,
             _messages_subscription: messages_subscription,
@@ -157,7 +158,8 @@ impl TranscodePage {
         self.started = Some(Instant::now());
         self.finished_elapsed = None;
         self.results.clear();
-        self.work_list.reset(1);
+        self.result_filter
+            .update(cx, |filter, cx| filter.reset(window, cx));
         self.messages.update(cx, |messages, cx| {
             messages.clear(window, cx);
             messages.push(
@@ -254,20 +256,6 @@ impl TranscodePage {
                         cx,
                     );
                 }
-                RunEvent::InputSkipped { input, error } => {
-                    self.skipped += 1;
-                    self.message(
-                        MessageLevel::Warning,
-                        format!("Skipped {}: {error}", input.display()),
-                        window,
-                        cx,
-                    );
-                    self.results.push(TaskResult {
-                        name: input.display().to_string(),
-                        status: ResultStatus::Skipped,
-                        error: Some(error),
-                    });
-                }
                 RunEvent::TaskStarted {
                     index,
                     total,
@@ -323,46 +311,45 @@ impl TranscodePage {
                 RunEvent::TaskFinished {
                     input,
                     total,
-                    status,
-                    error,
+                    result,
                     ..
                 } => {
-                    let (level, label) = match status {
-                        TaskStatus::Success => (MessageLevel::Info, "Completed"),
-                        TaskStatus::Failure => (MessageLevel::Error, "Failed"),
-                        TaskStatus::Cancelled => (MessageLevel::Warning, "Cancelled"),
+                    let level = match result.status() {
+                        TaskStatus::Success => {
+                            self.succeeded += 1;
+                            MessageLevel::Info
+                        }
+                        TaskStatus::Failure => {
+                            self.failed += 1;
+                            MessageLevel::Error
+                        }
+                        TaskStatus::Skipped => {
+                            self.skipped += 1;
+                            MessageLevel::Warning
+                        }
+                        TaskStatus::Cancelled => MessageLevel::Warning,
                     };
                     self.message(
                         level,
                         format!(
-                            "{label}: {}{}",
+                            "{result}: {}{}",
                             input.display(),
-                            error
-                                .as_ref()
-                                .map_or(String::new(), |error| format!(": {error}"))
+                            result
+                                .message()
+                                .map_or(String::new(), |message| format!(": {message}"))
                         ),
                         window,
                         cx,
                     );
-                    match status {
-                        TaskStatus::Success => self.succeeded += 1,
-                        TaskStatus::Failure => self.failed += 1,
-                        TaskStatus::Cancelled => {}
-                    }
-                    if status == TaskStatus::Success && total == 1 {
+                    if result.status() == TaskStatus::Success && total == 1 {
                         self.completed_output = self.current_output.clone();
                     }
-                    if total == 1 || status != TaskStatus::Success {
-                        self.results.push(TaskResult {
-                            name: input.display().to_string(),
-                            status: match status {
-                                TaskStatus::Success => ResultStatus::Success,
-                                TaskStatus::Failure => ResultStatus::Failure,
-                                TaskStatus::Cancelled => ResultStatus::Cancelled,
-                            },
-                            error,
-                        });
-                    }
+                    self.result_filter
+                        .update(cx, |filter, cx| filter.append(&result, window, cx));
+                    self.results.push(TaskResult {
+                        name: input.display().to_string(),
+                        result,
+                    });
                 }
                 _ => {}
             },
@@ -402,11 +389,6 @@ impl TranscodePage {
                     cx,
                 );
             }
-        }
-        let count = self.results.len() + 1;
-        let previous = self.work_list.item_count();
-        if count > previous {
-            self.work_list.splice(previous..previous, count - previous);
         }
         self.work_list.remeasure_items(0..1);
         cx.emit(ActivityChanged);
@@ -672,11 +654,11 @@ impl TranscodePage {
     fn render_task_outcome(&self, index: usize, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let result = &self.results[index];
-        let (label, tag) = match result.status {
-            ResultStatus::Success => ("Completed", Tag::success()),
-            ResultStatus::Failure => ("Failed", Tag::danger()),
-            ResultStatus::Cancelled => ("Cancelled", Tag::secondary()),
-            ResultStatus::Skipped => ("Skipped", Tag::warning()),
+        let (label, tag) = match result.result.status() {
+            TaskStatus::Success => ("Completed", Tag::success()),
+            TaskStatus::Failure => ("Failed", Tag::danger()),
+            TaskStatus::Cancelled => ("Cancelled", Tag::secondary()),
+            TaskStatus::Skipped => ("Skipped", Tag::warning()),
         };
         let file = Path::new(&result.name)
             .file_name()
@@ -717,11 +699,21 @@ impl TranscodePage {
                     )
                     .child(tag.small().outline().child(label)),
             )
-            .when_some(result.error.clone(), |this, error| {
-                this.child(div().text_sm().text_color(theme.danger).child(error))
+            .when_some(result.result.message().map(str::to_owned), |this, error| {
+                this.child(
+                    div()
+                        .text_sm()
+                        .text_color(if result.result.status() == TaskStatus::Failure {
+                            theme.danger
+                        } else {
+                            theme.muted_foreground
+                        })
+                        .child(format!("{}: {error}", result.result)),
+                )
             });
+        let row = row.id(format!("transcode-result-{}", result.name));
         #[cfg(test)]
-        let row = row.id(("transcode-result", index)).test_support();
+        let row = row.test_support();
         row
     }
 
@@ -736,6 +728,7 @@ impl TranscodePage {
             })
             .when(!matches!(self.stage, Stage::Idle), |this| {
                 this.child(self.render_run_summary(cx))
+                    .child(self.result_filter.clone())
             })
             .when(!self.results.is_empty(), |this| {
                 this.child(div().font_medium().child("Task outcomes"))
@@ -763,7 +756,10 @@ impl TranscodePage {
                         div()
                             .px_6()
                             .pb_4()
-                            .child(page.render_task_outcome(index - 1, cx))
+                            .child(page.render_task_outcome(
+                                page.result_filter.read(cx).source_index(index - 1),
+                                cx,
+                            ))
                             .into_any_element()
                     }
                 })
@@ -890,16 +886,30 @@ mod tests {
                 page.stage = Stage::Running;
                 for index in 0..10_000 {
                     page.handle_message(
-                        WorkerMessage::Event(RunEvent::InputSkipped {
+                        WorkerMessage::Event(RunEvent::TaskFinished {
                             input: format!("input-{index}.mkv").into(),
-                            error: "Invalid input".into(),
+                            index: 1,
+                            total: 1,
+                            result: if index == 0 {
+                                yog_runtime::event::TaskResult::Success
+                            } else {
+                                yog_runtime::event::TaskResult::Skipped {
+                                    reason: yog_runtime::event::SkipReason::NoVideo,
+                                    message: "Invalid input".into(),
+                                }
+                            },
                         }),
                         window,
                         cx,
                     );
                 }
             });
-            assert_eq!(page.read(cx).skipped, 10_000);
+            assert_eq!(page.read(cx).skipped, 9_999);
+            assert_eq!(page.read(cx).succeeded, 1);
+            assert_eq!(
+                page.read(cx).results[0].result.status(),
+                yog_runtime::event::TaskStatus::Success
+            );
             page.read(cx).work_list.scroll_to(gpui_kit::ListOffset {
                 item_ix: 1,
                 offset_in_item: px(0.),
@@ -911,8 +921,8 @@ mod tests {
                 .filter(|item| {
                     matches!(
                         item.path().last(),
-                        Some(gpui_kit::ElementId::NamedInteger(name, _))
-                            if name.as_ref() == "transcode-result"
+                        Some(gpui_kit::ElementId::Name(name))
+                            if name.starts_with("transcode-result-")
                     )
                 })
                 .count();
@@ -925,7 +935,7 @@ mod tests {
                 "materialized {row_count} rows"
             );
             assert!(
-                window.try_find(("transcode-result", 9_999usize)).is_none(),
+                window.try_find("transcode-result-input-9999.mkv").is_none(),
                 "offscreen task was materialized"
             );
             assert_eq!(page.read(cx).results.len(), 10_000);
@@ -936,10 +946,10 @@ mod tests {
             );
             window.render_frame(cx);
             assert!(
-                window.find(("transcode-result", 9_999usize)).visible(),
+                window.find("transcode-result-input-9999.mkv").visible(),
                 "last result is unreachable"
             );
-            assert!(window.try_find(("transcode-result", 0usize)).is_none());
+            assert!(window.try_find("transcode-result-input-0.mkv").is_none());
             page.update(cx, |page, cx| {
                 page.handle_message(
                     WorkerMessage::Event(RunEvent::Progress {
@@ -955,7 +965,7 @@ mod tests {
             });
             window.render_frame(cx);
             assert!(
-                window.find(("transcode-result", 9_999usize)).visible(),
+                window.find("transcode-result-input-9999.mkv").visible(),
                 "progress reset the reader's position"
             );
         })
@@ -964,7 +974,7 @@ mod tests {
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             assert!(
-                window.find(("transcode-result", 9_999usize)).visible(),
+                window.find("transcode-result-input-9999.mkv").visible(),
                 "resize lost the last result"
             );
             window.scroll(
@@ -973,7 +983,7 @@ mod tests {
                 cx,
             );
             assert!(window.find("open-video").visible());
-            assert!(window.try_find(("transcode-result", 9_999usize)).is_none());
+            assert!(window.try_find("transcode-result-input-9999.mkv").is_none());
         })
         .unwrap();
     }
@@ -1081,9 +1091,14 @@ mod tests {
                 page.stage = Stage::Running;
                 page.phase = Some(RunPhase::Discovering);
                 page.handle_message(
-                    WorkerMessage::Event(RunEvent::InputSkipped {
+                    WorkerMessage::Event(RunEvent::TaskFinished {
                         input: "input.mkv".into(),
-                        error: "Invalid input".into(),
+                        index: 1,
+                        total: 1,
+                        result: yog_runtime::event::TaskResult::Skipped {
+                            reason: yog_runtime::event::SkipReason::NoVideo,
+                            message: "Invalid input".into(),
+                        },
                     }),
                     window,
                     cx,
@@ -1101,7 +1116,7 @@ mod tests {
                 headline.size.width >= viewport.size.width - px(200.),
                 "summary did not fill the work area: headline {headline:?}, viewport {viewport:?}"
             );
-            let result = window.find(("transcode-result", 0usize)).bounds();
+            let result = window.find("transcode-result-input.mkv").bounds();
             assert!(
                 result.size.width >= viewport.size.width - px(64.),
                 "result did not fill the work area: card {result:?}, viewport {viewport:?}"

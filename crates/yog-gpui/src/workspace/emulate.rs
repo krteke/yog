@@ -30,7 +30,7 @@ use yog_core::ffmpeg::{
 };
 use yog_runtime::{
     Candidate, Command, Config, EmulationOptions, Operation, RunOutcome, RunStatus, Validate,
-    event::{RunEvent, RunPhase, TaskStatus},
+    event::{RunEvent, RunPhase, TaskResult, TaskStatus},
     parse_quality_points,
 };
 
@@ -38,6 +38,7 @@ use super::{
     components,
     execution::{self, Activity, ActivityChanged, RunRequest, WorkerMessage},
     messages::{ExpansionChanged, MessageLevel, MessageSource, Messages, NewMessage},
+    result_filter::ResultFilter,
     settings::SettingsPanel,
     source::SourcePicker,
     video::{CONTAINERS, Choice, VideoInputs, container, selected},
@@ -63,10 +64,9 @@ struct Point {
     label: String,
     parameter: &'static str,
     quality: u8,
-    status: TaskStatus,
+    result: TaskResult,
     vmaf: Option<f64>,
     bytes: Option<u64>,
-    error: Option<String>,
 }
 
 struct CurrentPoint {
@@ -102,6 +102,8 @@ pub struct EmulatePage {
     failed: usize,
     points: Vec<Point>,
     work_list: ListState,
+    result_filter: Entity<ResultFilter>,
+    _filter_observation: Subscription,
     chart_paths: Vec<PathBuf>,
     chart_aspect_ratio: f32,
     started: Option<Instant>,
@@ -141,6 +143,10 @@ impl EmulatePage {
         let inspector_focus = cx.focus_handle();
         let candidate_list = ListState::new(2, ListAlignment::Top, px(300.));
         candidate_list.splice_focusable(0..1, [Some(inspector_focus.clone())]);
+        let work_list = ListState::new(1, ListAlignment::Top, px(300.));
+        let result_filter =
+            cx.new(|cx| ResultFilter::new(false, true, work_list.clone(), window, cx));
+        let filter_observation = cx.observe(&result_filter, |_, _, cx| cx.notify());
         Self {
             source,
             preferences,
@@ -165,7 +171,9 @@ impl EmulatePage {
             succeeded: 0,
             failed: 0,
             points: Vec::new(),
-            work_list: ListState::new(1, ListAlignment::Top, px(300.)),
+            work_list,
+            result_filter,
+            _filter_observation: filter_observation,
             chart_paths: Vec::new(),
             chart_aspect_ratio: chart_size.width.get() as f32 / chart_size.height.get() as f32,
             started: None,
@@ -366,7 +374,8 @@ impl EmulatePage {
         self.succeeded = 0;
         self.failed = 0;
         self.points.clear();
-        self.work_list.reset(1);
+        self.result_filter
+            .update(cx, |filter, cx| filter.reset(window, cx));
         self.started = Some(Instant::now());
         self.elapsed = None;
         self.messages
@@ -465,10 +474,9 @@ impl EmulatePage {
                     total,
                     candidate,
                     quality,
-                    status,
+                    result,
                     vmaf,
                     output_bytes,
-                    error,
                 } => {
                     let current = self
                         .current
@@ -479,28 +487,30 @@ impl EmulatePage {
                         (index, candidate, quality)
                     );
                     self.total = total;
-                    match status {
+                    match result.status() {
                         TaskStatus::Success => self.succeeded += 1,
                         TaskStatus::Failure => self.failed += 1,
                         TaskStatus::Cancelled => {}
+                        TaskStatus::Skipped => unreachable!("emulation points do not skip"),
                     }
-                    if let Some(error) = &error {
+                    if let Some(error) = result.message() {
                         self.message(
                             MessageLevel::Error,
-                            format!("{} {}: {error}", current.parameter, quality),
+                            format!("{result}: {} {}: {error}", current.parameter, quality),
                             window,
                             cx,
                         );
                     }
+                    self.result_filter
+                        .update(cx, |filter, cx| filter.append(&result, window, cx));
                     self.points.push(Point {
                         candidate,
                         label: current.label,
                         parameter: current.parameter,
                         quality,
-                        status,
+                        result,
                         vmaf,
                         bytes: output_bytes,
-                        error,
                     });
                 }
                 RunEvent::EmulationChartRendered { png, svg } => {
@@ -546,12 +556,6 @@ impl EmulatePage {
                     cx,
                 );
             }
-        }
-        let count = self.points.len() + 1;
-        let previous = self.work_list.item_count();
-        if count > previous {
-            // Newest points appear first; splice preserves the reader's older item.
-            self.work_list.splice(1..1, count - previous);
         }
         self.work_list.remeasure_items(0..1);
         cx.emit(ActivityChanged);
@@ -638,10 +642,9 @@ mod tests {
                             total: 1_000,
                             candidate: Some(index),
                             quality: 28,
-                            status: TaskStatus::Success,
+                            result: yog_runtime::event::TaskResult::Success,
                             vmaf: Some(95.),
                             output_bytes: Some(1_000_000),
-                            error: None,
                         }),
                         window,
                         cx,
@@ -695,10 +698,9 @@ mod tests {
                         total: 1_001,
                         candidate: Some(1_001),
                         quality: 28,
-                        status: TaskStatus::Success,
+                        result: yog_runtime::event::TaskResult::Success,
                         vmaf: Some(95.),
                         output_bytes: Some(1_000_000),
-                        error: None,
                     }),
                     window,
                     cx,

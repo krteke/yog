@@ -31,20 +31,25 @@ cargo run -p yog-cli -- -i input.mkv emulate --png quality.png --range 18-30 --e
 JSONL
 
 ```json
-{"transcode":{"input":"/media/in.mkv","output":"/media/out.mkv","status":"success","container":"mkv","video":{"action":"encode","encoder":"libx265","rate":{"kind":"quality","parameter":"CRF","value":23},"preset":"medium","multipass":null,"device":null},"decoding":"software","source":{"bytes":734003200,"duration_seconds":3661.5,"streams":{"video":1,"audio":2,"subtitle":1,"attachment":1,"cover":0,"other":0},"video":{"codec":"hevc","width":1920,"height":1080,"frame_rate":"24000/1001","bit_rate":"1500000"},"audio":[{"codec":"aac","channels":2,"sample_rate":"48000"}]},"result":{"bytes":412345678,"duration_seconds":3661.5,"size_percent":56.18,"elapsed_seconds":812.4,"speed":4.507,"frames":87833,"fps":108.1},"verify":{"outcome":"complete","warnings":[]},"vmaf":{"n_subsample":7,"score":95.25,"error":null},"error":null}}
+{"transcode":{"input":"/media/in.mkv","output":"/media/out.mkv","result":{"status":"success"},"container":"mkv","video":{"action":"encode","encoder":"libx265","rate":{"kind":"quality","parameter":"CRF","value":23},"preset":"medium","multipass":null,"device":null},"decoding":"software","source":{"bytes":734003200,"duration_seconds":3661.5,"streams":{"video":1,"audio":2,"subtitle":1,"attachment":1,"cover":0,"other":0},"video":{"codec":"hevc","width":1920,"height":1080,"frame_rate":"24000/1001","bit_rate":"1500000"},"audio":[{"codec":"aac","channels":2,"sample_rate":"48000"}]},"metrics":{"bytes":412345678,"duration_seconds":3661.5,"size_percent":56.18,"elapsed_seconds":812.4,"speed":4.507,"frames":87833,"fps":108.1},"verify":{"outcome":"complete","warnings":[]},"vmaf":{"n_subsample":7,"score":95.25,"error":null}}}
 ```
 
 ```json
-{"predict":{"input":"/media/in.mkv","status":"success","container":"mkv","video":{"action":"encode","encoder":"libx264","rate":{"kind":"quality","parameter":"CRF","value":23},"preset":null,"multipass":null,"device":null},"decoding":"software","sampling":{"requested_samples":5,"sample_seconds":2.0,"measured_samples":2,"sampled_seconds":4.0},"source":{"bytes":734003200,"duration_seconds":3661.5,"streams":{"video":1,"audio":2,"subtitle":1,"attachment":1,"cover":0,"other":0},"video":{"codec":"h264","width":1920,"height":1080,"frame_rate":"24000/1001","bit_rate":"1500000"},"audio":[{"codec":"aac","channels":2,"sample_rate":"48000"}]},"speed":{"value":2.667,"low":2.0,"high":4.0},"transcode_seconds":{"value":1372.7,"low":915.4,"high":1830.8},"output_bytes":{"value":61712345670,"low":50000000000,"high":70000000000},"size_percent":840.0,"quality":{"frames":240,"source_stream_index":0,"vmaf":{"value":96.5,"low":96.5,"high":96.5},"ssim":{"value":0.99,"low":0.99,"high":0.99},"psnr_y_db":{"value":42.0,"low":42.0,"high":42.0}},"samples":[{"start_seconds":0.0,"duration_seconds":2.0,"encode_seconds":0.75,"speed":2.667,"timed_payload_bytes":3000000,"scored_frames":120,"vmaf":96.5,"ssim":0.99,"psnr_y_db":42.0}],"error":null}}
+{"predict":{"input":"/media/in.mkv","result":{"status":"success"},"container":"mkv","video":{"action":"encode","encoder":"libx264","rate":{"kind":"quality","parameter":"CRF","value":23},"preset":null,"multipass":null,"device":null},"decoding":"software","sampling":{"requested_samples":5,"sample_seconds":2.0,"measured_samples":2,"sampled_seconds":4.0},"source":{"bytes":734003200,"duration_seconds":3661.5,"streams":{"video":1,"audio":2,"subtitle":1,"attachment":1,"cover":0,"other":0},"video":{"codec":"h264","width":1920,"height":1080,"frame_rate":"24000/1001","bit_rate":"1500000"},"audio":[{"codec":"aac","channels":2,"sample_rate":"48000"}]},"speed":{"value":2.667,"low":2.0,"high":4.0},"transcode_seconds":{"value":1372.7,"low":915.4,"high":1830.8},"output_bytes":{"value":61712345670,"low":50000000000,"high":70000000000},"size_percent":840.0,"quality":{"frames":240,"source_stream_index":0,"vmaf":{"value":96.5,"low":96.5,"high":96.5},"ssim":{"value":0.99,"low":0.99,"high":0.99},"psnr_y_db":{"value":42.0,"low":42.0,"high":42.0}},"samples":[{"start_seconds":0.0,"duration_seconds":2.0,"encode_seconds":0.75,"speed":2.667,"timed_payload_bytes":3000000,"scored_frames":120,"vmaf":96.5,"ssim":0.99,"psnr_y_db":42.0}]}}
 ```
 
 ```json
-{"emulate":{"input":"/media/in.mkv","status":"success","container":"mkv","video":{"action":"encode","encoder":"libx264","rate":{"kind":"quality","parameter":"CRF","value":20},"preset":"medium","multipass":null,"device":null},"decoding":"software","source":{"bytes":734003200,"duration_seconds":3661.5,"streams":{"video":1,"audio":2,"subtitle":1,"attachment":1,"cover":0,"other":0},"video":{"codec":"h264","width":1920,"height":1080,"frame_rate":"24000/1001","bit_rate":"1500000"},"audio":[{"codec":"aac","channels":2,"sample_rate":"48000"}]},"sampling":{"requested_samples":5,"sample_seconds":2.0,"measured_samples":2,"sampled_seconds":4.0},"speed":{"value":2.667,"low":2.0,"high":4.0},"transcode_seconds":{"value":1372.7,"low":915.4,"high":1830.8},"output_bytes":{"value":6171234567,"low":5000000000,"high":7000000000},"size_percent":840.0,"quality":{"frames":240,"source_stream_index":0,"vmaf":{"value":96.5,"low":96.5,"high":96.5},"ssim":null,"psnr_y_db":null},"samples":[{"start_seconds":0.0,"duration_seconds":2.0,"encode_seconds":0.75,"speed":2.667,"timed_payload_bytes":3000000,"scored_frames":120,"vmaf":96.5,"ssim":null,"psnr_y_db":null}],"error":null,"candidate_index":null,"outputs":{"png":"/media/quality.png","svg":null}}}
+{"emulate":{"input":"/media/in.mkv","result":{"status":"success"},"container":"mkv","video":{"action":"encode","encoder":"libx264","rate":{"kind":"quality","parameter":"CRF","value":20},"preset":"medium","multipass":null,"device":null},"decoding":"software","source":{"bytes":734003200,"duration_seconds":3661.5,"streams":{"video":1,"audio":2,"subtitle":1,"attachment":1,"cover":0,"other":0},"video":{"codec":"h264","width":1920,"height":1080,"frame_rate":"24000/1001","bit_rate":"1500000"},"audio":[{"codec":"aac","channels":2,"sample_rate":"48000"}]},"sampling":{"requested_samples":5,"sample_seconds":2.0,"measured_samples":2,"sampled_seconds":4.0},"speed":{"value":2.667,"low":2.0,"high":4.0},"transcode_seconds":{"value":1372.7,"low":915.4,"high":1830.8},"output_bytes":{"value":6171234567,"low":5000000000,"high":7000000000},"size_percent":840.0,"quality":{"frames":240,"source_stream_index":0,"vmaf":{"value":96.5,"low":96.5,"high":96.5},"ssim":null,"psnr_y_db":null},"samples":[{"start_seconds":0.0,"duration_seconds":2.0,"encode_seconds":0.75,"speed":2.667,"timed_payload_bytes":3000000,"scored_frames":120,"vmaf":96.5,"ssim":null,"psnr_y_db":null}],"candidate_index":null,"outputs":{"png":"/media/quality.png","svg":null}}}
 ```
 
 ```json
-{"skipped":{"input":"/media/notes.md","reason":"skipping because ffprobe failed: probe failed: ..."}}
+{"skipped":{"input":"/media/notes.md","result":{"status":"skipped","reason":"probe_failed","message":"probe failed: ..."}}}
 ```
+
+All task records use `result.status`: `success`, `skipped`, `failed`, or `cancelled`.
+Skipped results include `reason` (`no_video`, `probe_failed`, `probe_timed_out`,
+`unsupported_container`) and `message`. Failed results include the operation `phase`,
+`timed_out`, and `message`; transcode measurements are stored in `metrics`.
 
 ### Conventions
 
@@ -52,13 +57,13 @@ JSONL
   `output bytes / input bytes * 100` (it can exceed 100), `speed` is processed
   media seconds per wall-clock second, and `frame_rate` is ffprobe's
   `"numerator/denominator"` string.
-- **Nulls.** Every field is always present. Unknown values are `null`, and
-  optional objects such as `verify`, `vmaf`, `result`, and `source` are `null`
-  as a whole. Array fields are `[]`.
+- **Nulls.** Unknown measurements are `null`, and optional objects such as
+  `verify`, `vmaf`, `metrics`, and `source` are `null` as a whole. Array fields
+  are `[]`. The fields inside `result` depend on its status.
 - **Writing.** The report is truncated when the run starts, and every record is
   appended and flushed as soon as it is produced, so a cancelled or failed run
   keeps what it already measured. Failures are reported inside the record
-  (`status` and `error`), never by deleting or rewriting lines. `emulate` writes
+  (`result`), never by deleting or rewriting lines. `emulate` writes
   one line per quality point, in ascending point order; a run that fails before
   its first point (for example an unreadable input or a chart path that already
   exists) writes no line at all.
@@ -70,7 +75,7 @@ JSONL
 | Field | Description |
 | --- | --- |
 | `input`, `output` | Absolute paths of the source and the published output. |
-| `status` | `success`, `failure`, or `cancelled`. |
+| `result` | Terminal status and its structured classification. Failed results include `phase`, `timed_out`, and `message`. |
 | `container` | Resolved output container extension (`mkv`, `mp4`, ...); `null` before the container is resolved. |
 | `video.action` | `copy` or `encode`. |
 | `video.encoder` | ffmpeg encoder name (`libx265`, `hevc_nvenc`, ...); `null` for `copy`. |
@@ -83,12 +88,12 @@ JSONL
 | `decoding` | `software`, or `vaapi`, `cuda`, `qsv` with an optional `:<device>`. |
 | `source` | Probed input facts: `bytes`, `duration_seconds`, stream counts, the first regular video stream, and every audio stream. `streams.cover` counts cover art (`attached_pic`), which is excluded from `streams.video`. |
 | `source.video.bit_rate` | Input video bit rate in bits per second. |
-| `result` | Measured output: published `bytes`, `duration_seconds` from ffmpeg's final progress report, `size_percent`, `elapsed_seconds` for the ffmpeg run, aggregate `speed`, last reported `frames` and `fps`. |
+| `metrics` | Measured output: published `bytes`, `duration_seconds` from ffmpeg's final progress report, `size_percent`, `elapsed_seconds` for the ffmpeg run, aggregate `speed`, last reported `frames` and `fps`. |
 | `verify` | Present only with `--verify`: `outcome` is `complete`, `missing_audio_after_seek`, or `incomplete`, plus the warning strings printed to stderr. |
 | `vmaf` | Present only with `--vmaf`: the requested `n_subsample`, the `score` or the `error`. |
-| `error` | `null` on success, otherwise the failure chain as a single string. |
 
-`predict` records replace `result`/`verify`/`vmaf` with the prediction itself:
+`predict` records replace `metrics`/`verify`/`vmaf` with the prediction itself,
+while retaining the shared `result`:
 
 | Field | Description |
 | --- | --- |
@@ -113,6 +118,7 @@ fails, `outputs` can name files that were not created.
 | `outputs.png`, `outputs.svg` | Requested chart paths, or `null` when that chart was not asked for. |
 | everything else | Identical to a `predict` record, including `sampling`, `speed`, `output_bytes`, `size_percent`, `quality`, and `samples`. |
 
-`skipped` records describe inputs that were discovered but never processed
-because `ffprobe` failed; files that probe successfully but contain no video
-stream are ignored. Every other line is `transcode`, `predict`, or `emulate`.
+`skipped` records describe batch inputs that failed probing, contain no regular
+video, or cannot resolve an output container. They include the input and a
+structured `result`; each skipped input contributes to the batch's skipped count.
+Every other line is `transcode`, `predict`, or `emulate`.

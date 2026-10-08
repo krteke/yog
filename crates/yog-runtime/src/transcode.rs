@@ -61,7 +61,7 @@ impl Transcoder {
             .await
             .context("probe failed")
             .map(|result| result.output)
-            .map_err(RunError::from)
+            .map_err(|error| RunError::at(RunPhase::Probing, error))
     }
 
     pub async fn run(
@@ -74,13 +74,16 @@ impl Transcoder {
             return Err(RunError::Cancelled);
         }
         if !request.input.exists() {
-            return Err(RunError::Failed(anyhow::anyhow!(
-                "input file does not exist"
-            )));
+            return Err(RunError::at(
+                RunPhase::Probing,
+                anyhow::anyhow!("input file does not exist"),
+            ));
         }
 
+        diagnostics.event(RunEvent::PhaseChanged(RunPhase::PreparingOutput));
         let output = Output::prepare(&request.output, request.overwrite)
-            .with_context(|| format!("cannot prepare output {}", request.output.display()))?;
+            .with_context(|| format!("cannot prepare output {}", request.output.display()))
+            .map_err(|error| RunError::at(RunPhase::PreparingOutput, error))?;
         diagnostics.event(RunEvent::PhaseChanged(RunPhase::Probing));
         let media = self.probe(&request.input).await?;
         record.fill_source(&request, &media);
@@ -98,8 +101,10 @@ impl Transcoder {
         if self.cancelled() {
             return Err(RunError::Cancelled);
         }
+        diagnostics.event(RunEvent::PhaseChanged(RunPhase::PreparingOutput));
         let output = Output::prepare(&request.output, request.overwrite)
-            .with_context(|| format!("cannot prepare output {}", request.output.display()))?;
+            .with_context(|| format!("cannot prepare output {}", request.output.display()))
+            .map_err(|error| RunError::at(RunPhase::PreparingOutput, error))?;
         record.fill_source(&request, &media);
         self.execute(request, media, output, diagnostics, record)
             .await
@@ -115,9 +120,10 @@ impl Transcoder {
             return Err(RunError::Cancelled);
         }
         if !request.input.exists() {
-            return Err(RunError::Failed(anyhow::anyhow!(
-                "input file does not exist"
-            )));
+            return Err(RunError::at(
+                RunPhase::Probing,
+                anyhow::anyhow!("input file does not exist"),
+            ));
         }
         diagnostics.event(RunEvent::PhaseChanged(RunPhase::Probing));
         let media = self.probe(&request.input).await?;
@@ -147,7 +153,12 @@ impl Transcoder {
         drop(progress);
         let prediction = match result {
             Ok(prediction) => prediction,
-            Err(error) => return Err(RunError::from(error.context("prediction failed"))),
+            Err(error) => {
+                return Err(RunError::at(
+                    RunPhase::Predicting,
+                    error.context("prediction failed"),
+                ));
+            }
         };
         diagnostics.predict(&request.input, &prediction);
         record.fill_prediction(&prediction);
@@ -206,11 +217,13 @@ impl Transcoder {
         let plan = request
             .plan(&media, &self.ffmpeg)
             .await
-            .context("cannot plan transcode")?;
+            .context("cannot plan transcode")
+            .map_err(|error| RunError::at(RunPhase::Planning, error))?;
         let command = self
             .ffmpeg
             .build(&plan)
-            .context("cannot build transcode command")?;
+            .context("cannot build transcode command")
+            .map_err(|error| RunError::at(RunPhase::Planning, error))?;
 
         diagnostics.event(RunEvent::PhaseChanged(RunPhase::Transcoding));
         let duration = media.format.try_duration().ok();
@@ -235,7 +248,9 @@ impl Transcoder {
             .await;
         let elapsed = started.elapsed().as_secs_f64();
         drop(progress);
-        result.context("transcode failed")?;
+        result
+            .context("transcode failed")
+            .map_err(|error| RunError::at(RunPhase::Transcoding, error))?;
 
         let mut warnings = Vec::new();
         let mut verification = None;
@@ -269,9 +284,12 @@ impl Transcoder {
                         VerifyOutcome::MissingAudioAfterSeek,
                         warnings,
                     ));
-                    return Err(RunError::Failed(anyhow::anyhow!(
-                        "verification failed: audio stream #{source_index} -> #{destination_index} has no decoded frames after seeking to {timestamp}s"
-                    )));
+                    return Err(RunError::at(
+                        RunPhase::Verifying,
+                        anyhow::anyhow!(
+                            "verification failed: audio stream #{source_index} -> #{destination_index} has no decoded frames after seeking to {timestamp}s"
+                        ),
+                    ));
                 }
                 Err(error) => {
                     if matches!(error.reason, yog_core::error::Failure::Cancelled) {
@@ -300,7 +318,8 @@ impl Transcoder {
         diagnostics.event(RunEvent::PhaseChanged(RunPhase::Publishing));
         output
             .publish()
-            .with_context(|| format!("cannot publish output {}", target.display()))?;
+            .with_context(|| format!("cannot publish output {}", target.display()))
+            .map_err(|error| RunError::at(RunPhase::Publishing, error))?;
         diagnostics.complete(&target);
 
         let processed_seconds = reported
@@ -353,7 +372,8 @@ impl Transcoder {
                         outcome: VmafOutcome::Scored(score.value),
                     });
                 }
-                Err(error) => match RunError::from(error) {
+                Err(error) => match RunError::at(RunPhase::CalculatingVmaf, error) {
+                    RunError::Skipped { .. } => unreachable!("VMAF does not skip inputs"),
                     RunError::Cancelled => {
                         record.fill_vmaf(
                             VmafRecord::requested(options).failed("cancelled".to_owned()),
@@ -365,7 +385,7 @@ impl Transcoder {
                             outcome: VmafOutcome::Cancelled,
                         });
                     }
-                    RunError::Failed(error) => {
+                    RunError::Failed { error, .. } => {
                         let message = format!("{error:#}");
                         record.fill_vmaf(VmafRecord::requested(options).failed(message.clone()));
                         diagnostics.vmaf_warning(&error, stderr_logged);

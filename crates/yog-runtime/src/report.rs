@@ -39,14 +39,6 @@ pub enum Record {
     Skipped(SkippedRecord),
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Status {
-    Success,
-    Failure,
-    Cancelled,
-}
-
 pub struct Report {
     path: Option<PathBuf>,
     file: Option<BufWriter<File>>,
@@ -134,6 +126,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::event::{RunPhase, SkipReason, TaskResult};
     use serde_json::{Value, json};
     use yog_core::ffmpeg::{
         encoding::{Preset, RateControl, VideoCodec, VideoEncoding},
@@ -261,7 +254,7 @@ mod tests {
         );
         assert_eq!(record["predict"]["speed"], Value::Null);
         assert_eq!(record["predict"]["samples"], json!([]));
-        assert_eq!(record["predict"]["status"], "success");
+        assert_eq!(record["predict"]["result"]["status"], "success");
     }
 
     #[test]
@@ -290,7 +283,10 @@ mod tests {
     fn skipped_records_keep_the_probe_failure() {
         let record = Record::Skipped(SkippedRecord::new(
             Path::new("input/notes.md"),
-            &anyhow::anyhow!("skipping because ffprobe failed: not media"),
+            TaskResult::Skipped {
+                reason: SkipReason::ProbeFailed,
+                message: "skipping because ffprobe failed: not media".into(),
+            },
         ));
         let record = value(&record);
         assert!(
@@ -300,7 +296,7 @@ mod tests {
                 .ends_with("notes.md")
         );
         assert_eq!(
-            record["skipped"]["reason"],
+            record["skipped"]["result"]["message"],
             "skipping because ffprobe failed: not media"
         );
     }
@@ -320,8 +316,8 @@ mod tests {
         let record = &record["emulate"];
         assert!(record.get("predict").is_none(), "{record}");
         assert!(record["input"].as_str().unwrap().starts_with('/'));
-        assert_eq!(record["status"], "success");
-        assert_eq!(record["error"], Value::Null);
+        assert_eq!(record["result"]["status"], "success");
+        assert_eq!(record["result"]["message"], Value::Null);
         assert_eq!(record["candidate_index"], Value::Null);
         assert_eq!(record["decoding"], "software");
         assert_eq!(
@@ -344,12 +340,17 @@ mod tests {
                 device: "/dev/dri/renderD129".into(),
             }),
         );
-        let failed = EmulateRecord::new(&candidate_request, 30, Some(2), outputs, options)
-            .finish(Status::Failure, Some("boom".to_owned()));
+        let failed = EmulateRecord::new(&candidate_request, 30, Some(2), outputs, options).finish(
+            TaskResult::Failed {
+                phase: RunPhase::Predicting,
+                timed_out: false,
+                message: "boom".into(),
+            },
+        );
         let failed = value(&failed);
         let failed = &failed["emulate"];
-        assert_eq!(failed["status"], "failure");
-        assert_eq!(failed["error"], "boom");
+        assert_eq!(failed["result"]["status"], "failed");
+        assert_eq!(failed["result"]["message"], "boom");
         assert_eq!(failed["video"]["rate"]["value"], 30);
         assert_eq!(failed["outputs"]["svg"], Value::Null);
         assert_eq!(failed["candidate_index"], 2);

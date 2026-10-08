@@ -16,13 +16,13 @@ use gpui_kit::component::{
     select::{SearchableVec, Select, SelectEvent, SelectState},
     tag::Tag,
 };
+#[cfg(test)]
+use gpui_kit::test::TestSupportExt as _;
 use gpui_kit::{
-    AppContext as _, Context, Entity, EventEmitter, Hsla, IntoElement, ListAlignment, ListState,
-    ParentElement as _, Render, Styled as _, Subscription, Window, div,
+    AppContext as _, Context, Entity, EventEmitter, Hsla, InteractiveElement as _, IntoElement,
+    ListAlignment, ListState, ParentElement as _, Render, Styled as _, Subscription, Window, div,
     prelude::FluentBuilder as _, px,
 };
-#[cfg(test)]
-use gpui_kit::{InteractiveElement as _, test::TestSupportExt as _};
 use tokio_util::sync::CancellationToken;
 use yog_core::ffmpeg::{
     encoding::RateControl,
@@ -31,13 +31,14 @@ use yog_core::ffmpeg::{
 };
 use yog_runtime::{
     Command, Operation, RunOutcome, RunStatus, Validate,
-    event::{RunEvent, RunPhase, TaskStatus},
+    event::{RunEvent, RunPhase, TaskResult, TaskStatus},
 };
 
 use super::{
     components,
     execution::{self, Activity, ActivityChanged, RunRequest, WorkerMessage},
     messages::{ExpansionChanged, MessageLevel, MessageSource, Messages, NewMessage},
+    result_filter::ResultFilter,
     settings::SettingsPanel,
     source::SourcePicker,
     video::{CONTAINERS, Choice, VideoInputs, container, selected},
@@ -53,7 +54,7 @@ enum Stage {
 struct ResultRow {
     path: PathBuf,
     prediction: Option<Prediction>,
-    error: Option<String>,
+    result: TaskResult,
 }
 
 pub struct PredictPage {
@@ -79,7 +80,10 @@ pub struct PredictPage {
     started: Option<Instant>,
     elapsed: Option<Duration>,
     results: Vec<ResultRow>,
+    pending_prediction: Option<Prediction>,
     work_list: ListState,
+    result_filter: Entity<ResultFilter>,
+    _filter_observation: Subscription,
     _rate_subscription: Subscription,
     _video_observation: Subscription,
     _messages_subscription: Subscription,
@@ -125,6 +129,10 @@ impl PredictPage {
         let messages = cx.new(|cx| Messages::new(window, cx));
         let messages_subscription =
             cx.subscribe(&messages, |_, _, _: &ExpansionChanged, cx| cx.notify());
+        let work_list = ListState::new(1, ListAlignment::Top, px(300.));
+        let result_filter =
+            cx.new(|cx| ResultFilter::new(true, false, work_list.clone(), window, cx));
+        let filter_observation = cx.observe(&result_filter, |_, _, cx| cx.notify());
         Self {
             source,
             preferences,
@@ -148,7 +156,10 @@ impl PredictPage {
             started: None,
             elapsed: None,
             results: Vec::new(),
-            work_list: ListState::new(1, ListAlignment::Top, px(300.)),
+            pending_prediction: None,
+            work_list,
+            result_filter,
+            _filter_observation: filter_observation,
             _rate_subscription: rate_subscription,
             _video_observation: video_observation,
             _messages_subscription: messages_subscription,
@@ -275,7 +286,9 @@ impl PredictPage {
         self.started = Some(Instant::now());
         self.elapsed = None;
         self.results.clear();
-        self.work_list.reset(1);
+        self.pending_prediction = None;
+        self.result_filter
+            .update(cx, |filter, cx| filter.reset(window, cx));
         self.messages
             .update(cx, |messages, cx| messages.clear(window, cx));
         self.message(MessageLevel::Info, "Starting prediction".into(), window, cx);
@@ -353,20 +366,6 @@ impl PredictPage {
                 RunEvent::BatchDiscovered { total } => {
                     self.task_total = total;
                 }
-                RunEvent::InputSkipped { input, error } => {
-                    self.skipped += 1;
-                    self.message(
-                        MessageLevel::Warning,
-                        format!("Skipped {}: {error}", input.display()),
-                        window,
-                        cx,
-                    );
-                    self.results.push(ResultRow {
-                        path: input,
-                        prediction: None,
-                        error: Some(error),
-                    });
-                }
                 RunEvent::TaskStarted {
                     index,
                     total,
@@ -377,37 +376,41 @@ impl PredictPage {
                     self.task_total = total;
                     self.current_name = Some(input);
                 }
-                RunEvent::PredictionCompleted { input, prediction } => {
-                    self.results.push(ResultRow {
-                        path: input,
-                        prediction: Some(prediction),
-                        error: None,
-                    });
+                RunEvent::PredictionCompleted { prediction, .. } => {
+                    self.pending_prediction = Some(prediction);
                 }
-                RunEvent::TaskFinished {
-                    input,
-                    status,
-                    error,
-                    ..
-                } => {
-                    if status == TaskStatus::Success {
-                        self.completed += 1;
-                    } else if status == TaskStatus::Failure {
-                        self.failed += 1;
+                RunEvent::TaskFinished { input, result, .. } => {
+                    match result.status() {
+                        TaskStatus::Success => self.completed += 1,
+                        TaskStatus::Failure => self.failed += 1,
+                        TaskStatus::Skipped => self.skipped += 1,
+                        TaskStatus::Cancelled => {}
                     }
-                    if let Some(error) = error {
+                    if let Some(message) = result.message() {
+                        let level = if result.status() == TaskStatus::Failure {
+                            MessageLevel::Error
+                        } else {
+                            MessageLevel::Warning
+                        };
                         self.message(
-                            MessageLevel::Error,
-                            format!("{}: {error}", input.display()),
+                            level,
+                            format!("{result}: {}: {message}", input.display()),
                             window,
                             cx,
                         );
-                        self.results.push(ResultRow {
-                            path: input,
-                            prediction: None,
-                            error: Some(error),
-                        });
                     }
+                    let prediction = if result.status() == TaskStatus::Success {
+                        self.pending_prediction.take()
+                    } else {
+                        None
+                    };
+                    self.result_filter
+                        .update(cx, |filter, cx| filter.append(&result, window, cx));
+                    self.results.push(ResultRow {
+                        path: input,
+                        prediction,
+                        result,
+                    });
                 }
                 RunEvent::Warning { message } => {
                     self.message(MessageLevel::Warning, message, window, cx)
@@ -454,11 +457,6 @@ impl PredictPage {
                     cx,
                 );
             }
-        }
-        let count = self.results.len() + 1;
-        let previous = self.work_list.item_count();
-        if count > previous {
-            self.work_list.splice(previous..previous, count - previous);
         }
         self.work_list.remeasure_items(0..1);
         cx.emit(ActivityChanged);
@@ -513,6 +511,106 @@ mod tests {
     use gpui_kit::{TestAppContext, component::Root, px, size, test::TestWindowExt as _};
 
     #[gpui_kit::test]
+    fn prediction_payload_and_completion_create_one_result_row(cx: &mut TestAppContext) {
+        use yog_core::ffmpeg::prediction::{Estimate, QualityPrediction};
+        cx.update(gpui_kit::init);
+        let handle = cx.open_window(size(px(900.), px(700.)), |window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(window, cx));
+            let page = workspace.read(cx).predict.clone();
+            page.update(cx, |page, cx| {
+                let estimate = |value| Estimate {
+                    value,
+                    low: value,
+                    high: value,
+                };
+                page.handle_message(
+                    WorkerMessage::Event(RunEvent::PredictionCompleted {
+                        input: "video.mkv".into(),
+                        prediction: Prediction {
+                            source_bytes: 200,
+                            source_duration_seconds: 2.0,
+                            sampled_seconds: 1.0,
+                            speed: estimate(2.0),
+                            transcode_seconds: estimate(1.0),
+                            output_bytes: Estimate {
+                                value: 100,
+                                low: 90,
+                                high: 110,
+                            },
+                            quality: QualityPrediction {
+                                frames: 24,
+                                vmaf: estimate(95.0),
+                                ssim: None,
+                                psnr_y_db: None,
+                                source_stream_index: 0,
+                            },
+                            samples: Vec::new(),
+                        },
+                    }),
+                    window,
+                    cx,
+                );
+                assert!(page.results.is_empty());
+                page.handle_message(
+                    WorkerMessage::Event(RunEvent::TaskFinished {
+                        index: 1,
+                        total: 1,
+                        input: "video.mkv".into(),
+                        result: TaskResult::Success,
+                    }),
+                    window,
+                    cx,
+                );
+                assert_eq!(page.results.len(), 1);
+                assert_eq!(page.completed, 1);
+                assert_eq!(
+                    page.results[0]
+                        .prediction
+                        .as_ref()
+                        .unwrap()
+                        .quality
+                        .vmaf
+                        .value,
+                    95.0
+                );
+                assert!(page.pending_prediction.is_none());
+                assert_eq!(page.work_list.item_count(), 2);
+            });
+            Root::new(workspace, window, cx)
+        });
+        cx.update_window(handle.into(), |_, window, cx| window.render_frame(cx))
+            .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn cancelled_prediction_is_retained_without_incrementing_failed(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let handle = cx.open_window(size(px(900.), px(700.)), |window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(window, cx));
+            let page = workspace.read(cx).predict.clone();
+            page.update(cx, |page, cx| {
+                page.handle_message(
+                    WorkerMessage::Event(RunEvent::TaskFinished {
+                        index: 1,
+                        total: 5,
+                        input: "cancelled.mkv".into(),
+                        result: TaskResult::Cancelled,
+                    }),
+                    window,
+                    cx,
+                );
+                assert_eq!(page.results.len(), 1);
+                assert_eq!(page.results[0].result.status(), TaskStatus::Cancelled);
+                assert_eq!(page.failed, 0);
+                assert_eq!(page.completed, 0);
+            });
+            Root::new(workspace, window, cx)
+        });
+        cx.update_window(handle.into(), |_, window, cx| window.render_frame(cx))
+            .unwrap();
+    }
+
+    #[gpui_kit::test]
     fn large_prediction_results_only_materialize_near_the_viewport(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let mut workspace = None;
@@ -528,9 +626,14 @@ mod tests {
                 page.stage = Stage::Running;
                 for index in 0..1_000 {
                     page.handle_message(
-                        WorkerMessage::Event(RunEvent::InputSkipped {
+                        WorkerMessage::Event(RunEvent::TaskFinished {
                             input: format!("input-{index}.mkv").into(),
-                            error: "Invalid input".into(),
+                            index: 1,
+                            total: 1,
+                            result: yog_runtime::event::TaskResult::Skipped {
+                                reason: yog_runtime::event::SkipReason::NoVideo,
+                                message: "Invalid input".into(),
+                            },
                         }),
                         window,
                         cx,
@@ -558,6 +661,13 @@ mod tests {
                 "offscreen prediction was materialized"
             );
             assert_eq!(page.read(cx).results.len(), 1_000);
+            page.read(cx).work_list.scroll_to(gpui_kit::ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.),
+            });
+            window.render_frame(cx);
+            assert!(window.try_find("result-status-filter").is_some());
+            assert!(window.try_find("result-reason-filter").is_some());
             window.scroll(
                 "predict-results",
                 gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-1_000_000.))),

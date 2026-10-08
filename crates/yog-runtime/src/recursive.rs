@@ -1,6 +1,7 @@
 use crate::{
     diagnostics::Diagnostics,
-    error::RunError,
+    error::{RunError, timed_out},
+    event::{RunEvent, RunPhase, SkipReason},
     report::{Record, Report, record::SkippedRecord},
     transcode::Transcoder,
 };
@@ -27,16 +28,22 @@ pub fn scan(
         return Err(RunError::Cancelled);
     }
     if !template.input.is_dir() {
-        return Err(RunError::Failed(anyhow::anyhow!(
-            "recursive input is not a directory: {}",
-            template.input.display()
-        )));
+        return Err(RunError::at(
+            RunPhase::Discovering,
+            anyhow::anyhow!(
+                "recursive input is not a directory: {}",
+                template.input.display()
+            ),
+        ));
     }
     if !predict && template.output.exists() && !template.output.is_dir() {
-        return Err(RunError::Failed(anyhow::anyhow!(
-            "recursive output is not a directory: {}",
-            template.output.display()
-        )));
+        return Err(RunError::at(
+            RunPhase::Discovering,
+            anyhow::anyhow!(
+                "recursive output is not a directory: {}",
+                template.output.display()
+            ),
+        ));
     }
 
     let mut tasks = Vec::new();
@@ -46,7 +53,7 @@ pub fn scan(
         }
         let entry = entry
             .with_context(|| format!("cannot read input directory {}", template.input.display()))
-            .map_err(RunError::from)?;
+            .map_err(|error| RunError::at(RunPhase::Discovering, error))?;
         if !entry.file_type().is_file() {
             continue;
         }
@@ -101,21 +108,29 @@ pub async fn check_output_conflicts(
         match probe_task(&request, transcoder, false).await {
             Ok(_) => {
                 if !outputs.insert(&task.output) {
-                    return Err(RunError::Failed(anyhow::anyhow!(
-                        "multiple input files map to {}",
-                        task.output.display()
-                    )));
+                    return Err(RunError::at(
+                        RunPhase::Discovering,
+                        anyhow::anyhow!("multiple input files map to {}", task.output.display()),
+                    ));
                 }
             }
             Err(RunError::Cancelled) => return Err(RunError::Cancelled),
-            Err(RunError::Failed(error)) => {
+            Err(error @ RunError::Skipped { .. }) => {
                 skipped.insert(index);
                 diagnostics.skipped_input(&task.input, &error);
+                let result = error.result();
                 report.write(
-                    &Record::Skipped(SkippedRecord::new(&task.input, &error)),
+                    &Record::Skipped(SkippedRecord::new(&task.input, result.clone())),
                     diagnostics,
                 );
+                diagnostics.event(RunEvent::TaskFinished {
+                    index: index + 1,
+                    total: tasks.len(),
+                    input: task.input.clone(),
+                    result,
+                });
             }
+            Err(RunError::Failed { .. }) => unreachable!("batch probing returns skips"),
         }
     }
     Ok(())
@@ -126,19 +141,40 @@ pub async fn probe_task(
     transcoder: &Transcoder,
     predict: bool,
 ) -> Result<MediaInfo, RunError> {
-    let media = transcoder.probe(&request.input).await?;
+    let media = match transcoder.probe(&request.input).await {
+        Ok(media) => media,
+        Err(RunError::Cancelled) => return Err(RunError::Cancelled),
+        Err(RunError::Failed { error, .. }) => {
+            return Err(RunError::Skipped {
+                reason: if timed_out(&error) {
+                    SkipReason::ProbeTimedOut
+                } else {
+                    SkipReason::ProbeFailed
+                },
+                error,
+            });
+        }
+        Err(RunError::Skipped { .. }) => unreachable!("raw probes do not decide eligibility"),
+    };
     if !media.streams.iter().any(|stream| stream.is_regular_video()) {
-        return Err(RunError::Failed(anyhow::anyhow!(
-            "no regular video streams"
-        )));
+        return Err(RunError::Skipped {
+            reason: SkipReason::NoVideo,
+            error: anyhow::anyhow!("no regular video streams"),
+        });
     }
     if !predict {
-        request.output_container(&media).with_context(|| {
-            format!(
-                "cannot select output container for {}",
-                request.input.display()
-            )
-        })?;
+        request
+            .output_container(&media)
+            .with_context(|| {
+                format!(
+                    "cannot select output container for {}",
+                    request.input.display()
+                )
+            })
+            .map_err(|error| RunError::Skipped {
+                reason: SkipReason::UnsupportedContainer,
+                error,
+            })?;
     }
     Ok(media)
 }

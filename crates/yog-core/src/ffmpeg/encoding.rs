@@ -1,4 +1,5 @@
 use super::args::{Arg, ArgsExt, VideoOption};
+use serde::{Deserialize, Serialize};
 use std::{
     borrow::Cow, ffi::OsString, fmt::Display, num::NonZeroU64, ops::RangeInclusive, path::PathBuf,
     str::FromStr,
@@ -11,7 +12,8 @@ mod tests;
 
 pub const DEFAULT_VAAPI_DEVICE: &str = "/dev/dri/renderD128";
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 pub enum VideoCodec {
     H264,
@@ -42,13 +44,15 @@ impl FromStr for VideoCodec {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum RateControl {
     Quality(u8),
     Bitrate(NonZeroU64),
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 pub enum Preset {
     Ultrafast,
@@ -97,7 +101,8 @@ impl FromStr for Preset {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 pub enum QsvPreset {
     Veryfast,
@@ -140,7 +145,8 @@ impl FromStr for QsvPreset {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 pub enum NvencPreset {
     P1,
@@ -183,13 +189,16 @@ impl FromStr for NvencPreset {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 pub enum NvencMultipass {
     Disabled,
     #[cfg_attr(feature = "clap", value(name = "qres"))]
+    #[serde(rename = "qres")]
     QuarterResolution,
     #[cfg_attr(feature = "clap", value(name = "fullres"))]
+    #[serde(rename = "fullres")]
     FullResolution,
 }
 
@@ -216,7 +225,8 @@ impl NvencMultipass {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "encoder", rename_all = "snake_case")]
 #[cfg_attr(feature = "clap", derive(clap::Subcommand))]
 pub enum VideoEncoding {
     #[cfg_attr(feature = "clap", command(long_flag = "encode-x264"))]
@@ -284,6 +294,7 @@ pub enum VideoEncoding {
             feature = "clap",
             arg(long, short, default_value = DEFAULT_VAAPI_DEVICE)
         )]
+        #[serde(with = "crate::path::native")]
         device: PathBuf,
     },
 }

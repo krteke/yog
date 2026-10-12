@@ -261,6 +261,7 @@ mod tests {
         Command {
             request,
             operation: Operation::Emulate(EmulationOptions {
+                overwrite_chart: false,
                 png: Some("plot.png".into()),
                 svg: None,
                 qualities,

@@ -12,8 +12,9 @@ use yog_core::{
 };
 
 use crate::{
-    event::TaskResult,
-    report::{Record, ToAbsolute, container, percent, transcode::TranscodeResult},
+    event::{RecoveryInfo, TaskResult},
+    path::Absolute,
+    report::{Record, container, percent, transcode::TranscodeResult},
 };
 
 pub trait TaskRecord {
@@ -24,13 +25,33 @@ pub trait TaskRecord {
 pub struct SkippedRecord {
     input: String,
     result: TaskResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recovery: Option<RecoveryRecord>,
+}
+
+#[derive(Debug, Serialize)]
+struct RecoveryRecord {
+    forced: bool,
+    output: Option<String>,
 }
 
 impl SkippedRecord {
     pub fn new(input: &Path, result: TaskResult) -> Self {
         Self {
-            input: input.to_absolute(),
+            input: input.absolutize(),
             result,
+            recovery: None,
+        }
+    }
+
+    pub fn recovered(input: &Path, result: TaskResult, recovery: RecoveryInfo) -> Self {
+        Self {
+            input: input.absolutize(),
+            result,
+            recovery: Some(RecoveryRecord {
+                forced: recovery.forced,
+                output: recovery.output.as_deref().map(|o| o.absolutize()),
+            }),
         }
     }
 }
@@ -267,7 +288,7 @@ pub struct PredictRecord {
 impl PredictRecord {
     pub fn new(request: &TranscodeRequest, options: PredictionOptions) -> Self {
         Self {
-            input: request.input.to_absolute(),
+            input: request.input.absolutize(),
             result: TaskResult::Success,
             container: None,
             video: VideoRecord::from(&request.video),
@@ -339,8 +360,8 @@ pub struct OutputsRecord {
 impl OutputsRecord {
     pub fn new(png: Option<&Path>, svg: Option<&Path>) -> Self {
         Self {
-            png: png.map(ToAbsolute::to_absolute),
-            svg: svg.map(ToAbsolute::to_absolute),
+            png: png.map(|p| p.absolutize()),
+            svg: svg.map(|s| s.absolutize()),
         }
     }
 }
@@ -406,8 +427,8 @@ pub struct TranscodeRecord {
 impl TranscodeRecord {
     pub fn new(request: &TranscodeRequest) -> Self {
         Self {
-            input: request.input.to_absolute(),
-            output: request.output.to_absolute(),
+            input: request.input.absolutize(),
+            output: request.output.absolutize(),
             result: TaskResult::Success,
             container: None,
             video: VideoRecord::from(&request.video),

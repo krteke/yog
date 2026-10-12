@@ -12,7 +12,7 @@ use yog_core::ffmpeg::{
 use crate::{
     emulate::{EmulationJob, EmulationOptions},
     error::RunError,
-    event::{EventSink, RunEvent},
+    event::{EventSink, RecoveryInfo, RunEvent, TaskResult},
 };
 
 pub struct Diagnostics<'a> {
@@ -284,30 +284,83 @@ impl<'a> Diagnostics<'a> {
         self.print_error_details(error);
     }
 
-    pub fn batch_summary(
-        &self,
-        total: usize,
-        succeeded: usize,
-        failed: usize,
-        skipped: usize,
-        cancelled: bool,
-    ) {
+    pub fn batch_summary(&self, batch: &crate::BatchOutcome) {
         if !self.terminal_output {
             return;
         }
-
         let mut summary = format!(
-            "batch summary: total {total} | succeeded {succeeded} | failed {failed} | skipped {skipped}"
+            "batch summary: total {} | succeeded {} | failed {} | skipped {} | reused {} | forced {}",
+            batch.total,
+            batch.succeeded,
+            batch.failures.len(),
+            batch.skipped,
+            batch.reused,
+            batch.forced,
         );
-        if cancelled {
+        if batch.cancelled || batch.state_error.is_some() {
             write!(
                 summary,
-                " | not processed {} | cancelled",
-                total - succeeded - failed - skipped,
+                " | not processed {}",
+                batch.total - batch.succeeded - batch.failures.len() - batch.skipped - batch.reused
             )
             .unwrap();
         }
+        if batch.cancelled {
+            summary.push_str(" | cancelled");
+        }
+        if batch.state_error.is_some() {
+            summary.push_str(" | state error");
+        }
         println!("{summary}");
+    }
+
+    pub fn skipped_input(&self, input: &Path, failure: &RunError) {
+        if !self.terminal_output {
+            return;
+        }
+        let result = failure.result();
+        eprintln!(
+            "warning: skipping {}: {result}: {}",
+            input.display(),
+            result.message().unwrap()
+        );
+        let RunError::Skipped { error, .. } = failure else {
+            unreachable!("skipped_input expects a skip")
+        };
+        if let Some(error) = Self::program_error(error) {
+            Self::print_program_stderr(error, false);
+        }
+    }
+
+    pub fn recovered_task(&self, input: &Path, result: &TaskResult, info: &RecoveryInfo) {
+        if self.terminal_output && self.verbose {
+            println!(
+                "recovery: {}: {result}{}",
+                input.display(),
+                if info.forced { " (forced)" } else { "" }
+            );
+        }
+    }
+
+    pub fn warning(&self, message: &str) {
+        self.event(RunEvent::Warning {
+            message: message.into(),
+        });
+        if self.terminal_output {
+            eprintln!("warning: {message}");
+        }
+    }
+
+    pub fn recovery(&self, path: &Path, reused: usize, forced: usize) {
+        if self.terminal_output {
+            println!(
+                "recovery: {} | reused {reused} | forced {forced}",
+                path.display()
+            );
+        }
+        if forced > 0 {
+            self.warning("Force recovery trusts old records; existing outputs stay at their recorded locations and are not revalidated");
+        }
     }
 
     pub fn complete(&self, output: &Path) {
@@ -338,24 +391,6 @@ impl<'a> Diagnostics<'a> {
         match path {
             Some(path) => eprintln!("warning: cannot write report {}: {error}", path.display()),
             None => eprintln!("warning: cannot write report: {error}"),
-        }
-    }
-
-    pub fn skipped_input(&self, input: &Path, failure: &RunError) {
-        if !self.terminal_output {
-            return;
-        }
-        let result = failure.result();
-        eprintln!(
-            "warning: skipping {}: {result}: {}",
-            input.display(),
-            result.message().unwrap()
-        );
-        let RunError::Skipped { error, .. } = failure else {
-            unreachable!("skipped_input expects a skip")
-        };
-        if let Some(error) = Self::program_error(error) {
-            Self::print_program_stderr(error, false);
         }
     }
 

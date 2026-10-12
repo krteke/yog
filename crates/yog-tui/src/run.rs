@@ -121,6 +121,9 @@ pub struct RunState {
     pub succeeded: usize,
     pub failed: usize,
     pub skipped: usize,
+    pub reused: usize,
+    pub forced: usize,
+    pub state_path: Option<PathBuf>,
     pub duration: Option<Duration>,
     pub progress: Progress,
     pub prediction: Option<PredictionSummary>,
@@ -154,6 +157,9 @@ impl RunState {
             succeeded: 0,
             failed: 0,
             skipped: 0,
+            reused: 0,
+            forced: 0,
+            state_path: None,
             duration: None,
             progress: Progress::default(),
             prediction: None,
@@ -299,7 +305,22 @@ impl RunState {
             },
             RunEvent::Warning { message } => self.push_notice(NoticeKind::Warning, message),
             RunEvent::Error { message } => self.push_notice(NoticeKind::Error, message),
+            RunEvent::RecoveryPrepared {
+                path,
+                reused,
+                forced,
+            } => {
+                self.state_path = Some(path.clone());
+                self.push_notice(
+                    NoticeKind::Info,
+                    format!(
+                        "Recovery: {} · {reused} reusable · {forced} forced",
+                        path.display()
+                    ),
+                );
+            }
             RunEvent::TaskFinished {
+                recovery,
                 index,
                 total,
                 input,
@@ -314,20 +335,41 @@ impl RunState {
                         self.failed += 1;
                         self.progress.finished = true;
                     }
-                    TaskStatus::Skipped => self.skipped += 1,
+                    TaskStatus::Skipped => {
+                        if matches!(
+                            result,
+                            RuntimeTaskResult::Skipped {
+                                reason: yog_runtime::event::SkipReason::AlreadyCompleted,
+                                ..
+                            }
+                        ) {
+                            self.reused += 1;
+                        } else {
+                            self.skipped += 1;
+                        }
+                    }
                     TaskStatus::Cancelled => {}
                 }
+                self.task_index = index;
+                self.task_total = self.task_total.max(total);
+                self.progress.finished = true;
                 if let Some(message) = result.message() {
-                    let kind = if result.status() == TaskStatus::Failure {
+                    let kind = if recovery.is_some() {
+                        NoticeKind::Info
+                    } else if result.status() == TaskStatus::Failure {
                         NoticeKind::Error
                     } else {
                         NoticeKind::Warning
                     };
                     self.push_notice(kind, format!("{result}: {}: {message}", input.display()));
                 }
-                let output = (self.input.as_ref() == Some(&input))
-                    .then(|| self.output.clone())
-                    .flatten();
+                self.forced += usize::from(recovery.as_ref().is_some_and(|info| info.forced));
+                let restored_output = recovery.and_then(|info| info.output);
+                let output = restored_output.or_else(|| {
+                    (self.input.as_ref() == Some(&input))
+                        .then(|| self.output.clone())
+                        .flatten()
+                });
                 self.push_result(TaskResult {
                     position: Some((index, total)),
                     input,
@@ -353,6 +395,11 @@ impl RunState {
                 self.succeeded = batch.succeeded;
                 self.failed = batch.failures.len();
                 self.skipped = batch.skipped;
+                self.reused = batch.reused;
+                self.forced = batch.forced;
+                if let Some(error) = batch.state_error {
+                    self.push_notice(NoticeKind::Error, format!("{error:#}"));
+                }
             }
             RunOutcome::Completed | RunOutcome::Cancelled => {}
         }
@@ -487,6 +534,7 @@ mod tests {
         let mut state = RunState::new(&Operation::Transcode);
         state.handle_event(RunEvent::BatchDiscovered { total: 2 });
         state.handle_event(RunEvent::TaskFinished {
+            recovery: None,
             input: "notes.txt".into(),
             index: 1,
             total: 1,
@@ -505,12 +553,51 @@ mod tests {
             total: 2,
             succeeded: 1,
             skipped: 1,
+            resume_skipped: 0,
+            reused: 0,
+            forced: 0,
+            state_error: None,
             failures: Vec::new(),
             cancelled: false,
         }));
 
         assert_eq!(state.skipped, 1);
         assert_eq!(state.stage, RunStage::Finished(RunStatus::Success));
+    }
+
+    #[test]
+    fn recovered_tasks_advance_progress_without_becoming_ordinary_skips() {
+        let mut state = RunState::new(&Operation::Transcode);
+        state.handle_event(RunEvent::RecoveryPrepared {
+            path: "state.jsonl".into(),
+            reused: 1,
+            forced: 1,
+        });
+        state.handle_event(RunEvent::TaskFinished {
+            input: "movie.mkv".into(),
+            index: 1,
+            total: 2,
+            result: RuntimeTaskResult::Skipped {
+                reason: yog_runtime::event::SkipReason::AlreadyCompleted,
+                message: "Trusted previous record".into(),
+            },
+            recovery: Some(yog_runtime::event::RecoveryInfo {
+                forced: true,
+                output: Some("old/movie.mkv".into()),
+            }),
+        });
+        assert_eq!(state.skipped, 0);
+        assert_eq!(state.reused, 1);
+        assert_eq!(state.forced, 1);
+        assert_eq!(state.progress_ratio(), 0.5);
+        assert_eq!(
+            state.results[0].output.as_deref(),
+            Some(std::path::Path::new("old/movie.mkv"))
+        );
+        assert_eq!(
+            state.state_path.as_deref(),
+            Some(std::path::Path::new("state.jsonl"))
+        );
     }
 
     #[test]
@@ -542,6 +629,7 @@ mod tests {
             outcome: VmafOutcome::Failed("model unavailable".to_owned()),
         });
         state.handle_event(RunEvent::TaskFinished {
+            recovery: None,
             index: 1,
             total: 1,
             input: "input.mkv".into(),
@@ -594,6 +682,7 @@ mod tests {
     #[test]
     fn emulation_progress_counts_completed_successes_and_failures() {
         let mut state = RunState::new(&Operation::Emulate(yog_runtime::EmulationOptions {
+            overwrite_chart: false,
             png: Some("chart.png".into()),
             svg: None,
             qualities: vec![20, 21],
@@ -662,6 +751,7 @@ mod tests {
             output: Some("broken.mp4".into()),
         });
         state.handle_event(RunEvent::TaskFinished {
+            recovery: None,
             index: 2,
             total: 3,
             input: "broken.mkv".into(),
@@ -686,6 +776,7 @@ mod tests {
     #[test]
     fn cancelled_emulation_point_is_not_left_predicting() {
         let mut state = RunState::new(&Operation::Emulate(yog_runtime::EmulationOptions {
+            overwrite_chart: false,
             png: Some("chart.png".into()),
             svg: None,
             qualities: vec![20],

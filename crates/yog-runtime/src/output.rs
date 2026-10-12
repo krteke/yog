@@ -27,11 +27,7 @@ impl Output {
         }
 
         let target = target.to_path_buf();
-        let mut part_name = OsString::from(".part.");
-        part_name.push(target.file_name().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "output path has no file name")
-        })?);
-        let part = target.with_file_name(part_name);
+        let part = Self::part_path(&target)?;
 
         File::create_new(&part).map_err(|error| {
             io::Error::new(
@@ -46,6 +42,14 @@ impl Output {
             overwrite,
             published: false,
         })
+    }
+
+    pub fn part_path(target: &Path) -> io::Result<PathBuf> {
+        let mut name = OsString::from(".part.");
+        name.push(target.file_name().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "output path has no file name")
+        })?);
+        Ok(target.with_file_name(name))
     }
 
     pub fn part(&self) -> &Path {

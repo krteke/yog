@@ -16,9 +16,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 pub enum Container {
+    #[serde(rename = "mkv")]
     #[cfg_attr(feature = "clap", value(name = "mkv"))]
     Matroska,
     Mp4,
@@ -26,8 +28,10 @@ pub enum Container {
     #[cfg_attr(feature = "clap", value(name = "m4a"))]
     M4a,
     #[cfg_attr(feature = "clap", value(name = "3gp"))]
+    #[serde(rename = "3gp")]
     ThreeGp,
     #[cfg_attr(feature = "clap", value(name = "3g2"))]
+    #[serde(rename = "3g2")]
     ThreeG2,
     #[cfg_attr(feature = "clap", value(name = "f4v"))]
     F4v,
@@ -37,6 +41,7 @@ pub enum Container {
     Psp,
     Webm,
     #[cfg_attr(feature = "clap", value(name = "ts"))]
+    #[serde(rename = "ts")]
     MpegTs,
     #[cfg_attr(feature = "clap", value(name = "m2ts"))]
     M2ts,
@@ -45,6 +50,7 @@ pub enum Container {
     Asf,
     Wmv,
     #[cfg_attr(feature = "clap", value(name = "mpg", alias = "mpeg"))]
+    #[serde(rename = "mpg")]
     MpegPs,
     Vob,
     Ogg,
@@ -174,7 +180,8 @@ impl Container {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
 #[cfg_attr(feature = "clap", derive(clap::Subcommand))]
 pub enum VideoAction {
     #[default]
@@ -250,7 +257,7 @@ pub struct TranscodeRequest {
     pub container: Option<Container>,
     pub video: VideoAction,
     pub decoding: DecodingBackend,
-    pub overwrite: bool,
+    pub overwrite_output: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -444,8 +451,8 @@ impl TranscodeRequest {
         self
     }
 
-    pub fn with_overwrite(mut self, overwrite: bool) -> Self {
-        self.overwrite = overwrite;
+    pub fn with_overwrite_output(mut self, overwrite_output: bool) -> Self {
+        self.overwrite_output = overwrite_output;
         self
     }
 
@@ -492,7 +499,7 @@ impl TranscodeRequest {
 
         let mut input_args = Vec::new();
         let mut output_args = Vec::new();
-        input_args.add(Arg::Overwrite(self.overwrite));
+        input_args.add(Arg::Overwrite(self.overwrite_output));
         output_args.extend([Arg::MapMetadata, Arg::MapChapters, Arg::CopyAll]);
 
         let encoding = self.active_encoding(media);
@@ -879,7 +886,7 @@ mod tests {
             input: PathBuf::from("input.mkv"),
             output: PathBuf::from("-output.mkv"),
             container: Some(Container::Mp4),
-            overwrite: false,
+            overwrite_output: false,
             decoding: DecodingBackend::default(),
             video: VideoAction::Encode(VideoEncoding::Nvenc {
                 codec: VideoCodec::Hevc,
@@ -1091,7 +1098,7 @@ mod tests {
             .with_input("in.ts")
             .with_output("out.webm")
             .with_container(Container::Webm)
-            .with_overwrite(true)
+            .with_overwrite_output(true)
             .build(&media, &["nv12".into()])
             .unwrap();
         assert_eq!(

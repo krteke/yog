@@ -96,7 +96,7 @@ esac"#,
 
     fs::write(fixture.0.join("output.mkv"), b"previous").unwrap();
     let mut command = fixture.command();
-    command.args(["--vmaf", "--copy", "-O"]);
+    command.args(["--vmaf", "--copy", "--overwrite-output"]);
     if verbose {
         command.arg("--verbose");
     }

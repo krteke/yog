@@ -5,7 +5,10 @@ use yog_core::ffmpeg::{
     plan::{Container, TranscodeRequest, VideoAction as CoreVideoAction},
     vmaf::VmafOptions,
 };
-use yog_runtime::{Command, Config, EmulationOptions, Operation, Options, Validate};
+use yog_runtime::{
+    Command, Config, EmulationOptions, Operation, Options, Validate,
+    recovery::{MismatchPolicy, RecoveryMode, RecoveryOptions},
+};
 
 use crate::{
     candidate::{CandidateDraft, CandidateEditor},
@@ -57,7 +60,13 @@ pub enum Field {
     Multipass,
     EncodeDevice,
     QualityPoints,
-    Overwrite,
+    OverwriteOutput,
+    OverwriteChart,
+    OverwriteReport,
+    Recovery,
+    StatePath,
+    BatchMismatch,
+    FileMismatch,
     Verify,
     Vmaf,
     VmafInterval,
@@ -120,7 +129,11 @@ pub struct CommandForm {
     action: VideoAction,
     encoding: EncodingDraft,
     candidates: Vec<CandidateDraft>,
-    overwrite: bool,
+    overwrite_output: bool,
+    overwrite_chart: bool,
+    overwrite_report: bool,
+    recovery: RecoveryOptions,
+    state_path: TextInput,
     verify: bool,
     vmaf: VmafMode,
     vmaf_interval: u32,
@@ -143,7 +156,11 @@ impl Default for CommandForm {
             action: VideoAction::Encode,
             encoding,
             candidates: Vec::new(),
-            overwrite: false,
+            overwrite_output: false,
+            overwrite_chart: false,
+            overwrite_report: false,
+            recovery: RecoveryOptions::default(),
+            state_path: TextInput::default(),
             verify: false,
             vmaf: VmafMode::Off,
             vmaf_interval: 5,
@@ -263,14 +280,25 @@ impl CommandForm {
     pub fn option_fields(&self) -> Vec<Field> {
         let mut fields = Vec::new();
         if self.mode == Mode::Transcode {
-            fields.extend([Field::Overwrite, Field::Verify, Field::Vmaf]);
+            fields.extend([Field::OverwriteOutput, Field::Verify, Field::Vmaf]);
             if self.vmaf == VmafMode::Subsample {
                 fields.push(Field::VmafInterval);
             }
         } else if self.mode == Mode::Emulate {
-            fields.extend([Field::Png, Field::Svg, Field::Overwrite]);
+            fields.extend([Field::Png, Field::Svg, Field::OverwriteChart]);
+        }
+        if self.mode == Mode::Transcode && self.input.as_ref().is_some_and(PathSelection::recursive)
+        {
+            fields.push(Field::Recovery);
+            if self.recovery.mode != RecoveryMode::Off {
+                fields.push(Field::StatePath);
+            }
+            if self.recovery.mode == RecoveryMode::Automatic {
+                fields.extend([Field::BatchMismatch, Field::FileMismatch]);
+            }
         }
         fields.push(Field::Report);
+        fields.push(Field::OverwriteReport);
         fields.push(Field::Start);
         fields
     }
@@ -295,7 +323,13 @@ impl CommandForm {
             Field::Multipass => "Multipass",
             Field::EncodeDevice => "Encode device",
             Field::QualityPoints => "Quality points",
-            Field::Overwrite => "Overwrite",
+            Field::OverwriteOutput => "Overwrite output",
+            Field::OverwriteChart => "Overwrite charts",
+            Field::OverwriteReport => "Overwrite report",
+            Field::Recovery => "Recovery",
+            Field::StatePath => "State file",
+            Field::BatchMismatch => "Batch mismatch",
+            Field::FileMismatch => "File mismatch",
             Field::Verify => "Verify",
             Field::Vmaf => "VMAF",
             Field::VmafInterval => "N subsample",
@@ -337,7 +371,24 @@ impl CommandForm {
             Field::QualityPoints => self
                 .encoding
                 .quality_points_label(self.editing == Some(field)),
-            Field::Overwrite => state(self.overwrite).to_owned(),
+            Field::OverwriteOutput => state(self.overwrite_output).to_owned(),
+            Field::OverwriteChart => state(self.overwrite_chart).to_owned(),
+            Field::OverwriteReport => state(self.overwrite_report).to_owned(),
+            Field::Recovery => match self.recovery.mode {
+                RecoveryMode::Automatic => "Automatic",
+                RecoveryMode::Restart => "Restart",
+                RecoveryMode::Off => "Off",
+            }
+            .to_owned(),
+            Field::StatePath => {
+                if self.state_path.value().is_empty() && self.editing != Some(field) {
+                    "Automatic (output folder)".into()
+                } else {
+                    self.state_path.display(self.editing == Some(field))
+                }
+            }
+            Field::BatchMismatch => self.recovery.batch_mismatch.to_string(),
+            Field::FileMismatch => self.recovery.file_mismatch.to_string(),
             Field::Verify => state(self.verify).to_owned(),
             Field::Vmaf => match self.vmaf {
                 VmafMode::Off => "Off".to_owned(),
@@ -380,6 +431,7 @@ impl CommandForm {
             | Field::Png
             | Field::Svg
             | Field::Report
+            | Field::StatePath
             | Field::DecodeDevice
             | Field::Bitrate
             | Field::EncodeDevice
@@ -389,7 +441,9 @@ impl CommandForm {
                 self.editing = Some(field);
             }
             Field::Candidates => return FormAction::EditCandidates,
-            Field::Overwrite => self.overwrite = !self.overwrite,
+            Field::OverwriteOutput => self.overwrite_output = !self.overwrite_output,
+            Field::OverwriteChart => self.overwrite_chart = !self.overwrite_chart,
+            Field::OverwriteReport => self.overwrite_report = !self.overwrite_report,
             Field::Verify => self.verify = !self.verify,
             Field::Start => return FormAction::Submit,
             _ => self.adjust(1),
@@ -404,6 +458,7 @@ impl CommandForm {
             | Field::Png
             | Field::Svg
             | Field::Report
+            | Field::StatePath
             | Field::DecodeDevice
             | Field::Bitrate
             | Field::EncodeDevice
@@ -441,7 +496,37 @@ impl CommandForm {
             Field::Multipass => {
                 self.encoding.adjust_multipass(direction);
             }
-            Field::Overwrite => self.overwrite = direction > 0,
+            Field::OverwriteOutput => self.overwrite_output = direction > 0,
+            Field::OverwriteChart => self.overwrite_chart = direction > 0,
+            Field::OverwriteReport => self.overwrite_report = direction > 0,
+            Field::Recovery => {
+                let modes = [
+                    RecoveryMode::Automatic,
+                    RecoveryMode::Restart,
+                    RecoveryMode::Off,
+                ];
+                let index = modes
+                    .iter()
+                    .position(|mode| *mode == self.recovery.mode)
+                    .unwrap();
+                self.recovery.mode = modes[cycle(index, modes.len(), direction)];
+                self.clamp_focus();
+            }
+            Field::BatchMismatch | Field::FileMismatch => {
+                let policy = if self.focused() == Field::BatchMismatch {
+                    &mut self.recovery.batch_mismatch
+                } else {
+                    &mut self.recovery.file_mismatch
+                };
+                let policies = [
+                    MismatchPolicy::Abort,
+                    MismatchPolicy::Force,
+                    MismatchPolicy::Skip,
+                    MismatchPolicy::Restart,
+                ];
+                let index = policies.iter().position(|item| item == policy).unwrap();
+                *policy = policies[cycle(index, policies.len(), direction)];
+            }
             Field::Verify => self.verify = direction > 0,
             Field::Vmaf => {
                 let index = match self.vmaf {
@@ -521,7 +606,7 @@ impl CommandForm {
         let mut request = TranscodeRequest::new(input.path(), output)
             .with_decoding(decoding)
             .with_video(video)
-            .with_overwrite(self.mode != Mode::Predict && self.overwrite);
+            .with_overwrite_output(self.mode == Mode::Transcode && self.overwrite_output);
         if let Some(container) = CONTAINERS[self.container] {
             request = request.with_container(container);
         }
@@ -532,6 +617,7 @@ impl CommandForm {
                 Mode::Transcode => Operation::Transcode,
                 Mode::Predict => Operation::Predict,
                 Mode::Emulate => Operation::Emulate(EmulationOptions {
+                    overwrite_chart: self.overwrite_chart,
                     png: (!self.png.value().is_empty()).then(|| PathBuf::from(self.png.value())),
                     svg: (!self.svg.value().is_empty()).then(|| PathBuf::from(self.svg.value())),
                     qualities,
@@ -541,7 +627,12 @@ impl CommandForm {
             recursive: self.mode != Mode::Emulate && input.recursive(),
         };
         command.validate().map_err(|error| format!("{error:#}"))?;
+        let mut recovery = self.recovery.clone();
+        recovery.path =
+            (!self.state_path.value().is_empty()).then(|| PathBuf::from(self.state_path.value()));
         let options = Options {
+            recovery,
+            overwrite_report: self.overwrite_report,
             verify: self.mode == Mode::Transcode && self.verify,
             vmaf: match (self.mode, self.vmaf) {
                 (Mode::Transcode, VmafMode::Full) => Some(VmafOptions::default()),
@@ -605,6 +696,7 @@ impl CommandForm {
             Field::Png => &mut self.png,
             Field::Svg => &mut self.svg,
             Field::Report => &mut self.report,
+            Field::StatePath => &mut self.state_path,
             Field::DecodeDevice => self.decoder.device_input(),
             Field::Bitrate => self.encoding.bitrate_input(),
             Field::EncodeDevice => self.encoding.device_input(),
@@ -631,6 +723,72 @@ mod tests {
 
     fn key(value: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(value), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn output_and_chart_overwrite_permissions_are_independent() {
+        let mut form = CommandForm::default();
+        let output_field = form
+            .option_fields()
+            .iter()
+            .copied()
+            .find(|field| CommandForm::label(*field) == "Overwrite output");
+        assert!(output_field.is_some());
+        form.focus = form
+            .fields()
+            .iter()
+            .position(|field| Some(*field) == output_field)
+            .unwrap();
+        form.handle_key(key('l'));
+        form.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        form.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        let chart_field = form
+            .option_fields()
+            .iter()
+            .copied()
+            .find(|field| CommandForm::label(*field) == "Overwrite charts")
+            .unwrap();
+        assert_eq!(form.value(chart_field), "Off");
+    }
+
+    #[test]
+    fn recovery_controls_only_apply_to_directory_transcodes() {
+        let mut form = CommandForm::default();
+        assert!(
+            !form
+                .option_fields()
+                .iter()
+                .any(|field| CommandForm::label(*field) == "Recovery")
+        );
+        let mut picker = crate::file_picker::FilePicker::open(None).unwrap();
+        let folder = picker
+            .entries()
+            .iter()
+            .position(|entry| entry.is_directory())
+            .unwrap();
+        for _ in 0..folder {
+            picker.handle_key(key('j'));
+        }
+        picker.handle_key(key(' '));
+        if let crate::file_picker::PickerAction::Confirm(selection) =
+            picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        {
+            form.set_input(selection);
+        } else {
+            panic!("directory picker did not confirm");
+        }
+        assert!(
+            form.option_fields()
+                .iter()
+                .any(|field| CommandForm::label(*field) == "Recovery")
+        );
+        form.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(
+            !form
+                .option_fields()
+                .iter()
+                .any(|field| CommandForm::label(*field) == "Recovery")
+        );
     }
 
     #[test]
@@ -676,7 +834,10 @@ mod tests {
             vec![Field::Input, Field::Container, Field::Decoder]
         );
         assert!(!form.video_fields().contains(&Field::Action));
-        assert_eq!(form.option_fields(), vec![Field::Report, Field::Start]);
+        assert_eq!(
+            form.option_fields(),
+            vec![Field::Report, Field::OverwriteReport, Field::Start]
+        );
 
         form.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(form.mode(), Mode::Emulate);
@@ -694,8 +855,9 @@ mod tests {
             vec![
                 Field::Png,
                 Field::Svg,
-                Field::Overwrite,
+                Field::OverwriteChart,
                 Field::Report,
+                Field::OverwriteReport,
                 Field::Start
             ]
         );

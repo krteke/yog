@@ -34,7 +34,7 @@ impl DrawRuning for Frame<'_> {
     fn draw_run(&mut self, area: Rect, state: &RunState) {
         let content = self.render_shell(area, state.kind.label());
         let status = match state.kind {
-            RunKind::Transcode => 5,
+            RunKind::Transcode => 5 + u16::from(state.state_path.is_some()),
             RunKind::Predict => 4,
             RunKind::Emulate => {
                 4 + state.chart_png.iter().chain(state.chart_svg.iter()).count() as u16
@@ -113,6 +113,9 @@ impl DrawRuning for Frame<'_> {
             if let Some(path) = &state.chart_svg {
                 lines.push(path_line("SVG", path.display().to_string()));
             }
+        }
+        if let Some(path) = &state.state_path {
+            lines.push(path_line("State", path.display().to_string()));
         }
         self.render_widget(Paragraph::new(lines), content);
     }
@@ -229,7 +232,10 @@ impl DrawRuning for Frame<'_> {
                 ),
                 Span::raw("    "),
                 Span::styled(
-                    format!("{} skipped", state.skipped),
+                    format!(
+                        "{} skipped · {} reused · {} forced",
+                        state.skipped, state.reused, state.forced
+                    ),
                     Style::default().fg(if state.skipped == 0 {
                         Color::DarkGray
                     } else {

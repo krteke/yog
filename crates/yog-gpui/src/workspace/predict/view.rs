@@ -290,6 +290,17 @@ impl PredictPage {
             &self.report,
             cx.listener(|this, _, window, cx| this.choose_report(window, cx)),
         ));
+        form = form.child(
+            Field::new().label_indent(false).child(
+                Checkbox::new("predict-overwrite-report")
+                    .label("Overwrite report")
+                    .checked(self.overwrite_report)
+                    .on_change(cx.listener(|this, next, _, cx| {
+                        this.overwrite_report = *next;
+                        cx.notify();
+                    })),
+            ),
+        );
         let body = div().size_full().min_h_0().overflow_y_scrollbar().child(
             div()
                 .p_5()

@@ -24,7 +24,11 @@ printf 'frame=1\nout_time_us=1000000\nprogress=end\n'"#,
 fn assert_failed_transcode_preserves_target(body: &str) {
     let fixture = Fixture::new(body);
     fs::write(fixture.0.join("output.mkv"), b"original").unwrap();
-    let result = fixture.command().args(["-O", "--copy"]).output().unwrap();
+    let result = fixture
+        .command()
+        .args(["--overwrite-output", "--copy"])
+        .output()
+        .unwrap();
     assert_eq!(result.status.code(), Some(1), "{body}");
     assert_eq!(
         fs::read(fixture.0.join("output.mkv")).unwrap(),
@@ -64,7 +68,11 @@ fn missing_transcode_output_preserves_the_target() {
 fn overwrite_replaces_an_existing_target_after_success() {
     let fixture = Fixture::new("for last do :; done; printf replacement > \"$last\"");
     fs::write(fixture.0.join("output.mkv"), b"original").unwrap();
-    let result = fixture.command().args(["-O", "--copy"]).output().unwrap();
+    let result = fixture
+        .command()
+        .args(["--overwrite-output", "--copy"])
+        .output()
+        .unwrap();
     assert!(result.status.success());
     assert_eq!(
         fs::read(fixture.0.join("output.mkv")).unwrap(),
@@ -113,5 +121,5 @@ fn an_existing_part_is_never_overwritten_or_deleted() {
 
 #[test]
 fn overwrite_does_not_overwrite_or_delete_an_existing_part() {
-    assert_existing_part_is_preserved(&["-O", "--copy"]);
+    assert_existing_part_is_preserved(&["--overwrite-output", "--copy"]);
 }

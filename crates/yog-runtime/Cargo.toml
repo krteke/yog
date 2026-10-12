@@ -15,6 +15,7 @@ anyhow.workspace = true
 dirs.workspace = true
 indicatif.workspace = true
 log.workspace = true
+path-absolutize.workspace = true
 plotters = {
   workspace = true,
   features = [

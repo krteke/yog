@@ -13,22 +13,9 @@ use yog_core::{ffmpeg::plan::TranscodeRequest, ffprobe::types::MediaInfo};
 
 use crate::{
     diagnostics::Diagnostics,
+    jsonl::WriteLine,
     report::record::{EmulateRecord, PredictRecord, SkippedRecord, TranscodeRecord},
 };
-
-trait ToAbsolute {
-    fn to_absolute(&self) -> String;
-}
-
-impl ToAbsolute for Path {
-    fn to_absolute(&self) -> String {
-        self.canonicalize()
-            .or_else(|_| std::path::absolute(self))
-            .unwrap_or_else(|_| self.to_path_buf())
-            .to_string_lossy()
-            .into_owned()
-    }
-}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -44,10 +31,8 @@ pub struct Report {
     file: Option<BufWriter<File>>,
 }
 
-impl TryFrom<Option<&Path>> for Report {
-    type Error = anyhow::Error;
-
-    fn try_from(value: Option<&Path>) -> Result<Self, Self::Error> {
+impl Report {
+    pub fn open(value: Option<&Path>, overwrite: bool) -> anyhow::Result<Self> {
         let Some(path) = value else {
             return Ok(Self {
                 path: None,
@@ -58,7 +43,12 @@ impl TryFrom<Option<&Path>> for Report {
             fs::create_dir_all(parent)
                 .with_context(|| format!("cannot create report directory {}", parent.display()))?;
         }
-        let file = File::create(path)
+        let file = File::options()
+            .write(true)
+            .create(true)
+            .truncate(overwrite)
+            .create_new(!overwrite)
+            .open(path)
             .with_context(|| format!("cannot create report {}", path.display()))?;
 
         Ok(Self {
@@ -94,18 +84,6 @@ impl Report {
     }
 }
 
-trait WriteLine {
-    fn write_line(&mut self, record: &Record) -> io::Result<()>;
-}
-
-impl WriteLine for BufWriter<File> {
-    fn write_line(&mut self, record: &Record) -> io::Result<()> {
-        let line = serde_json::to_string(record).map_err(io::Error::other)?;
-        self.write_all(line.as_bytes())?;
-        self.write_all(b"\n")?;
-        self.flush()
-    }
-}
 fn container(request: &TranscodeRequest, media: &MediaInfo) -> Option<String> {
     request
         .output_container(media)

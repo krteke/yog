@@ -48,7 +48,7 @@ printf encoded > "$arg"
             },
         )
         .env("COVER_FAILURE", failure)
-        .args(["--copy", "-O", "--timeout", "1"])
+        .args(["--copy", "--overwrite-output", "--timeout", "1"])
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&result.stderr);

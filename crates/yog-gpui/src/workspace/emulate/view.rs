@@ -315,10 +315,21 @@ impl EmulatePage {
             .child(
                 Field::new().label_indent(false).child(
                     Checkbox::new("emulate-overwrite")
-                        .label("Overwrite existing charts")
-                        .checked(self.overwrite)
+                        .label("Overwrite charts")
+                        .checked(self.overwrite_chart)
                         .on_change(cx.listener(|this, next, _, cx| {
-                            this.overwrite = *next;
+                            this.overwrite_chart = *next;
+                            cx.notify();
+                        })),
+                ),
+            )
+            .child(
+                Field::new().label_indent(false).child(
+                    Checkbox::new("emulate-overwrite-report")
+                        .label("Overwrite report")
+                        .checked(self.overwrite_report)
+                        .on_change(cx.listener(|this, next, _, cx| {
+                            this.overwrite_report = *next;
                             cx.notify();
                         })),
                 ),

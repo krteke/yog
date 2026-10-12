@@ -154,7 +154,7 @@ case "$*" in *-show_packets*) cat "$prefix-packets.json" ;; *) cat "$prefix.json
     fs::write(fixture.0.join("output.json"), actual.to_string()).unwrap();
     fs::write(fixture.0.join("output-packets.json"), packets.to_string()).unwrap();
     let mut command = fixture.command();
-    command.args(["--copy", "--verify", "-O"]);
+    command.args(["--copy", "--verify", "--overwrite-output"]);
     if case == "unplanned mp4 tags" {
         command.args(["-C", "mp4"]);
     }
@@ -247,7 +247,7 @@ fn assert_incomplete_verification(failure: &str) {
             );
     let result = fixture
         .command()
-        .args(["--copy", "--verify", "-O"])
+        .args(["--copy", "--verify", "--overwrite-output"])
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&result.stdout);
@@ -329,7 +329,7 @@ case "$last" in input.mkv) cat input.json ;; *) cat output.json ;; esac
         .args([
             "--encode-x264",
             "--verify",
-            "-O",
+            "--overwrite-output",
             "--report",
             "report.jsonl",
         ])

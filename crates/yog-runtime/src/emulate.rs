@@ -30,6 +30,7 @@ pub struct Candidate {
 
 #[derive(Debug, Clone)]
 pub struct EmulationOptions {
+    pub overwrite_chart: bool,
     pub png: Option<PathBuf>,
     pub svg: Option<PathBuf>,
     pub qualities: Vec<u8>,
@@ -217,7 +218,7 @@ impl Transcoder {
         chart::check_paths(
             options.png.as_deref(),
             options.svg.as_deref(),
-            request.overwrite,
+            options.overwrite_chart,
         )
         .context("cannot prepare emulation chart output")
         .map_err(|error| RunError::at(RunPhase::PreparingOutput, error))?;

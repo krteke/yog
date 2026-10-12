@@ -18,7 +18,8 @@ pub(super) struct FramePlan {
     pub output_args: Vec<OsString>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "backend", content = "device", rename_all = "snake_case")]
 pub enum DecodingBackend {
     #[default]
     Software,

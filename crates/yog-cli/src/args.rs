@@ -9,6 +9,7 @@ use yog_core::ffmpeg::{
 use yog_runtime::{Candidate, Command, EmulationOptions, Operation, Options, parse_quality_points};
 
 use crate::decoding::DecodingArgs;
+use yog_runtime::recovery::{MismatchPolicy, RecoveryMode};
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
@@ -36,16 +37,33 @@ enum CliCommand {
 
 #[derive(Debug, clap::Args)]
 struct TranscodeArgs {
+    /// Batch recovery journal; defaults to OUTPUT/.yog-state.jsonl
+    #[arg(long, global = true, value_name = "PATH")]
+    state: Option<PathBuf>,
+    /// Rebuild batch state without granting output overwrite
+    #[arg(long, global = true)]
+    restart: bool,
+    /// Disable both reading and writing batch state
+    #[arg(long, global = true, conflicts_with_all = ["state", "restart", "resume_batch_mismatch", "resume_file_mismatch"])]
+    no_state: bool,
+    /// Action when saved batch settings differ (default: abort; Force trusts old outputs)
+    #[arg(long, global = true, value_name = "abort|force|skip|restart")]
+    resume_batch_mismatch: Option<MismatchPolicy>,
+    /// Action when a source/output fingerprint differs (default: restart; Force trusts the record)
+    #[arg(long, global = true, value_name = "abort|force|skip|restart")]
+    resume_file_mismatch: Option<MismatchPolicy>,
     #[arg(short, long, global = true, value_name = "PATH")]
     output: Option<PathBuf>,
     #[arg(short, long, global = true)]
     recursive: bool,
-    #[arg(short = 'O', long, global = true)]
-    overwrite: bool,
+    #[arg(long, global = true)]
+    overwrite_output: bool,
     #[arg(short, long, global = true)]
     verify: bool,
     #[arg(long, global = true, value_name = "PATH")]
     report: Option<PathBuf>,
+    #[arg(long, global = true)]
+    overwrite_report: bool,
     #[arg(
         long,
         global = true,
@@ -65,6 +83,8 @@ struct PredictArgs {
     recursive: bool,
     #[arg(long, global = true, value_name = "PATH")]
     report: Option<PathBuf>,
+    #[arg(long, global = true)]
+    overwrite_report: bool,
     #[command(subcommand)]
     video: VideoEncoding,
 }
@@ -92,8 +112,10 @@ struct EmulateArgs {
     candidate: Vec<Candidate>,
     #[arg(long, global = true, value_name = "PATH")]
     report: Option<PathBuf>,
-    #[arg(short = 'O', long, global = true)]
-    overwrite: bool,
+    #[arg(long, global = true)]
+    overwrite_report: bool,
+    #[arg(long, global = true)]
+    overwrite_chart: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -209,25 +231,56 @@ impl Args {
             vmaf: None,
             terminal_output: !execution.quiet,
             report: None,
+            overwrite_report: false,
+            ..Options::default()
         };
         let (operation, mut request, recursive) = match command {
             CliCommand::Transcode(args) => {
+                if !args.recursive
+                    && (args.state.is_some()
+                        || args.restart
+                        || args.no_state
+                        || args.resume_batch_mismatch.is_some()
+                        || args.resume_file_mismatch.is_some())
+                {
+                    return Err(clap::Error::raw(
+                        ErrorKind::ArgumentConflict,
+                        "batch recovery options require --recursive",
+                    )
+                    .format(&mut Args::command()));
+                }
                 let output = args
                     .output
                     .ok_or_else(|| missing_argument("--output <PATH>"))?;
+                options.recovery.mode = if args.no_state {
+                    RecoveryMode::Off
+                } else if args.restart {
+                    RecoveryMode::Restart
+                } else {
+                    RecoveryMode::Automatic
+                };
+                options.recovery.path = args.state;
+                options.recovery.batch_mismatch = args
+                    .resume_batch_mismatch
+                    .unwrap_or(options.recovery.batch_mismatch);
+                options.recovery.file_mismatch = args
+                    .resume_file_mismatch
+                    .unwrap_or(options.recovery.file_mismatch);
                 options.verify = args.verify;
                 options.vmaf = args.vmaf.map(Into::into);
                 options.report = args.report;
+                options.overwrite_report = args.overwrite_report;
                 (
                     Operation::Transcode,
                     TranscodeRequest::new(input, output)
                         .with_video(args.video.unwrap_or_default())
-                        .with_overwrite(args.overwrite),
+                        .with_overwrite_output(args.overwrite_output),
                     args.recursive,
                 )
             }
             CliCommand::Predict(args) => {
                 options.report = args.report;
+                options.overwrite_report = args.overwrite_report;
                 (
                     Operation::Predict,
                     TranscodeRequest::new(input, PathBuf::new())
@@ -237,23 +290,23 @@ impl Args {
             }
             CliCommand::Emulate(args) => {
                 options.report = args.report;
+                options.overwrite_report = args.overwrite_report;
                 let mut qualities = args.video.range.into_iter().flatten().collect::<Vec<_>>();
                 qualities.sort_unstable();
                 qualities.dedup();
                 (
                     Operation::Emulate(EmulationOptions {
+                        overwrite_chart: args.overwrite_chart,
                         png: args.png,
                         svg: args.svg,
                         qualities,
                         candidates: args.candidate,
                     }),
-                    TranscodeRequest::new(input, PathBuf::new())
-                        .with_video(
-                            args.video
-                                .encoding
-                                .map_or(VideoAction::Copy, VideoAction::Encode),
-                        )
-                        .with_overwrite(args.overwrite),
+                    TranscodeRequest::new(input, PathBuf::new()).with_video(
+                        args.video
+                            .encoding
+                            .map_or(VideoAction::Copy, VideoAction::Encode),
+                    ),
                     false,
                 )
             }
@@ -285,6 +338,95 @@ fn missing_argument(argument: &str) -> clap::Error {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn recursive_transcode_accepts_independent_recovery_policies() {
+        let parsed = Args::try_parse_from([
+            "yog",
+            "-i",
+            "input",
+            "transcode",
+            "-o",
+            "output",
+            "--recursive",
+            "--state",
+            "progress.jsonl",
+            "--resume-batch-mismatch",
+            "force",
+            "--resume-file-mismatch",
+            "skip",
+        ]);
+        assert!(parsed.is_ok(), "{parsed:?}");
+    }
+    #[test]
+    fn transcode_accepts_object_specific_overwrite_permissions() {
+        let parsed = Args::try_parse_from([
+            "yog",
+            "-i",
+            "input",
+            "transcode",
+            "-o",
+            "output",
+            "--overwrite-output",
+            "--overwrite-report",
+        ]);
+        assert!(parsed.is_ok(), "{parsed:?}");
+    }
+
+    #[test]
+    fn recovery_controls_require_a_directory_batch() {
+        let args = Args::try_parse_from([
+            "yog",
+            "transcode",
+            "-i",
+            "input.mkv",
+            "-o",
+            "output.mkv",
+            "--copy",
+            "--state",
+            "state.jsonl",
+        ])
+        .unwrap();
+        assert_eq!(
+            args.into_runtime().unwrap_err().kind(),
+            ErrorKind::ArgumentConflict
+        );
+    }
+
+    #[test]
+    fn an_explicit_default_recovery_policy_still_requires_a_batch() {
+        let args = Args::try_parse_from([
+            "yog",
+            "transcode",
+            "-i",
+            "input.mkv",
+            "-o",
+            "output.mkv",
+            "--copy",
+            "--resume-file-mismatch",
+            "restart",
+        ])
+        .unwrap();
+        assert_eq!(
+            args.into_runtime().unwrap_err().kind(),
+            ErrorKind::ArgumentConflict
+        );
+    }
+
+    #[test]
+    fn emulate_accepts_chart_specific_overwrite_permission() {
+        let parsed = Args::try_parse_from([
+            "yog",
+            "-i",
+            "input",
+            "emulate",
+            "--png",
+            "plot.png",
+            "--overwrite-chart",
+            "--encode-x264",
+        ]);
+        assert!(parsed.is_ok(), "{parsed:?}");
+    }
+
     use super::*;
     use yog_core::ffmpeg::{
         decoding::DecodingBackend,
@@ -521,13 +663,13 @@ mod tests {
             "-o",
             "output",
             "--recursive",
-            "--overwrite",
+            "--overwrite-output",
             "--verify",
             "--vmaf=7",
         ]);
         assert!(matches!(transcode.operation, Operation::Transcode));
         assert!(matches!(transcode.request.video, VideoAction::Copy));
-        assert!(transcode.request.overwrite);
+        assert!(transcode.request.overwrite_output);
         assert!(transcode.recursive);
         assert!(options.verify);
         assert_eq!(options.vmaf.unwrap().n_subsample, NonZeroU32::new(7));
@@ -561,11 +703,13 @@ mod tests {
             "quality.svg",
             "--range",
             "20-22",
-            "--overwrite",
+            "--overwrite-chart",
             "--encode-x264",
         ]);
         assert!(emulation.request.output.as_os_str().is_empty());
-        assert!(emulation.request.overwrite);
+        assert!(
+            matches!(&emulation.operation, Operation::Emulate(options) if options.overwrite_chart)
+        );
         assert!(matches!(
             &emulation.operation,
             Operation::Emulate(EmulationOptions { qualities, .. }) if qualities == &vec![20, 21, 22]

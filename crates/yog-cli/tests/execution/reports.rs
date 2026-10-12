@@ -161,7 +161,7 @@ fn reports_survive_task_failures() {
     fs::write(fixture.0.join("report.jsonl"), b"stale line\n").unwrap();
     let result = fixture
         .command()
-        .args(["--copy", "--report", "report.jsonl"])
+        .args(["--copy", "--report", "report.jsonl", "--overwrite-report"])
         .output()
         .unwrap();
     assert_eq!(result.status.code(), Some(1), "{:?}", result.stderr);
@@ -178,4 +178,21 @@ fn reports_survive_task_failures() {
         "{}",
         records[0]
     );
+}
+
+#[test]
+fn existing_report_is_not_overwritten_without_permission() {
+    let fixture = Fixture::new("printf encoded > \"$argument\"");
+    fs::write(fixture.0.join("report.jsonl"), b"previous report\n").unwrap();
+    let result = fixture
+        .command()
+        .args(["--copy", "--report", "report.jsonl"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        fs::read(fixture.0.join("report.jsonl")).unwrap(),
+        b"previous report\n"
+    );
+    assert!(!result.status.success());
+    assert!(!fixture.0.join("output.mkv").exists());
 }

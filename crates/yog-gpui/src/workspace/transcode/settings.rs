@@ -1,3 +1,5 @@
+mod recovery;
+
 use std::{
     num::{NonZeroU32, NonZeroU64},
     path::{Path, PathBuf},
@@ -58,7 +60,9 @@ pub struct TranscodeSettings {
     vmaf: Choice,
     n_subsample: Entity<InputState>,
     encode: bool,
-    overwrite: bool,
+    overwrite_output: bool,
+    overwrite_report: bool,
+    recovery: Entity<recovery::RecoveryControls>,
     verify: bool,
     destination_error: Option<String>,
     _output_observation: Subscription,
@@ -151,7 +155,9 @@ impl TranscodeSettings {
             vmaf,
             n_subsample: cx.new(|cx| InputState::new(window, cx).default_value("5")),
             encode: true,
-            overwrite: false,
+            overwrite_output: false,
+            overwrite_report: false,
+            recovery: cx.new(|cx| recovery::RecoveryControls::new(window, cx)),
             verify: false,
             destination_error: None,
             _output_observation: output_observation,
@@ -160,6 +166,11 @@ impl TranscodeSettings {
             _rate_subscription: rate_subscription,
             _vmaf_subscription: vmaf_subscription,
         }
+    }
+
+    pub fn set_running(&mut self, running: bool, cx: &mut Context<Self>) {
+        self.recovery
+            .update(cx, |recovery, cx| recovery.set_running(running, cx));
     }
 
     pub fn has_output(&self, cx: &gpui_kit::App) -> bool {
@@ -216,7 +227,7 @@ impl TranscodeSettings {
         let mut request = TranscodeRequest::new(input, output)
             .with_decoding(decoding)
             .with_video(video)
-            .with_overwrite(self.overwrite);
+            .with_overwrite_output(self.overwrite_output);
         if let Some(container) = container(selected(&self.container, cx)) {
             request = request.with_container(container);
         }
@@ -253,6 +264,10 @@ impl TranscodeSettings {
         options.verify = self.verify;
         options.vmaf = vmaf;
         options.report = report;
+        options.overwrite_report = self.overwrite_report;
+        if command.recursive {
+            options.recovery = self.recovery.read(cx).options(cx);
+        }
         Ok(RunRequest {
             command,
             options,
@@ -427,11 +442,11 @@ impl Render for TranscodeSettings {
         let mut finishing = Form::new()
             .child(
                 Field::new().label_indent(false).child(
-                    Checkbox::new("overwrite")
+                    Checkbox::new("overwrite-output")
                         .label("Overwrite existing output")
-                        .checked(self.overwrite)
+                        .checked(self.overwrite_output)
                         .on_change(cx.listener(|this, next, _, cx| {
-                            this.overwrite = *next;
+                            this.overwrite_output = *next;
                             cx.notify();
                         })),
                 ),
@@ -467,6 +482,18 @@ impl Render for TranscodeSettings {
                 this.choose_destination(Destination::Report, window, cx)
             }),
         ));
+
+        finishing = finishing.child(
+            Field::new().label_indent(false).child(
+                Checkbox::new("overwrite-report")
+                    .label("Overwrite report")
+                    .checked(self.overwrite_report)
+                    .on_change(cx.listener(|this, next, _, cx| {
+                        this.overwrite_report = *next;
+                        cx.notify();
+                    })),
+            ),
+        );
 
         div()
             .size_full()
@@ -549,6 +576,9 @@ impl Render for TranscodeSettings {
                             .child(div().font_medium().child("After encoding"))
                             .child(finishing),
                     )
+                    .when(self.source.read(cx).is_directory(), |this| {
+                        this.child(self.recovery.clone())
+                    })
                     .when_some(self.destination_error.clone(), |this, error| {
                         this.child(div().text_sm().text_color(cx.theme().danger).child(error))
                     }),

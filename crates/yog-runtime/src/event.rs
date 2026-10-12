@@ -1,11 +1,11 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{fmt, path::PathBuf, time::Duration};
 
 use yog_core::ffmpeg::{prediction::Prediction, progress::Progress, vmaf::VmafOptions};
 
 pub(crate) type EventSink<'a> = dyn Fn(RunEvent) + Send + Sync + 'a;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunPhase {
     Discovering,
@@ -56,13 +56,15 @@ impl RunPhase {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SkipReason {
     NoVideo,
     ProbeFailed,
     ProbeTimedOut,
     UnsupportedContainer,
+    AlreadyCompleted,
+    ResumeMismatch,
 }
 
 impl SkipReason {
@@ -72,6 +74,8 @@ impl SkipReason {
             Self::ProbeFailed => "Probe failed",
             Self::ProbeTimedOut => "Probe timed out",
             Self::UnsupportedContainer => "Unsupported container",
+            Self::AlreadyCompleted => "Already completed",
+            Self::ResumeMismatch => "Resume mismatch",
         }
     }
 }
@@ -137,8 +141,19 @@ pub enum VmafOutcome {
     Cancelled,
 }
 
+#[derive(Debug, Clone)]
+pub struct RecoveryInfo {
+    pub forced: bool,
+    pub output: Option<PathBuf>,
+}
+
 #[derive(Debug)]
 pub enum RunEvent {
+    RecoveryPrepared {
+        path: PathBuf,
+        reused: usize,
+        forced: usize,
+    },
     PhaseChanged(RunPhase),
     /// The path scan has finished. `total` counts candidate files, not videos;
     /// eligibility is determined by probing each file before execution.
@@ -192,6 +207,7 @@ pub enum RunEvent {
         message: String,
     },
     TaskFinished {
+        recovery: Option<RecoveryInfo>,
         index: usize,
         total: usize,
         input: PathBuf,

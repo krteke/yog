@@ -102,13 +102,29 @@ while :; do :; done"#,
             .count(),
         2,
     );
-    assert_eq!(fs::read_dir(fixture.0.join("output")).unwrap().count(), 1);
+    assert_eq!(fs::read_dir(fixture.0.join("output")).unwrap().count(), 2);
     assert!(
         stdout.ends_with(
-            "batch summary: total 3 | succeeded 1 | failed 0 | skipped 0 | not processed 2 | cancelled\n"
+            "batch summary: total 3 | succeeded 1 | failed 0 | skipped 0 | reused 0 | forced 0 | not processed 2 | cancelled\n"
         ),
         "{stdout}"
     );
+    fixture.tool(
+        "ffmpeg",
+        r#"for last do :; done
+printf encoded > "$last""#,
+    );
+    let resumed = fixture
+        .recursive_command("output")
+        .arg("--copy")
+        .output()
+        .unwrap();
+    assert!(resumed.status.success(), "{:?}", resumed.stderr);
+    assert!(
+        String::from_utf8_lossy(&resumed.stdout)
+            .contains("succeeded 2 | failed 0 | skipped 0 | reused 1")
+    );
+    assert_eq!(fs::read_dir(fixture.0.join("output")).unwrap().count(), 4);
 }
 
 #[test]
@@ -226,7 +242,7 @@ esac"#,
     }
     fs::write(fixture.0.join("output.mkv"), b"original").unwrap();
     let mut command = fixture.command();
-    command.env("TMPDIR", &temporary).arg("-O");
+    command.env("TMPDIR", &temporary).arg("--overwrite-output");
     if phase == "vmaf" {
         command.args(["--vmaf", "--copy", "--report", "report.jsonl"]);
     } else {

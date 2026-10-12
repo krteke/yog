@@ -5,6 +5,7 @@ use crate::{
     event::{RunEvent, RunPhase, VmafOutcome},
     output::Output,
     progress::Display,
+    recovery::Recovery,
     report::{
         record::{PredictRecord, TranscodeRecord, VerifyOutcome, VerifyRecord, VmafRecord},
         transcode::TranscodeResult,
@@ -81,13 +82,13 @@ impl Transcoder {
         }
 
         diagnostics.event(RunEvent::PhaseChanged(RunPhase::PreparingOutput));
-        let output = Output::prepare(&request.output, request.overwrite)
+        let output = Output::prepare(&request.output, request.overwrite_output)
             .with_context(|| format!("cannot prepare output {}", request.output.display()))
             .map_err(|error| RunError::at(RunPhase::PreparingOutput, error))?;
         diagnostics.event(RunEvent::PhaseChanged(RunPhase::Probing));
         let media = self.probe(&request.input).await?;
         record.fill_source(&request, &media);
-        self.execute(request, media, output, diagnostics, record)
+        self.execute(request, media, output, diagnostics, record, None)
             .await
     }
 
@@ -97,16 +98,17 @@ impl Transcoder {
         media: MediaInfo,
         diagnostics: &Diagnostics<'_>,
         record: &mut TranscodeRecord,
+        recovery: Option<(&mut Recovery, &Path)>,
     ) -> Result<(), RunError> {
         if self.cancelled() {
             return Err(RunError::Cancelled);
         }
         diagnostics.event(RunEvent::PhaseChanged(RunPhase::PreparingOutput));
-        let output = Output::prepare(&request.output, request.overwrite)
+        let output = Output::prepare(&request.output, request.overwrite_output)
             .with_context(|| format!("cannot prepare output {}", request.output.display()))
             .map_err(|error| RunError::at(RunPhase::PreparingOutput, error))?;
         record.fill_source(&request, &media);
-        self.execute(request, media, output, diagnostics, record)
+        self.execute(request, media, output, diagnostics, record, recovery)
             .await
     }
 
@@ -208,10 +210,19 @@ impl Transcoder {
         output: Output,
         diagnostics: &Diagnostics<'_>,
         record: &mut TranscodeRecord,
+        mut recovery: Option<(&mut Recovery, &Path)>,
     ) -> Result<(), RunError> {
+        if let Some((state, relative)) = recovery.as_mut()
+            && !state.part_started(relative)
+        {
+            return Err(RunError::at(
+                RunPhase::PreparingOutput,
+                anyhow::anyhow!("cannot save partial output state"),
+            ));
+        }
         let target = request.output.clone();
         request.output = output.part().to_owned();
-        request.overwrite = true;
+        request.overwrite_output = true;
 
         diagnostics.event(RunEvent::PhaseChanged(RunPhase::Planning));
         let plan = request
@@ -342,6 +353,10 @@ impl Transcoder {
             reported.as_ref().and_then(|update| update.frame),
             reported.as_ref().and_then(|update| update.fps),
         ));
+
+        if let Some((state, relative)) = recovery {
+            state.published(relative);
+        }
 
         if let Some(options) = self.vmaf {
             diagnostics.event(RunEvent::PhaseChanged(RunPhase::CalculatingVmaf));

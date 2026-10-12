@@ -9,6 +9,7 @@ use std::{
 use gpui_kit::component::{
     ActiveTheme, Disableable, IndexPath, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants},
+    checkbox::Checkbox,
     form::{Field, Form},
     input::{Input, InputState},
     progress::Progress as ProgressBar,
@@ -66,6 +67,7 @@ pub struct PredictPage {
     quality: Entity<InputState>,
     bitrate: Entity<InputState>,
     report: Entity<InputState>,
+    overwrite_report: bool,
     messages: Entity<Messages>,
     stage: Stage,
     cancellation: Option<CancellationToken>,
@@ -141,6 +143,7 @@ impl PredictPage {
             rate,
             quality: cx.new(|cx| InputState::new(window, cx).default_value("28")),
             bitrate: cx.new(|cx| InputState::new(window, cx).placeholder("Bits per second")),
+            overwrite_report: false,
             report: cx.new(|cx| InputState::new(window, cx).placeholder("Optional report path")),
             messages,
             stage: Stage::Idle,
@@ -215,6 +218,7 @@ impl PredictPage {
         }
         let (mut options, config) = self.preferences.read(cx).run_defaults()?;
         options.report = report;
+        options.overwrite_report = self.overwrite_report;
         Ok(RunRequest {
             command,
             options,
@@ -553,6 +557,7 @@ mod tests {
                 assert!(page.results.is_empty());
                 page.handle_message(
                     WorkerMessage::Event(RunEvent::TaskFinished {
+                        recovery: None,
                         index: 1,
                         total: 1,
                         input: "video.mkv".into(),
@@ -591,6 +596,7 @@ mod tests {
             page.update(cx, |page, cx| {
                 page.handle_message(
                     WorkerMessage::Event(RunEvent::TaskFinished {
+                        recovery: None,
                         index: 1,
                         total: 5,
                         input: "cancelled.mkv".into(),
@@ -627,6 +633,7 @@ mod tests {
                 for index in 0..1_000 {
                     page.handle_message(
                         WorkerMessage::Event(RunEvent::TaskFinished {
+                            recovery: None,
                             input: format!("input-{index}.mkv").into(),
                             index: 1,
                             total: 1,

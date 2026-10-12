@@ -152,10 +152,9 @@ fn recursive_prediction_prints_a_batch_summary_without_video_outputs() {
         .output()
         .unwrap();
     assert!(recursive.status.success(), "{:?}", recursive.stderr);
-    assert!(
-        String::from_utf8_lossy(&recursive.stdout)
-            .ends_with("batch summary: total 1 | succeeded 1 | failed 0 | skipped 0\n")
-    );
+    assert!(String::from_utf8_lossy(&recursive.stdout).ends_with(
+        "batch summary: total 1 | succeeded 1 | failed 0 | skipped 0 | reused 0 | forced 0\n"
+    ));
     assert!(!fixture.0.join("output").exists());
 }
 

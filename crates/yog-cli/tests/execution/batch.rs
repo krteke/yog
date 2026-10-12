@@ -167,7 +167,9 @@ printf encoded > "$argument""#,
     );
     assert_eq!(stderr.matches("BAD-TRANSCODE").count(), 1, "{stderr}");
     assert!(
-        stdout.ends_with("batch summary: total 3 | succeeded 2 | failed 1 | skipped 0\n"),
+        stdout.ends_with(
+            "batch summary: total 3 | succeeded 2 | failed 1 | skipped 0 | reused 0 | forced 0\n"
+        ),
         "{stdout}"
     );
 }

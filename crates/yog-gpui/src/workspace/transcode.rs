@@ -22,7 +22,10 @@ use tokio_util::sync::CancellationToken;
 use yog_core::ffmpeg::progress::Progress;
 use yog_runtime::{
     RunOutcome, RunStatus,
-    event::{RunEvent, RunPhase, TaskResult as RuntimeTaskResult, TaskStatus, VmafOutcome},
+    event::{
+        RecoveryInfo, RunEvent, RunPhase, SkipReason, TaskResult as RuntimeTaskResult, TaskStatus,
+        VmafOutcome,
+    },
 };
 
 use self::settings::TranscodeSettings;
@@ -45,6 +48,7 @@ enum Stage {
 struct TaskResult {
     name: String,
     result: RuntimeTaskResult,
+    recovery: Option<RecoveryInfo>,
 }
 
 pub struct TranscodePage {
@@ -64,6 +68,9 @@ pub struct TranscodePage {
     succeeded: usize,
     failed: usize,
     skipped: usize,
+    reused: usize,
+    forced: usize,
+    state_path: Option<PathBuf>,
     duration: Option<std::time::Duration>,
     progress: Progress,
     started: Option<Instant>,
@@ -113,6 +120,9 @@ impl TranscodePage {
             succeeded: 0,
             failed: 0,
             skipped: 0,
+            reused: 0,
+            forced: 0,
+            state_path: None,
             duration: None,
             progress: Progress::default(),
             started: None,
@@ -142,6 +152,8 @@ impl TranscodePage {
         };
 
         self.stage = Stage::Running;
+        self.settings
+            .update(cx, |settings, cx| settings.set_running(true, cx));
         self.error = None;
         self.notice = None;
         self.phase = None;
@@ -153,6 +165,9 @@ impl TranscodePage {
         self.succeeded = 0;
         self.failed = 0;
         self.skipped = 0;
+        self.reused = 0;
+        self.forced = 0;
+        self.state_path = None;
         self.duration = None;
         self.progress = Progress::default();
         self.started = Some(Instant::now());
@@ -308,12 +323,43 @@ impl TranscodePage {
                     self.message(MessageLevel::Error, message.clone(), window, cx);
                     self.notice = Some((MessageLevel::Error, message));
                 }
+                RunEvent::RecoveryPrepared {
+                    path,
+                    reused,
+                    forced,
+                } => {
+                    self.state_path = Some(path.clone());
+                    self.message(
+                        MessageLevel::Info,
+                        format!(
+                            "Recovery: {} · {reused} reusable · {forced} forced",
+                            path.display()
+                        ),
+                        window,
+                        cx,
+                    );
+                }
                 RunEvent::TaskFinished {
                     input,
+                    index,
                     total,
                     result,
+                    recovery,
                     ..
                 } => {
+                    self.task_index = index;
+                    self.task_total = total;
+                    self.progress.finished = true;
+                    if recovery.as_ref().is_some_and(|info| info.forced) {
+                        self.forced += 1;
+                    }
+                    let reused = matches!(
+                        result,
+                        RuntimeTaskResult::Skipped {
+                            reason: SkipReason::AlreadyCompleted,
+                            ..
+                        }
+                    );
                     let level = match result.status() {
                         TaskStatus::Success => {
                             self.succeeded += 1;
@@ -324,8 +370,13 @@ impl TranscodePage {
                             MessageLevel::Error
                         }
                         TaskStatus::Skipped => {
-                            self.skipped += 1;
-                            MessageLevel::Warning
+                            if reused {
+                                self.reused += 1;
+                                MessageLevel::Info
+                            } else {
+                                self.skipped += 1;
+                                MessageLevel::Warning
+                            }
                         }
                         TaskStatus::Cancelled => MessageLevel::Warning,
                     };
@@ -341,14 +392,18 @@ impl TranscodePage {
                         window,
                         cx,
                     );
-                    if result.status() == TaskStatus::Success && total == 1 {
-                        self.completed_output = self.current_output.clone();
+                    if (result.status() == TaskStatus::Success || reused) && total == 1 {
+                        self.completed_output = recovery
+                            .as_ref()
+                            .and_then(|info| info.output.clone())
+                            .or_else(|| self.current_output.clone());
                     }
                     self.result_filter
                         .update(cx, |filter, cx| filter.append(&result, window, cx));
                     self.results.push(TaskResult {
                         name: input.display().to_string(),
                         result,
+                        recovery,
                     });
                 }
                 _ => {}
@@ -357,6 +412,8 @@ impl TranscodePage {
                 self.messages
                     .update(cx, |messages, cx| messages.finish(window, cx));
                 self.stage = Stage::Finished(outcome.status());
+                self.settings
+                    .update(cx, |settings, cx| settings.set_running(false, cx));
                 self.finished_elapsed = self.started.map(|started| started.elapsed());
                 self.cancellation = None;
                 let failure = match outcome {
@@ -370,7 +427,13 @@ impl TranscodePage {
                         self.succeeded = batch.succeeded;
                         self.failed = batch.failures.len();
                         self.skipped = batch.skipped;
-                        None
+                        self.reused = batch.reused;
+                        self.forced = batch.forced;
+                        batch.state_error.map(|error| {
+                            let detail = format!("{error:#}");
+                            self.error = Some(detail.clone());
+                            detail
+                        })
                     }
                     RunOutcome::Completed | RunOutcome::Cancelled => None,
                 };
@@ -603,7 +666,7 @@ impl TranscodePage {
                     .text_sm()
                     .text_color(theme.muted_foreground)
                     .child(format!(
-                        "{}{} completed · {} failed · {} skipped",
+                        "{}{} completed · {} failed · {} skipped · {} reused · {} forced",
                         if self.task_index > 0 {
                             format!("Task {} of {} · ", self.task_index, self.task_total)
                         } else {
@@ -611,9 +674,20 @@ impl TranscodePage {
                         },
                         self.succeeded,
                         self.failed,
-                        self.skipped
+                        self.skipped,
+                        self.reused,
+                        self.forced
                     )),
             )
+            .when_some(self.state_path.clone(), |this, path| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .truncate()
+                        .child(format!("State: {}", path.display())),
+                )
+            })
             .when(!details.is_empty(), |this| {
                 this.child(div().flex().flex_wrap().gap_x_4().gap_y_1().children(
                     details.into_iter().map(|detail| {
@@ -711,6 +785,24 @@ impl TranscodePage {
                         .child(format!("{}: {error}", result.result)),
                 )
             });
+        let row = row.when_some(result.recovery.as_ref(), |this, recovery| {
+            this.child(div().text_xs().text_color(theme.muted_foreground).child(
+                if recovery.forced {
+                    "Forced recovery"
+                } else {
+                    "Recovered from state"
+                },
+            ))
+            .when_some(recovery.output.as_ref(), |this, output| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .truncate()
+                        .child(format!("Recorded output: {}", output.display())),
+                )
+            })
+        });
         let row = row.id(format!("transcode-result-{}", result.name));
         #[cfg(test)]
         let row = row.test_support();
@@ -853,6 +945,47 @@ mod tests {
         assert_eq!(components::format_size(1_181_116_006), "1.1 GiB");
     }
 
+    #[gpui_kit::test]
+    fn recovered_success_retains_the_recorded_output_and_is_not_an_ordinary_skip(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let mut workspace = None;
+        let handle = cx.open_window(size(px(900.), px(700.)), |window, cx| {
+            let view = cx.new(|cx| Workspace::new(window, cx));
+            workspace = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            let page = workspace.unwrap().read(cx).transcode.clone();
+            page.update(cx, |page, cx| {
+                page.handle_message(
+                    WorkerMessage::Event(RunEvent::TaskFinished {
+                        input: "input.mkv".into(),
+                        index: 1,
+                        total: 1,
+                        result: yog_runtime::event::TaskResult::Skipped {
+                            reason: yog_runtime::event::SkipReason::AlreadyCompleted,
+                            message: "Recovered".into(),
+                        },
+                        recovery: Some(yog_runtime::event::RecoveryInfo {
+                            forced: true,
+                            output: Some("old/output.mkv".into()),
+                        }),
+                    }),
+                    window,
+                    cx,
+                );
+                assert_eq!(page.skipped, 0);
+                assert_eq!(
+                    page.completed_output.as_deref(),
+                    Some(std::path::Path::new("old/output.mkv"))
+                );
+            });
+        })
+        .unwrap();
+    }
+
     #[test]
     fn processed_time_keeps_hours_instead_of_wrapping_at_sixty_minutes() {
         assert_eq!(
@@ -887,6 +1020,7 @@ mod tests {
                 for index in 0..10_000 {
                     page.handle_message(
                         WorkerMessage::Event(RunEvent::TaskFinished {
+                            recovery: None,
                             input: format!("input-{index}.mkv").into(),
                             index: 1,
                             total: 1,
@@ -1092,6 +1226,7 @@ mod tests {
                 page.phase = Some(RunPhase::Discovering);
                 page.handle_message(
                     WorkerMessage::Event(RunEvent::TaskFinished {
+                        recovery: None,
                         input: "input.mkv".into(),
                         index: 1,
                         total: 1,

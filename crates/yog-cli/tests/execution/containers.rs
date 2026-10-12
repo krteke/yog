@@ -152,7 +152,9 @@ printf '{"streams":[{"index":0,"codec_type":"video"}],"format":{"format_name":"%
     );
     let stdout = String::from_utf8_lossy(&result.stdout);
     assert!(
-        stdout.ends_with("batch summary: total 3 | succeeded 2 | failed 0 | skipped 1\n"),
+        stdout.ends_with(
+            "batch summary: total 3 | succeeded 2 | failed 0 | skipped 1 | reused 0 | forced 0\n"
+        ),
         "{stdout}"
     );
 
@@ -234,7 +236,7 @@ printf '{"streams":[{"index":0,"codec_type":"video"}],"format":{"format_name":"%
 
     let result = fixture
         .recursive_command("output")
-        .args(["-C", "webm", "-O", "--copy"])
+        .args(["-C", "webm", "--overwrite-output", "--copy"])
         .output()
         .unwrap();
 
@@ -271,10 +273,9 @@ printf '{"streams":%s,"format":{"format_name":"matroska,webm","duration":"1"}}' 
         fs::read(fixture.0.join("output/movie.webm")).unwrap(),
         b"encoded"
     );
-    assert!(
-        String::from_utf8_lossy(&result.stdout)
-            .ends_with("batch summary: total 2 | succeeded 1 | failed 0 | skipped 1\n")
-    );
+    assert!(String::from_utf8_lossy(&result.stdout).ends_with(
+        "batch summary: total 2 | succeeded 1 | failed 0 | skipped 1 | reused 0 | forced 0\n"
+    ));
     let records = read_report(&fixture, "report.jsonl");
     assert_eq!(records.len(), 2, "{records:?}");
     assert_eq!(

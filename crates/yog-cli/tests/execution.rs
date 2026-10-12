@@ -20,6 +20,8 @@ mod prediction;
 mod process_control;
 #[path = "execution/publication.rs"]
 mod publication;
+#[path = "execution/recovery.rs"]
+mod recovery;
 #[path = "execution/reports.rs"]
 mod reports;
 #[path = "execution/support.rs"]

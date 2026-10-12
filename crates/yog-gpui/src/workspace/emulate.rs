@@ -89,7 +89,8 @@ pub struct EmulatePage {
     png: Entity<InputState>,
     svg: Entity<InputState>,
     report: Entity<InputState>,
-    overwrite: bool,
+    overwrite_report: bool,
+    overwrite_chart: bool,
     messages: Entity<Messages>,
     stage: Stage,
     cancellation: Option<CancellationToken>,
@@ -158,8 +159,9 @@ impl EmulatePage {
             inspector_focus,
             png: cx.new(|cx| InputState::new(window, cx).placeholder("Save PNG chart")),
             svg: cx.new(|cx| InputState::new(window, cx).placeholder("Save SVG chart")),
+            overwrite_report: false,
             report: cx.new(|cx| InputState::new(window, cx).placeholder("Optional report path")),
-            overwrite: false,
+            overwrite_chart: false,
             messages,
             stage: Stage::Idle,
             cancellation: None,
@@ -311,14 +313,14 @@ impl EmulatePage {
         };
         let mut request = TranscodeRequest::new(input, PathBuf::new())
             .with_decoding(decoding)
-            .with_video(video)
-            .with_overwrite(self.overwrite);
+            .with_video(video);
         if let Some(container) = container(selected(&self.container, cx)) {
             request = request.with_container(container);
         }
         let command = Command {
             request,
             operation: Operation::Emulate(EmulationOptions {
+                overwrite_chart: self.overwrite_chart,
                 png,
                 svg,
                 qualities,
@@ -343,6 +345,7 @@ impl EmulatePage {
         }
         let (mut options, config) = self.preferences.read(cx).run_defaults()?;
         options.report = report;
+        options.overwrite_report = self.overwrite_report;
         Ok(RunRequest {
             command,
             options,

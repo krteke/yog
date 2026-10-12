@@ -1,8 +1,7 @@
 use crate::{
-    diagnostics::Diagnostics,
     error::{RunError, timed_out},
-    event::{RunEvent, RunPhase, SkipReason},
-    report::{Record, Report, record::SkippedRecord},
+    event::{RunPhase, SkipReason, TaskResult},
+    recovery::RecoveredTask,
     transcode::Transcoder,
 };
 use anyhow::Context;
@@ -15,6 +14,7 @@ use walkdir::WalkDir;
 use yog_core::{ffmpeg::plan::TranscodeRequest, ffprobe::types::MediaInfo};
 
 pub struct TaskPaths {
+    pub relative: PathBuf,
     pub input: PathBuf,
     pub output: PathBuf,
 }
@@ -59,19 +59,24 @@ pub fn scan(
         }
 
         let input = entry.into_path();
+        let relative = input
+            .strip_prefix(&template.input)
+            .expect("walked entry belongs to input")
+            .to_path_buf();
         let output = if predict {
             PathBuf::new()
         } else {
-            let relative = input
-                .strip_prefix(&template.input)
-                .expect("walked entry must be below the input directory");
-            let mut output = template.output.join(relative);
+            let mut output = template.output.join(&relative);
             if let Some(container) = template.container {
                 output.set_extension(container.extension());
             }
             output
         };
-        tasks.push(TaskPaths { input, output });
+        tasks.push(TaskPaths {
+            relative,
+            input,
+            output,
+        });
     }
 
     Ok(tasks)
@@ -83,13 +88,23 @@ pub async fn check_output_conflicts(
     tasks: &[TaskPaths],
     template: &TranscodeRequest,
     transcoder: &Transcoder,
-    diagnostics: &Diagnostics<'_>,
-    report: &mut Report,
-    skipped: &mut HashSet<usize>,
+    recovered: &HashMap<usize, RecoveredTask>,
+    skipped: &mut HashMap<usize, TaskResult>,
 ) -> Result<(), RunError> {
     let mut candidates = HashMap::new();
     let mut conflicts = BTreeSet::new();
     for (index, task) in tasks.iter().enumerate() {
+        if recovered.get(&index).is_some_and(|task| {
+            !matches!(
+                task.result,
+                TaskResult::Skipped {
+                    reason: SkipReason::AlreadyCompleted,
+                    ..
+                }
+            )
+        }) {
+            continue;
+        }
         if let Some(previous) = candidates.insert(&task.output, index) {
             conflicts.insert(previous);
             conflicts.insert(index);
@@ -100,6 +115,15 @@ pub async fn check_output_conflicts(
     let mut outputs = HashSet::new();
     for index in conflicts {
         let task = &tasks[index];
+        if recovered.contains_key(&index) {
+            if !outputs.insert(&task.output) {
+                return Err(RunError::at(
+                    RunPhase::Discovering,
+                    anyhow::anyhow!("multiple input files map to {}", task.output.display()),
+                ));
+            }
+            continue;
+        }
         let request = TranscodeRequest {
             input: task.input.clone(),
             output: task.output.clone(),
@@ -116,19 +140,7 @@ pub async fn check_output_conflicts(
             }
             Err(RunError::Cancelled) => return Err(RunError::Cancelled),
             Err(error @ RunError::Skipped { .. }) => {
-                skipped.insert(index);
-                diagnostics.skipped_input(&task.input, &error);
-                let result = error.result();
-                report.write(
-                    &Record::Skipped(SkippedRecord::new(&task.input, result.clone())),
-                    diagnostics,
-                );
-                diagnostics.event(RunEvent::TaskFinished {
-                    index: index + 1,
-                    total: tasks.len(),
-                    input: task.input.clone(),
-                    result,
-                });
+                skipped.insert(index, error.result());
             }
             Err(RunError::Failed { .. }) => unreachable!("batch probing returns skips"),
         }

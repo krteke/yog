@@ -46,11 +46,11 @@ struct TranscodeArgs {
     /// Disable both reading and writing batch state
     #[arg(long, global = true, conflicts_with_all = ["state", "restart", "resume_batch_mismatch", "resume_file_mismatch"])]
     no_state: bool,
-    /// Action when saved batch settings differ (default: abort; Force trusts old outputs)
-    #[arg(long, global = true, value_name = "abort|force|skip|restart")]
+    /// Action when saved input/settings differ (default: ask; Force trusts records)
+    #[arg(long, global = true, value_name = "ask|abort|force|skip|restart")]
     resume_batch_mismatch: Option<MismatchPolicy>,
-    /// Action when a source/output fingerprint differs (default: restart; Force trusts the record)
-    #[arg(long, global = true, value_name = "abort|force|skip|restart")]
+    /// Action when a source/output fingerprint differs (default: ask; Force trusts records)
+    #[arg(long, global = true, value_name = "ask|abort|force|skip|restart")]
     resume_file_mismatch: Option<MismatchPolicy>,
     #[arg(short, long, global = true, value_name = "PATH")]
     output: Option<PathBuf>,

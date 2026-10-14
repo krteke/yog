@@ -58,7 +58,11 @@ impl Batch {
         let mut state = self.open();
         let tasks = self.tasks();
         state
-            .classify(&tasks, &tokio_util::sync::CancellationToken::new())
+            .classify(
+                &tasks,
+                &tokio_util::sync::CancellationToken::new(),
+                &Diagnostics::new(false, false, &|_| {}),
+            )
             .await
             .unwrap();
         state
@@ -76,7 +80,11 @@ impl Batch {
         let mut state = self.open();
         let tasks = self.tasks();
         state
-            .classify(&tasks, &tokio_util::sync::CancellationToken::new())
+            .classify(
+                &tasks,
+                &tokio_util::sync::CancellationToken::new(),
+                &Diagnostics::new(false, false, &|_| {}),
+            )
             .await
             .unwrap();
         state
@@ -95,6 +103,221 @@ impl Drop for Batch {
 }
 
 #[tokio::test]
+async fn default_recovery_waits_without_changing_the_saved_state() {
+    let mut batch = Batch::new();
+    batch.complete().await;
+    let path = batch.root.join("output/.yog-state.jsonl");
+    let saved = fs::read(&path).unwrap();
+    batch.command.request.container = Some(yog_core::ffmpeg::plan::Container::Matroska);
+    let events = std::sync::Mutex::new(Vec::new());
+    let sink = |event| events.lock().unwrap().push(event);
+    let diagnostics = Diagnostics::new(false, false, &sink);
+    let mut state = Recovery::open(&batch.command, &batch.options, &diagnostics).unwrap();
+    let tasks = batch.tasks();
+    let cancellation = tokio_util::sync::CancellationToken::new();
+
+    let result = tokio::time::timeout(
+        Duration::from_millis(20),
+        state.classify(&tasks, &cancellation, &diagnostics),
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "a recovery difference must wait for a decision: {result:?}"
+    );
+    assert_eq!(fs::read(&path).unwrap(), saved);
+    assert_eq!(
+        fs::read(batch.root.join("output/movie.mkv")).unwrap(),
+        b"encoded"
+    );
+}
+
+#[tokio::test]
+async fn cancelling_a_recovery_confirmation_preserves_state_and_output() {
+    let mut batch = Batch::new();
+    batch.complete().await;
+    batch.command.request.container = Some(Container::Matroska);
+    let path = batch.root.join("output/.yog-state.jsonl");
+    let saved = fs::read(&path).unwrap();
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let held = std::sync::Mutex::new(None);
+    let sink = |event| {
+        if let RunEvent::RecoveryDecisionRequired(request) = event {
+            *held.lock().unwrap() = Some(request);
+            cancellation.cancel();
+        }
+    };
+    let diagnostics = Diagnostics::new(false, false, &sink);
+    let mut state = batch.open();
+    let result = state
+        .classify(&batch.tasks(), &cancellation, &diagnostics)
+        .await;
+
+    assert!(result.is_err());
+    assert!(cancellation.is_cancelled());
+    assert!(held.lock().unwrap().is_some());
+    assert_eq!(fs::read(path).unwrap(), saved);
+    assert_eq!(
+        fs::read(batch.root.join("output/movie.mkv")).unwrap(),
+        b"encoded"
+    );
+}
+
+#[tokio::test]
+async fn confirming_a_moved_input_directory_reuses_the_completed_video() {
+    let mut batch = Batch::new();
+    batch.complete().await;
+    let path = batch.root.join("output/.yog-state.jsonl");
+    let saved = fs::read(&path).unwrap();
+    let moved = batch.root.join("moved-input");
+    fs::rename(&batch.command.request.input, &moved).unwrap();
+    batch.command.request.input = moved.clone();
+    let asked = std::sync::Mutex::new(false);
+    let sink = |event| {
+        if let RunEvent::RecoveryDecisionRequired(request) = event {
+            assert_eq!(request.differences.len(), 1);
+            assert_eq!(
+                request.differences[0].kind,
+                RecoveryDifferenceKind::InputRoot
+            );
+            assert!(!request.overwrite_output);
+            assert_eq!(fs::read(&path).unwrap(), saved);
+            *asked.lock().unwrap() = true;
+            assert!(request.respond(RecoveryAction::Force, false));
+        }
+    };
+    let diagnostics = Diagnostics::new(false, false, &sink);
+    let mut state = batch.open();
+    state
+        .classify(
+            &batch.tasks(),
+            &tokio_util::sync::CancellationToken::new(),
+            &diagnostics,
+        )
+        .await
+        .unwrap();
+
+    assert!(*asked.lock().unwrap());
+    let restored = state.take_recovered().remove(&0).unwrap();
+    assert!(matches!(
+        restored.result,
+        TaskResult::Skipped {
+            reason: SkipReason::AlreadyCompleted,
+            ..
+        }
+    ));
+    assert!(restored.info.forced);
+    assert_eq!(fs::read(&path).unwrap(), saved);
+    state.start(&diagnostics).unwrap();
+    assert_eq!(batch.open().header.input_root, moved);
+    assert_eq!(
+        fs::read(batch.root.join("output/movie.mkv")).unwrap(),
+        b"encoded"
+    );
+}
+
+#[tokio::test]
+async fn applying_a_choice_to_similar_source_changes_asks_only_once() {
+    let batch = Batch::new();
+    batch.complete().await;
+    let second = TaskPaths {
+        relative: "second.mkv".into(),
+        input: batch.command.request.input.join("second.mkv"),
+        output: batch.command.request.output.join("second.mkv"),
+    };
+    fs::write(&second.input, b"second source").unwrap();
+    let mut state = batch.open();
+    state
+        .start(&Diagnostics::new(false, false, &|_| {}))
+        .unwrap();
+    state.begin(1, &second).unwrap();
+    fs::write(&second.output, b"second output").unwrap();
+    state.published(&second.relative);
+    drop(state);
+    fs::write(
+        batch.command.request.input.join("movie.mkv"),
+        b"changed first source",
+    )
+    .unwrap();
+    fs::write(&second.input, b"changed second source").unwrap();
+    let mut tasks = batch.tasks();
+    tasks.push(second);
+    let asks = std::sync::atomic::AtomicUsize::new(0);
+    let sink = |event| {
+        if let RunEvent::RecoveryDecisionRequired(request) = event {
+            asks.fetch_add(1, Ordering::Relaxed);
+            assert!(request.respond(RecoveryAction::Force, true));
+        }
+    };
+    let diagnostics = Diagnostics::new(false, false, &sink);
+    let mut state = batch.open();
+    state
+        .classify(
+            &tasks,
+            &tokio_util::sync::CancellationToken::new(),
+            &diagnostics,
+        )
+        .await
+        .unwrap();
+    assert_eq!(asks.load(Ordering::Relaxed), 1);
+    assert_eq!(state.take_recovered().len(), 2);
+}
+
+#[tokio::test]
+async fn a_source_choice_does_not_accept_a_missing_output() {
+    let batch = Batch::new();
+    batch.complete().await;
+    let second = TaskPaths {
+        relative: "second.mkv".into(),
+        input: batch.command.request.input.join("second.mkv"),
+        output: batch.command.request.output.join("second.mkv"),
+    };
+    fs::write(&second.input, b"second source").unwrap();
+    let mut state = batch.open();
+    state
+        .start(&Diagnostics::new(false, false, &|_| {}))
+        .unwrap();
+    state.begin(1, &second).unwrap();
+    fs::write(&second.output, b"second output").unwrap();
+    state.published(&second.relative);
+    drop(state);
+    fs::write(
+        batch.command.request.input.join("movie.mkv"),
+        b"changed source",
+    )
+    .unwrap();
+    fs::remove_file(&second.output).unwrap();
+    let mut tasks = batch.tasks();
+    tasks.push(second);
+    let kinds = std::sync::Mutex::new(Vec::new());
+    let sink = |event| {
+        if let RunEvent::RecoveryDecisionRequired(request) = event {
+            kinds.lock().unwrap().push(request.differences[0].kind);
+            assert!(request.respond(RecoveryAction::Force, true));
+        }
+    };
+    let diagnostics = Diagnostics::new(false, false, &sink);
+    let mut state = batch.open();
+    state
+        .classify(
+            &tasks,
+            &tokio_util::sync::CancellationToken::new(),
+            &diagnostics,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        *kinds.lock().unwrap(),
+        vec![
+            RecoveryDifferenceKind::SourceFingerprint,
+            RecoveryDifferenceKind::OutputFingerprint
+        ]
+    );
+    assert_eq!(state.take_recovered().len(), 2);
+}
+
+#[tokio::test]
 async fn recovery_uses_each_completed_files_settings_instead_of_the_last_run() {
     let mut batch = Batch::new();
     batch.complete().await;
@@ -102,7 +325,11 @@ async fn recovery_uses_each_completed_files_settings_instead_of_the_last_run() {
     batch.options.recovery.batch_mismatch = MismatchPolicy::Force;
     let mut state = batch.open();
     state
-        .classify(&batch.tasks(), &tokio_util::sync::CancellationToken::new())
+        .classify(
+            &batch.tasks(),
+            &tokio_util::sync::CancellationToken::new(),
+            &Diagnostics::new(false, false, &|_| {}),
+        )
         .await
         .unwrap();
     state
@@ -114,7 +341,11 @@ async fn recovery_uses_each_completed_files_settings_instead_of_the_last_run() {
     batch.options.recovery.batch_mismatch = MismatchPolicy::Abort;
     let mut state = batch.open();
     state
-        .classify(&batch.tasks(), &tokio_util::sync::CancellationToken::new())
+        .classify(
+            &batch.tasks(),
+            &tokio_util::sync::CancellationToken::new(),
+            &Diagnostics::new(false, false, &|_| {}),
+        )
         .await
         .unwrap();
     assert_eq!(state.take_recovered().len(), 1);
@@ -127,7 +358,11 @@ async fn changing_verification_does_not_invalidate_a_completed_video() {
     batch.options.verify = true;
     let mut state = batch.open();
     state
-        .classify(&batch.tasks(), &tokio_util::sync::CancellationToken::new())
+        .classify(
+            &batch.tasks(),
+            &tokio_util::sync::CancellationToken::new(),
+            &Diagnostics::new(false, false, &|_| {}),
+        )
         .await
         .unwrap();
     assert_eq!(state.take_recovered().len(), 1);
@@ -140,7 +375,11 @@ async fn copy_recovery_ignores_decoder_changes() {
     batch.command.request.decoding = DecodingBackend::Vaapi(None);
     let mut state = batch.open();
     state
-        .classify(&batch.tasks(), &tokio_util::sync::CancellationToken::new())
+        .classify(
+            &batch.tasks(),
+            &tokio_util::sync::CancellationToken::new(),
+            &Diagnostics::new(false, false, &|_| {}),
+        )
         .await
         .unwrap();
     assert_eq!(state.take_recovered().len(), 1);
@@ -152,7 +391,11 @@ async fn non_video_recovery_ignores_encoding_changes() {
     let tasks = batch.tasks();
     let mut state = batch.open();
     state
-        .classify(&tasks, &tokio_util::sync::CancellationToken::new())
+        .classify(
+            &tasks,
+            &tokio_util::sync::CancellationToken::new(),
+            &Diagnostics::new(false, false, &|_| {}),
+        )
         .await
         .unwrap();
     state
@@ -171,7 +414,11 @@ async fn non_video_recovery_ignores_encoding_changes() {
     batch.command.request.video = VideoAction::encode_x265(None, None);
     let mut state = batch.open();
     state
-        .classify(&tasks, &tokio_util::sync::CancellationToken::new())
+        .classify(
+            &tasks,
+            &tokio_util::sync::CancellationToken::new(),
+            &Diagnostics::new(false, false, &|_| {}),
+        )
         .await
         .unwrap();
     assert_eq!(state.take_recovered().len(), 1);
@@ -188,7 +435,11 @@ async fn a_missing_output_directory_with_parent_components_can_be_recovered() {
     let mut state = batch.open();
     let tasks = batch.tasks();
     state
-        .classify(&tasks, &tokio_util::sync::CancellationToken::new())
+        .classify(
+            &tasks,
+            &tokio_util::sync::CancellationToken::new(),
+            &Diagnostics::new(false, false, &|_| {}),
+        )
         .await
         .unwrap();
     state
@@ -202,7 +453,11 @@ async fn a_missing_output_directory_with_parent_components_can_be_recovered() {
 
     let mut state = batch.open();
     state
-        .classify(&tasks, &tokio_util::sync::CancellationToken::new())
+        .classify(
+            &tasks,
+            &tokio_util::sync::CancellationToken::new(),
+            &Diagnostics::new(false, false, &|_| {}),
+        )
         .await
         .unwrap();
     assert_eq!(state.take_recovered().len(), 1);
@@ -225,7 +480,11 @@ async fn deleted_historical_inputs_do_not_trigger_batch_restart() {
     batch.options.recovery.batch_mismatch = MismatchPolicy::Force;
     let mut state = batch.open();
     state
-        .classify(&batch.tasks(), &tokio_util::sync::CancellationToken::new())
+        .classify(
+            &batch.tasks(),
+            &tokio_util::sync::CancellationToken::new(),
+            &Diagnostics::new(false, false, &|_| {}),
+        )
         .await
         .unwrap();
     state
@@ -246,7 +505,11 @@ async fn deleted_historical_inputs_do_not_trigger_batch_restart() {
     batch.options.recovery.batch_mismatch = MismatchPolicy::Restart;
     let mut state = batch.open();
     state
-        .classify(&[task], &tokio_util::sync::CancellationToken::new())
+        .classify(
+            &[task],
+            &tokio_util::sync::CancellationToken::new(),
+            &Diagnostics::new(false, false, &|_| {}),
+        )
         .await
         .unwrap();
     assert_eq!(state.take_recovered().len(), 1);
@@ -261,7 +524,11 @@ async fn a_complete_final_record_does_not_require_a_newline() {
     file.set_len(file.metadata().unwrap().len() - 1).unwrap();
     let mut state = batch.open();
     state
-        .classify(&batch.tasks(), &tokio_util::sync::CancellationToken::new())
+        .classify(
+            &batch.tasks(),
+            &tokio_util::sync::CancellationToken::new(),
+            &Diagnostics::new(false, false, &|_| {}),
+        )
         .await
         .unwrap();
     assert_eq!(state.take_recovered().len(), 1);
@@ -308,7 +575,11 @@ async fn state_rewriting_does_not_use_a_temporary_path() {
     batch.complete().await;
     let mut state = batch.open();
     state
-        .classify(&batch.tasks(), &tokio_util::sync::CancellationToken::new())
+        .classify(
+            &batch.tasks(),
+            &tokio_util::sync::CancellationToken::new(),
+            &Diagnostics::new(false, false, &|_| {}),
+        )
         .await
         .unwrap();
     assert_eq!(state.take_recovered().len(), 1);
@@ -342,7 +613,11 @@ async fn a_state_write_error_after_publication_does_not_skip_requested_vmaf() {
     let mut state = batch.open();
     let tasks = batch.tasks();
     state
-        .classify(&tasks, &tokio_util::sync::CancellationToken::new())
+        .classify(
+            &tasks,
+            &tokio_util::sync::CancellationToken::new(),
+            &Diagnostics::new(false, false, &|_| {}),
+        )
         .await
         .unwrap();
     state
@@ -398,7 +673,11 @@ async fn explicit_restart_removes_only_the_recorded_unfinished_part() {
     let mut state = batch.open();
     let tasks = batch.tasks();
     state
-        .classify(&tasks, &tokio_util::sync::CancellationToken::new())
+        .classify(
+            &tasks,
+            &tokio_util::sync::CancellationToken::new(),
+            &Diagnostics::new(false, false, &|_| {}),
+        )
         .await
         .unwrap();
     state
@@ -418,7 +697,11 @@ async fn batch_policy_restart_preserves_unfinished_part_ownership() {
     let mut state = batch.open();
     let tasks = batch.tasks();
     state
-        .classify(&tasks, &tokio_util::sync::CancellationToken::new())
+        .classify(
+            &tasks,
+            &tokio_util::sync::CancellationToken::new(),
+            &Diagnostics::new(false, false, &|_| {}),
+        )
         .await
         .unwrap();
     state
@@ -436,7 +719,11 @@ async fn an_unowned_existing_part_is_never_claimed_by_a_failed_attempt() {
     fs::write(&part, b"not ours").unwrap();
     let mut state = batch.open();
     state
-        .classify(&tasks, &tokio_util::sync::CancellationToken::new())
+        .classify(
+            &tasks,
+            &tokio_util::sync::CancellationToken::new(),
+            &Diagnostics::new(false, false, &|_| {}),
+        )
         .await
         .unwrap();
     state
@@ -455,7 +742,11 @@ async fn an_unowned_existing_part_is_never_claimed_by_a_failed_attempt() {
     drop(state);
     let mut state = batch.open();
     state
-        .classify(&tasks, &tokio_util::sync::CancellationToken::new())
+        .classify(
+            &tasks,
+            &tokio_util::sync::CancellationToken::new(),
+            &Diagnostics::new(false, false, &|_| {}),
+        )
         .await
         .unwrap();
     state
@@ -476,7 +767,11 @@ async fn partial_cleanup_failure_can_be_recorded_as_a_task_failure() {
     fs::create_dir(&part).unwrap();
     let mut state = batch.open();
     state
-        .classify(&tasks, &tokio_util::sync::CancellationToken::new())
+        .classify(
+            &tasks,
+            &tokio_util::sync::CancellationToken::new(),
+            &Diagnostics::new(false, false, &|_| {}),
+        )
         .await
         .unwrap();
     state
@@ -517,7 +812,11 @@ async fn incomplete_final_record_is_ignored_and_compacted_away() {
         .unwrap();
     let mut state = batch.open();
     state
-        .classify(&batch.tasks(), &tokio_util::sync::CancellationToken::new())
+        .classify(
+            &batch.tasks(),
+            &tokio_util::sync::CancellationToken::new(),
+            &Diagnostics::new(false, false, &|_| {}),
+        )
         .await
         .unwrap();
     state
@@ -553,7 +852,8 @@ async fn corrupt_complete_record_is_rejected() {
 
 #[tokio::test]
 async fn fingerprints_compare_nanoseconds_even_when_size_is_unchanged() {
-    let batch = Batch::new();
+    let mut batch = Batch::new();
+    batch.options.recovery.file_mismatch = MismatchPolicy::Restart;
     let input = batch.root.join("input/movie.mkv");
     let file = File::options().write(true).open(&input).unwrap();
     file.set_modified(SystemTime::UNIX_EPOCH + Duration::new(1_800_000_000, 1))
@@ -563,7 +863,11 @@ async fn fingerprints_compare_nanoseconds_even_when_size_is_unchanged() {
         .unwrap();
     let mut state = batch.open();
     state
-        .classify(&batch.tasks(), &tokio_util::sync::CancellationToken::new())
+        .classify(
+            &batch.tasks(),
+            &tokio_util::sync::CancellationToken::new(),
+            &Diagnostics::new(false, false, &|_| {}),
+        )
         .await
         .unwrap();
     state
@@ -583,7 +887,11 @@ async fn native_paths_round_trip_without_lossy_conversion() {
     batch.complete().await;
     let mut state = batch.open();
     state
-        .classify(&batch.tasks(), &tokio_util::sync::CancellationToken::new())
+        .classify(
+            &batch.tasks(),
+            &tokio_util::sync::CancellationToken::new(),
+            &Diagnostics::new(false, false, &|_| {}),
+        )
         .await
         .unwrap();
     state
@@ -604,7 +912,11 @@ async fn vaapi_encoding_recovers_with_a_non_utf8_device_path() {
     batch.complete().await;
     let mut state = batch.open();
     state
-        .classify(&batch.tasks(), &tokio_util::sync::CancellationToken::new())
+        .classify(
+            &batch.tasks(),
+            &tokio_util::sync::CancellationToken::new(),
+            &Diagnostics::new(false, false, &|_| {}),
+        )
         .await
         .unwrap();
     assert_eq!(state.take_recovered().len(), 1);
@@ -619,7 +931,11 @@ async fn hardware_decoder_recovers_with_a_non_utf8_device_name() {
     batch.complete().await;
     let mut state = batch.open();
     state
-        .classify(&batch.tasks(), &tokio_util::sync::CancellationToken::new())
+        .classify(
+            &batch.tasks(),
+            &tokio_util::sync::CancellationToken::new(),
+            &Diagnostics::new(false, false, &|_| {}),
+        )
         .await
         .unwrap();
     assert_eq!(state.take_recovered().len(), 1);
@@ -639,7 +955,11 @@ async fn nvenc_recovery_retains_codec_bitrate_preset_and_multipass() {
     batch.complete().await;
     let mut state = batch.open();
     state
-        .classify(&batch.tasks(), &tokio_util::sync::CancellationToken::new())
+        .classify(
+            &batch.tasks(),
+            &tokio_util::sync::CancellationToken::new(),
+            &Diagnostics::new(false, false, &|_| {}),
+        )
         .await
         .unwrap();
     assert_eq!(state.take_recovered().len(), 1);
@@ -658,7 +978,11 @@ async fn aom_recovery_keeps_cpu_used_as_an_encoder_specific_integer() {
     );
     let mut state = batch.open();
     state
-        .classify(&batch.tasks(), &tokio_util::sync::CancellationToken::new())
+        .classify(
+            &batch.tasks(),
+            &tokio_util::sync::CancellationToken::new(),
+            &Diagnostics::new(false, false, &|_| {}),
+        )
         .await
         .unwrap();
     assert_eq!(state.take_recovered().len(), 1);
@@ -670,7 +994,11 @@ async fn publication_remains_successful_when_the_state_write_fails() {
     let tasks = batch.tasks();
     let mut state = batch.open();
     state
-        .classify(&tasks, &tokio_util::sync::CancellationToken::new())
+        .classify(
+            &tasks,
+            &tokio_util::sync::CancellationToken::new(),
+            &Diagnostics::new(false, false, &|_| {}),
+        )
         .await
         .unwrap();
     state
@@ -692,7 +1020,7 @@ async fn publication_remains_successful_when_the_state_write_fails() {
 }
 
 #[tokio::test]
-async fn force_keeps_historical_settings_and_excludes_old_output_roots() {
+async fn force_preserves_each_recorded_output_mapping() {
     let mut batch = Batch::new();
     batch.complete().await;
     let old = batch.open().header.settings[0].clone();
@@ -701,7 +1029,11 @@ async fn force_keeps_historical_settings_and_excludes_old_output_roots() {
     batch.command.request.output = batch.root.join("other-output");
     let mut state = batch.open();
     state
-        .classify(&batch.tasks(), &tokio_util::sync::CancellationToken::new())
+        .classify(
+            &batch.tasks(),
+            &tokio_util::sync::CancellationToken::new(),
+            &Diagnostics::new(false, false, &|_| {}),
+        )
         .await
         .unwrap();
     state
@@ -718,7 +1050,11 @@ async fn force_keeps_historical_settings_and_excludes_old_output_roots() {
     fs::remove_file(batch.root.join("input/movie.mkv")).unwrap();
     let mut state = batch.open();
     state
-        .classify(&[], &tokio_util::sync::CancellationToken::new())
+        .classify(
+            &[],
+            &tokio_util::sync::CancellationToken::new(),
+            &Diagnostics::new(false, false, &|_| {}),
+        )
         .await
         .unwrap();
     state

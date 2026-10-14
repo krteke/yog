@@ -55,7 +55,7 @@ impl Args {
             interrupts.recv().await;
             token.cancel();
         });
-        let outcome = yog_runtime::run(command, options, config, cancelled).await;
+        let outcome = yog_runtime::terminal::run(command, options, config, cancelled).await;
         signal_task.abort();
         let _ = signal_task.await;
 

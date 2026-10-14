@@ -5,6 +5,7 @@ use crate::{
     candidate::{CandidateAction, CandidateEditor},
     file_picker::{FilePicker, PickerAction},
     form::{CommandForm, FormAction, RunRequest},
+    recovery::{RecoveryDialog, RecoveryDialogAction},
     run::{RunStage, RunState},
 };
 
@@ -21,11 +22,40 @@ pub struct App {
     candidate_editor: Option<CandidateEditor>,
     picker: Option<FilePicker>,
     run: Option<RunState>,
+    recovery: Option<RecoveryDialog>,
     error: Option<String>,
 }
 
 impl App {
     pub fn handle_key(&mut self, key: KeyEvent) -> AppAction {
+        if let Some(dialog) = &mut self.recovery {
+            if !dialog.visible && matches!(key.code, KeyCode::Char('r') | KeyCode::Enter) {
+                dialog.visible = true;
+                return AppAction::None;
+            }
+            if dialog.visible {
+                match dialog.handle_key(key) {
+                    RecoveryDialogAction::None => {}
+                    RecoveryDialogAction::Close => dialog.visible = false,
+                    RecoveryDialogAction::Cancel => {
+                        self.run
+                            .as_mut()
+                            .expect("a recovery decision belongs to a run")
+                            .request_cancel();
+                        self.recovery = None;
+                        return AppAction::Cancel;
+                    }
+                    RecoveryDialogAction::Respond => {
+                        self.recovery.take().unwrap().respond();
+                        self.run
+                            .as_mut()
+                            .expect("a recovery decision belongs to a run")
+                            .stage = RunStage::Running;
+                    }
+                }
+                return AppAction::None;
+            }
+        }
         if let Some(editor) = &mut self.candidate_editor {
             match editor.handle_key(key) {
                 CandidateAction::None => {}
@@ -83,19 +113,20 @@ impl App {
                     }
                     _ => AppAction::None,
                 },
-                RunStage::Running | RunStage::Cancelling
+                RunStage::Running | RunStage::Waiting | RunStage::Cancelling
                     if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
                         || key.code == KeyCode::Char('c')
                             && key.modifiers.contains(KeyModifiers::CONTROL) =>
                 {
-                    if run.stage == RunStage::Running {
+                    if run.stage != RunStage::Cancelling {
                         run.request_cancel();
+                        self.recovery = None;
                         AppAction::Cancel
                     } else {
                         AppAction::None
                     }
                 }
-                RunStage::Running | RunStage::Cancelling => AppAction::None,
+                RunStage::Running | RunStage::Waiting | RunStage::Cancelling => AppAction::None,
             };
         }
 
@@ -143,11 +174,23 @@ impl App {
         self.run.as_ref()
     }
 
+    pub fn recovery(&self) -> Option<&RecoveryDialog> {
+        self.recovery.as_ref()
+    }
+
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
     }
 
     pub fn handle_run_event(&mut self, event: RunEvent) {
+        if let RunEvent::RecoveryDecisionRequired(request) = event {
+            self.run
+                .as_mut()
+                .expect("runtime events require an active run")
+                .stage = RunStage::Waiting;
+            self.recovery = Some(RecoveryDialog::new(request));
+            return;
+        }
         self.run
             .as_mut()
             .expect("runtime events require an active run")
@@ -155,6 +198,7 @@ impl App {
     }
 
     pub fn finish_run(&mut self, outcome: RunOutcome) {
+        self.recovery = None;
         self.run
             .as_mut()
             .expect("runtime completion requires an active run")
@@ -171,7 +215,7 @@ impl App {
     pub fn is_animating(&self) -> bool {
         self.run
             .as_ref()
-            .is_some_and(|run| !matches!(run.stage, RunStage::Finished(_)))
+            .is_some_and(|run| matches!(run.stage, RunStage::Running | RunStage::Cancelling))
     }
 }
 
@@ -181,6 +225,84 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn recovery_request() -> (
+        yog_runtime::recovery::RecoveryRequest,
+        tokio::sync::oneshot::Receiver<Result<yog_runtime::recovery::RecoveryDecision, String>>,
+    ) {
+        use yog_runtime::recovery::*;
+        let (reply, response) = tokio::sync::oneshot::channel();
+        (
+            RecoveryRequest {
+                state_path: "/out/.yog-state.jsonl".into(),
+                input: "/in/movie.mkv".into(),
+                output: Some("/out/movie.mkv".into()),
+                scope: RecoveryScope::Batch,
+                differences: vec![RecoveryDifference {
+                    kind: RecoveryDifferenceKind::Container,
+                    recorded: "mkv".into(),
+                    current: "mp4".into(),
+                }],
+                overwrite_output: false,
+                reply,
+            },
+            response,
+        )
+    }
+
+    fn rendered(app: &App) -> String {
+        use crate::ui::DrawApp;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 40)).unwrap();
+        terminal.draw(|frame| frame.draw(app)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn recovery_request_is_shown_as_a_persistent_decision() {
+        let mut app = App {
+            run: Some(RunState::new(&yog_runtime::Operation::Transcode)),
+            ..App::default()
+        };
+        let (request, mut response) = recovery_request();
+        app.handle_run_event(RunEvent::RecoveryDecisionRequired(request));
+        let screen = rendered(&app);
+        assert!(screen.contains("Recovery settings differ"), "{screen}");
+        assert!(screen.contains("Trust recorded results"), "{screen}");
+        assert!(matches!(
+            response.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn dismissed_recovery_request_can_be_reopened_and_answered() {
+        let mut app = App {
+            run: Some(RunState::new(&yog_runtime::Operation::Transcode)),
+            ..App::default()
+        };
+        let (request, mut response) = recovery_request();
+        app.handle_run_event(RunEvent::RecoveryDecisionRequired(request));
+        app.handle_key(key(KeyCode::Esc));
+        assert!(rendered(&app).contains("Waiting for confirmation"));
+        app.handle_key(key(KeyCode::Char('r')));
+        app.handle_key(key(KeyCode::Char('j')));
+        app.handle_key(key(KeyCode::Char(' ')));
+        app.handle_key(key(KeyCode::Enter));
+        let decision = response.try_recv().unwrap().unwrap();
+        assert_eq!(
+            decision.action,
+            yog_runtime::recovery::RecoveryAction::Force
+        );
+        assert!(decision.apply_to_similar);
+        assert_eq!(app.run().unwrap().stage, RunStage::Running);
     }
 
     #[test]

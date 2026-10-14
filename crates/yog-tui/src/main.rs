@@ -3,6 +3,7 @@ mod candidate;
 mod encoding;
 mod file_picker;
 mod form;
+mod recovery;
 mod run;
 mod text_input;
 mod ui;

@@ -85,6 +85,7 @@ impl DrawRuning for Frame<'_> {
             RunStage::Cancelling => {
                 format!("{} Cancelling...", SPINNER[state.spinner % SPINNER.len()])
             }
+            RunStage::Waiting => "Waiting for confirmation".to_owned(),
             RunStage::Finished(RunStatus::Success) => "✓ Completed".to_owned(),
             RunStage::Finished(RunStatus::Failure) => "× Failed".to_owned(),
             RunStage::Finished(RunStatus::Cancelled) => "■ Cancelled".to_owned(),
@@ -434,6 +435,12 @@ impl DrawRuning for Frame<'_> {
         ];
         match state.stage {
             RunStage::Running => spans.extend([key("q/Esc"), Span::raw(" Cancel")]),
+            RunStage::Waiting => spans.extend([
+                key("r/Enter"),
+                Span::raw(" Review decision  "),
+                key("q"),
+                Span::raw(" Cancel"),
+            ]),
             RunStage::Cancelling => {
                 spans.push(Span::styled(
                     "Cancelling...",
@@ -547,6 +554,7 @@ fn phase_label(phase: RunPhase) -> &'static str {
 fn status_color(stage: RunStage) -> Color {
     match stage {
         RunStage::Running => ACCENT,
+        RunStage::Waiting => Color::Yellow,
         RunStage::Cancelling => Color::Yellow,
         RunStage::Finished(RunStatus::Success) => Color::Green,
         RunStage::Finished(RunStatus::Failure) => Color::LightRed,

@@ -1,4 +1,7 @@
-use super::{MismatchPolicy, RecoveryMode, RecoveryOptions};
+use super::{
+    MismatchPolicy, RecoveryAction, RecoveryDifference, RecoveryDifferenceKind, RecoveryMode,
+    RecoveryOptions, RecoveryRequest, RecoveryScope,
+};
 use crate::{
     Command, Options,
     diagnostics::Diagnostics,
@@ -8,7 +11,7 @@ use crate::{
     path::Absolute,
     recursive::TaskPaths,
 };
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -52,7 +55,7 @@ impl Settings {
         output
     }
 
-    fn differences(&self, other: &Self, result: &SavedResult) -> Vec<&'static str> {
+    fn differences(&self, other: &Self, result: &SavedResult) -> Vec<RecoveryDifference> {
         if matches!(
             result,
             SavedResult::Skipped {
@@ -69,21 +72,53 @@ impl Settings {
             }
         ) {
             if self.container != other.container {
-                differences.push("container");
+                differences.push(RecoveryDifference {
+                    kind: RecoveryDifferenceKind::Container,
+                    recorded: self
+                        .container
+                        .map_or("Automatic", Container::extension)
+                        .into(),
+                    current: other
+                        .container
+                        .map_or("Automatic", Container::extension)
+                        .into(),
+                });
             }
             return differences;
         }
         if self.output_root != other.output_root {
-            differences.push("output root");
+            differences.push(RecoveryDifference {
+                kind: RecoveryDifferenceKind::OutputRoot,
+                recorded: self.output_root.display().to_string(),
+                current: other.output_root.display().to_string(),
+            });
         }
         if self.container != other.container {
-            differences.push("container");
+            differences.push(RecoveryDifference {
+                kind: RecoveryDifferenceKind::Container,
+                recorded: self
+                    .container
+                    .map_or("Automatic", Container::extension)
+                    .into(),
+                current: other
+                    .container
+                    .map_or("Automatic", Container::extension)
+                    .into(),
+            });
         }
         if self.video != other.video {
-            differences.push("video encoding");
+            differences.push(RecoveryDifference {
+                kind: RecoveryDifferenceKind::VideoEncoding,
+                recorded: describe_video(&self.video),
+                current: describe_video(&other.video),
+            });
         }
         if matches!(self.video, VideoAction::Encode(_)) && self.decoding != other.decoding {
-            differences.push("decoding");
+            differences.push(RecoveryDifference {
+                kind: RecoveryDifferenceKind::Decoding,
+                recorded: self.decoding.to_string(),
+                current: other.decoding.to_string(),
+            });
         }
         differences
     }
@@ -108,6 +143,26 @@ impl Fingerprint {
         Ok(Self {
             bytes: metadata.len(),
             modified: metadata.modified()?,
+        })
+    }
+
+    fn difference(
+        recorded: Option<&Self>,
+        path: &Path,
+        kind: RecoveryDifferenceKind,
+    ) -> Option<RecoveryDifference> {
+        let current = Self::read(path);
+        if recorded.is_some() && current.as_ref().ok() == recorded {
+            return None;
+        }
+        let describe =
+            |stamp: &Self| format!("{} bytes; modified {:?}", stamp.bytes, stamp.modified);
+        Some(RecoveryDifference {
+            kind,
+            recorded: recorded.map_or_else(|| "Not recorded".into(), describe),
+            current: current
+                .as_ref()
+                .map_or_else(|error| format!("Unavailable: {error}"), describe),
         })
     }
 }
@@ -147,12 +202,15 @@ pub struct RecoveredTask {
 
 pub struct Recovery {
     path: PathBuf,
+    input_root: PathBuf,
+    overwrite_output: bool,
     header: Header,
     current_setting: usize,
     entries: HashMap<PathBuf, Entry>,
     options: RecoveryOptions,
     recovered: HashMap<usize, RecoveredTask>,
     cleanup: HashMap<usize, PathBuf>,
+    choices: HashMap<(RecoveryScope, Vec<RecoveryDifferenceKind>), RecoveryAction>,
     file: Option<BufWriter<File>>,
     error: Option<anyhow::Error>,
 }
@@ -201,12 +259,7 @@ impl Recovery {
                 entries.clear();
                 header.settings.clear();
             }
-            header.input_root = input_root;
-        } else {
-            ensure!(
-                header.input_root == input_root,
-                "state input directory differs; choose Restart to start a new batch"
-            );
+            header.input_root = input_root.clone();
         }
         let current_setting = match header
             .settings
@@ -221,12 +274,15 @@ impl Recovery {
         };
         Ok(Self {
             path,
+            input_root,
+            overwrite_output: command.request.overwrite_output,
             header,
             current_setting,
             entries,
             options: options.recovery.clone(),
             recovered: HashMap::new(),
             cleanup: HashMap::new(),
+            choices: HashMap::new(),
             file: None,
             error: None,
         })
@@ -236,18 +292,57 @@ impl Recovery {
         &mut self,
         tasks: &[TaskPaths],
         cancellation: &tokio_util::sync::CancellationToken,
+        diagnostics: &Diagnostics<'_>,
     ) -> Result<()> {
-        let current = &self.header.settings[self.current_setting];
-        let restart_batch = self.options.mode == RecoveryMode::Restart
-            || self.options.batch_mismatch == MismatchPolicy::Restart
-                && tasks
-                    .iter()
-                    .filter_map(|task| self.entries.get(&task.relative))
-                    .any(|entry| {
-                        !self.header.settings[entry.setting]
-                            .differences(current, &entry.result)
-                            .is_empty()
-                    });
+        let current = self.header.settings[self.current_setting].clone();
+        let mut restart_batch = self.options.mode == RecoveryMode::Restart;
+        let mut root_forced = false;
+        if self.header.input_root != self.input_root {
+            let differences = vec![RecoveryDifference {
+                kind: RecoveryDifferenceKind::InputRoot,
+                recorded: self.header.input_root.display().to_string(),
+                current: self.input_root.display().to_string(),
+            }];
+            match self
+                .decide(
+                    RecoveryScope::Batch,
+                    self.input_root.clone(),
+                    None,
+                    differences,
+                    cancellation,
+                    diagnostics,
+                )
+                .await?
+            {
+                RecoveryAction::Abort => bail!("recovery stopped: input directory differs"),
+                RecoveryAction::Skip => {
+                    for index in 0..tasks.len() {
+                        self.recovered.insert(
+                            index,
+                            RecoveredTask {
+                                result: TaskResult::Skipped {
+                                    reason: SkipReason::ResumeMismatch,
+                                    message: "input directory differs".into(),
+                                },
+                                info: RecoveryInfo {
+                                    forced: false,
+                                    output: None,
+                                },
+                            },
+                        );
+                    }
+                    return Ok(());
+                }
+                RecoveryAction::Force => root_forced = true,
+                RecoveryAction::Restart => {
+                    self.entries.clear();
+                    self.header.settings = vec![current.clone()];
+                    self.current_setting = 0;
+                    restart_batch = true;
+                }
+            }
+            self.header.input_root = self.input_root.clone();
+        }
         for (index, task) in tasks.iter().enumerate() {
             tokio::task::yield_now().await;
             if cancellation.is_cancelled() {
@@ -255,37 +350,49 @@ impl Recovery {
             }
             let relative = &task.relative;
 
-            let Some(entry) = self.entries.get(relative) else {
+            let Some(entry) = self.entries.get(relative).cloned() else {
                 continue;
             };
 
             if restart_batch {
-                if entry.part {
-                    self.cleanup
-                        .insert(index, Output::part_path(&entry.output.path)?);
-                }
-                continue;
+                break;
             }
 
             let differences =
-                self.header.settings[entry.setting].differences(current, &entry.result);
-            let mut forced = false;
+                self.header.settings[entry.setting].differences(&current, &entry.result);
+            let mut forced = root_forced;
             let mut mismatch_skip = None;
 
             if !differences.is_empty() {
-                match self.options.batch_mismatch {
-                    MismatchPolicy::Abort => bail!(
+                let names = differences
+                    .iter()
+                    .map(|difference| difference.kind.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                match self
+                    .decide(
+                        RecoveryScope::Batch,
+                        task.input.clone(),
+                        Some(entry.output.path.clone()),
+                        differences,
+                        cancellation,
+                        diagnostics,
+                    )
+                    .await?
+                {
+                    RecoveryAction::Abort => bail!(
                         "state settings differ for {}: {}",
                         task.input.display(),
-                        differences.join(", ")
+                        names
                     ),
-                    MismatchPolicy::Restart => {
-                        unreachable!("batch restart is resolved before classification")
+                    RecoveryAction::Restart => {
+                        restart_batch = true;
+                        break;
                     }
-                    MismatchPolicy::Skip => {
-                        mismatch_skip = Some(format!("settings differ: {}", differences.join(", ")))
+                    RecoveryAction::Skip => {
+                        mismatch_skip = Some(format!("settings differ: {names}"))
                     }
-                    MismatchPolicy::Force => forced = true,
+                    RecoveryAction::Force => forced = true,
                 }
             }
             let reusable = matches!(
@@ -297,24 +404,41 @@ impl Recovery {
             );
             let mut redo = !reusable;
             if mismatch_skip.is_none() {
-                let input_matches = entry.input.as_ref().is_some_and(|stamp| {
-                    Fingerprint::read(&task.input).ok().as_ref() == Some(stamp)
-                });
-                let output_matches = !matches!(entry.result, SavedResult::Success)
-                    || entry.output.fingerprint.as_ref().is_some_and(|stamp| {
-                        Fingerprint::read(&entry.output.path).ok().as_ref() == Some(stamp)
-                    });
-                if !input_matches || !output_matches {
-                    match self.options.file_mismatch {
-                        MismatchPolicy::Abort => bail!(
+                let mut differences: Vec<_> = Fingerprint::difference(
+                    entry.input.as_ref(),
+                    &task.input,
+                    RecoveryDifferenceKind::SourceFingerprint,
+                )
+                .into_iter()
+                .collect();
+                if matches!(entry.result, SavedResult::Success) {
+                    differences.extend(Fingerprint::difference(
+                        entry.output.fingerprint.as_ref(),
+                        &entry.output.path,
+                        RecoveryDifferenceKind::OutputFingerprint,
+                    ));
+                }
+                if !differences.is_empty() {
+                    match self
+                        .decide(
+                            RecoveryScope::File,
+                            task.input.clone(),
+                            Some(entry.output.path.clone()),
+                            differences,
+                            cancellation,
+                            diagnostics,
+                        )
+                        .await?
+                    {
+                        RecoveryAction::Abort => bail!(
                             "file fingerprint differs for {}; choose a file mismatch policy",
                             task.input.display()
                         ),
-                        MismatchPolicy::Force => forced = true,
-                        MismatchPolicy::Skip => {
+                        RecoveryAction::Force => forced = true,
+                        RecoveryAction::Skip => {
                             mismatch_skip = Some("source or output fingerprint differs".into())
                         }
-                        MismatchPolicy::Restart => redo = true,
+                        RecoveryAction::Restart => redo = true,
                     }
                 }
             }
@@ -362,9 +486,73 @@ impl Recovery {
             }
         }
         if restart_batch {
+            self.recovered.clear();
+            self.cleanup.clear();
+            for (index, task) in tasks.iter().enumerate() {
+                if let Some(entry) = self.entries.get(&task.relative)
+                    && entry.part
+                {
+                    self.cleanup
+                        .insert(index, Output::part_path(&entry.output.path)?);
+                }
+            }
             self.entries.retain(|_, entry| entry.part);
         }
         Ok(())
+    }
+
+    async fn decide(
+        &mut self,
+        scope: RecoveryScope,
+        input: PathBuf,
+        output: Option<PathBuf>,
+        differences: Vec<RecoveryDifference>,
+        cancellation: &tokio_util::sync::CancellationToken,
+        diagnostics: &Diagnostics<'_>,
+    ) -> Result<RecoveryAction> {
+        let policy = match scope {
+            RecoveryScope::Batch => self.options.batch_mismatch,
+            RecoveryScope::File => self.options.file_mismatch,
+        };
+        let action = match policy {
+            MismatchPolicy::Abort => Some(RecoveryAction::Abort),
+            MismatchPolicy::Force => Some(RecoveryAction::Force),
+            MismatchPolicy::Skip => Some(RecoveryAction::Skip),
+            MismatchPolicy::Restart => Some(RecoveryAction::Restart),
+            MismatchPolicy::Ask => None,
+        };
+        if let Some(action) = action {
+            return Ok(action);
+        }
+        let key = (
+            scope,
+            differences
+                .iter()
+                .map(|difference| difference.kind)
+                .collect(),
+        );
+        if let Some(action) = self.choices.get(&key) {
+            return Ok(*action);
+        }
+        let (reply, response) = tokio::sync::oneshot::channel();
+        diagnostics.event(RunEvent::RecoveryDecisionRequired(RecoveryRequest {
+            state_path: self.path.clone(),
+            input,
+            output,
+            scope,
+            differences,
+            overwrite_output: self.overwrite_output,
+            reply,
+        }));
+        let decision = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => bail!("recovery confirmation cancelled"),
+            decision = response => decision.context("recovery confirmation is unavailable; choose an explicit unattended mismatch policy")?.map_err(anyhow::Error::msg)?,
+        };
+        if decision.apply_to_similar {
+            self.choices.insert(key, decision.action);
+        }
+        Ok(decision.action)
     }
 
     pub fn recovered(&self) -> &HashMap<usize, RecoveredTask> {
@@ -505,6 +693,33 @@ impl Recovery {
         self.file = Some(file);
         Ok(())
     }
+}
+
+fn describe_video(video: &VideoAction) -> String {
+    use yog_core::ffmpeg::encoding::{RateControl, VideoEncoding};
+    let VideoAction::Encode(encoding) = video else {
+        return "Copy".into();
+    };
+    let mut parts = vec![encoding.to_string()];
+    parts.push(format!(
+        "Preset {}",
+        encoding
+            .preset()
+            .map_or_else(|| "automatic".into(), |preset| preset.into_owned())
+    ));
+    if let Some(rate) = encoding.rate() {
+        parts.push(match rate {
+            RateControl::Quality(value) => format!("{} {value}", encoding.quality_parameter()),
+            RateControl::Bitrate(value) => format!("{value} bit/s"),
+        });
+    }
+    if let Some(multipass) = encoding.multipass() {
+        parts.push(format!("Multipass {multipass}"));
+    }
+    if let VideoEncoding::Vaapi { device, .. } = encoding {
+        parts.push(format!("Device {}", device.display()));
+    }
+    parts.join(" / ")
 }
 
 fn read_state(

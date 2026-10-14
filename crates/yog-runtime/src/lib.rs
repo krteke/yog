@@ -14,6 +14,7 @@ mod progress;
 pub mod recovery;
 mod recursive;
 mod report;
+pub mod terminal;
 mod transcode;
 mod validate;
 mod verify;
@@ -106,6 +107,7 @@ impl RunOutcome {
             Self::Batch(batch)
                 if !batch.failures.is_empty()
                     || batch.state_error.is_some()
+                    || batch.recovery_error.is_some()
                     || (batch.total == batch.skipped && batch.resume_skipped == 0) =>
             {
                 RunStatus::Failure
@@ -126,6 +128,8 @@ pub struct BatchOutcome {
     pub reused: usize,
     pub forced: usize,
     pub state_error: Option<anyhow::Error>,
+    /// Recovery could not proceed; no task execution or state rewrite took place.
+    pub recovery_error: Option<anyhow::Error>,
     pub failures: Vec<TaskFailure>,
     pub cancelled: bool,
 }
@@ -154,6 +158,8 @@ pub async fn run(
 
 /// Executes a command and forwards structured lifecycle and progress events to
 /// the caller. Event delivery is synchronous; handlers must return promptly.
+/// Recovery confirmation requests must be retained and answered by the caller.
+/// The runtime awaits their reply asynchronously and remains cancellable.
 pub async fn run_with_events(
     command: Command,
     options: Options,

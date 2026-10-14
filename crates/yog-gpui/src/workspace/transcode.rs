@@ -1,3 +1,4 @@
+mod recovery;
 mod settings;
 
 use std::{
@@ -28,7 +29,10 @@ use yog_runtime::{
     },
 };
 
-use self::settings::TranscodeSettings;
+use self::{
+    recovery::{RecoveryAnswered, RecoveryDialog},
+    settings::TranscodeSettings,
+};
 use super::{
     components,
     execution::{self, Activity, ActivityChanged, WorkerMessage},
@@ -55,6 +59,7 @@ pub struct TranscodePage {
     source: Entity<SourcePicker>,
     settings: Entity<TranscodeSettings>,
     messages: Entity<Messages>,
+    recovery: Entity<RecoveryDialog>,
     stage: Stage,
     cancellation: Option<CancellationToken>,
     error: Option<String>,
@@ -82,6 +87,7 @@ pub struct TranscodePage {
     _source_observation: Subscription,
     _settings_observation: Subscription,
     _messages_subscription: Subscription,
+    _recovery_subscription: Subscription,
 }
 
 impl EventEmitter<ActivityChanged> for TranscodePage {}
@@ -95,6 +101,11 @@ impl TranscodePage {
     ) -> Self {
         let settings = cx.new(|cx| TranscodeSettings::new(source.clone(), preferences, window, cx));
         let messages = cx.new(|cx| Messages::new(window, cx));
+        let recovery = cx.new(|_| RecoveryDialog::new());
+        let recovery_subscription = cx.subscribe(&recovery, |_, _, _: &RecoveryAnswered, cx| {
+            cx.emit(ActivityChanged);
+            cx.notify();
+        });
         let source_observation = cx.observe(&source, |_, _, cx| cx.notify());
         let settings_observation = cx.observe(&settings, |_, _, cx| cx.notify());
         let messages_subscription =
@@ -107,6 +118,7 @@ impl TranscodePage {
             source,
             settings,
             messages,
+            recovery,
             stage: Stage::Idle,
             cancellation: None,
             error: None,
@@ -134,6 +146,7 @@ impl TranscodePage {
             _source_observation: source_observation,
             _settings_observation: settings_observation,
             _messages_subscription: messages_subscription,
+            _recovery_subscription: recovery_subscription,
         }
     }
 
@@ -213,6 +226,8 @@ impl TranscodePage {
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(cancellation) = &self.cancellation {
             cancellation.cancel();
+            self.recovery
+                .update(cx, |recovery, cx| recovery.clear(window, cx));
             self.stage = Stage::Cancelling;
             self.message(
                 MessageLevel::Info,
@@ -258,6 +273,17 @@ impl TranscodePage {
                 return;
             }
             WorkerMessage::Event(event) => match event {
+                RunEvent::RecoveryDecisionRequired(request) => {
+                    self.state_path = Some(request.state_path.clone());
+                    self.message(
+                        MessageLevel::Warning,
+                        format!("Waiting for confirmation: {}", request.title()),
+                        window,
+                        cx,
+                    );
+                    self.recovery
+                        .update(cx, |recovery, cx| recovery.show(request, window, cx));
+                }
                 RunEvent::PhaseChanged(phase) => {
                     self.phase = Some(phase);
                     self.message(MessageLevel::Info, self.phase_label().into(), window, cx);
@@ -409,6 +435,8 @@ impl TranscodePage {
                 _ => {}
             },
             WorkerMessage::Finished(outcome) => {
+                self.recovery
+                    .update(cx, |recovery, cx| recovery.clear(window, cx));
                 self.messages
                     .update(cx, |messages, cx| messages.finish(window, cx));
                 self.stage = Stage::Finished(outcome.status());
@@ -429,7 +457,7 @@ impl TranscodePage {
                         self.skipped = batch.skipped;
                         self.reused = batch.reused;
                         self.forced = batch.forced;
-                        batch.state_error.map(|error| {
+                        batch.state_error.or(batch.recovery_error).map(|error| {
                             let detail = format!("{error:#}");
                             self.error = Some(detail.clone());
                             detail
@@ -466,10 +494,13 @@ impl TranscodePage {
         }
     }
 
-    pub fn activity(&self) -> Option<Activity> {
+    pub fn activity(&self, cx: &gpui_kit::App) -> Option<Activity> {
         match self.stage {
             Stage::Idle => None,
             Stage::Running => {
+                if self.recovery.read(cx).is_waiting() {
+                    return Some(Activity::Waiting("Recovery decision required".into()));
+                }
                 let mut label = self.phase_label().to_owned();
                 if self.task_index > 0 {
                     label.push_str(&format!(" · {}/{}", self.task_index, self.task_total));
@@ -505,6 +536,9 @@ impl TranscodePage {
         let theme = cx.theme();
         let (headline, state, tag) = match self.stage {
             Stage::Idle => unreachable!("idle runs have no summary"),
+            Stage::Running if self.recovery.read(cx).is_waiting() => {
+                ("Waiting for confirmation", "Waiting", Tag::warning())
+            }
             Stage::Running => (self.phase_label(), "Running", Tag::info()),
             Stage::Cancelling => ("Cancelling transcode", "Cancelling", Tag::warning()),
             Stage::Finished(RunStatus::Success) => {
@@ -873,6 +907,16 @@ impl TranscodePage {
             .flex()
             .flex_col()
             .gap_2()
+            .when(self.recovery.read(cx).is_waiting(), |this| {
+                this.child(
+                    Button::new("review-recovery")
+                        .label("Review recovery…")
+                        .on_click(cx.listener(|page, _, window, cx| {
+                            page.recovery
+                                .update(cx, |recovery, cx| recovery.open(window, cx));
+                        })),
+                )
+            })
             .when_some(self.error.clone(), |this, error| {
                 this.child(div().text_sm().text_color(cx.theme().danger).child(error))
             })
@@ -938,6 +982,130 @@ mod tests {
         RunStatus,
         event::{RunEvent, RunPhase},
     };
+
+    fn recovery_request() -> (
+        yog_runtime::recovery::RecoveryRequest,
+        tokio::sync::oneshot::Receiver<Result<yog_runtime::recovery::RecoveryDecision, String>>,
+    ) {
+        use yog_runtime::recovery::*;
+        let (reply, response) = tokio::sync::oneshot::channel();
+        (
+            RecoveryRequest {
+                state_path: "/out/.yog-state.jsonl".into(),
+                input: "/in/movie.mkv".into(),
+                output: Some("/out/movie.mkv".into()),
+                scope: RecoveryScope::Batch,
+                differences: vec![RecoveryDifference {
+                    kind: RecoveryDifferenceKind::Container,
+                    recorded: "mkv".into(),
+                    current: "mp4".into(),
+                }],
+                overwrite_output: false,
+                reply,
+            },
+            response,
+        )
+    }
+
+    #[gpui_kit::test]
+    fn recovery_request_opens_a_dialog_without_answering_it(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut workspace = None;
+        let handle = cx.open_window(size(px(1_100.), px(900.)), |window, cx| {
+            let view = cx.new(|cx| Workspace::new(window, cx));
+            workspace = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let (request, mut response) = recovery_request();
+        cx.update_window(handle.into(), |_, window, cx| {
+            workspace
+                .unwrap()
+                .read(cx)
+                .transcode
+                .clone()
+                .update(cx, |page, cx| {
+                    page.stage = Stage::Running;
+                    page.handle_message(
+                        WorkerMessage::Event(RunEvent::RecoveryDecisionRequired(request)),
+                        window,
+                        cx,
+                    );
+                });
+            window.render_frame(cx);
+            assert!(
+                window.try_find("recovery-force").is_some(),
+                "the recovery decision must be visible"
+            );
+        })
+        .unwrap();
+        assert!(matches!(
+            response.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[gpui_kit::test]
+    fn dismissed_recovery_dialog_keeps_global_waiting_state_and_can_be_answered(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let mut workspace = None;
+        let handle = cx.open_window(size(px(1_100.), px(900.)), |window, cx| {
+            let view = cx.new(|cx| Workspace::new(window, cx));
+            workspace = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let workspace = workspace.unwrap();
+        let (request, mut response) = recovery_request();
+        cx.update_window(handle.into(), |_, window, cx| {
+            workspace.read(cx).transcode.clone().update(cx, |page, cx| {
+                page.stage = Stage::Running;
+                page.handle_message(
+                    WorkerMessage::Event(RunEvent::RecoveryDecisionRequired(request)),
+                    window,
+                    cx,
+                );
+            });
+            window.render_frame(cx);
+            window.press("escape", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.change_mode(Mode::Predict, window, cx)
+            });
+            window.render_frame(cx);
+            assert!(
+                window
+                    .find("view-transcode")
+                    .label()
+                    .unwrap()
+                    .contains("Waiting")
+            );
+            window.click("view-transcode", cx);
+            window.click("review-recovery", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("recovery-apply-similar", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("recovery-force", cx);
+        })
+        .unwrap();
+        let decision = response.try_recv().unwrap().unwrap();
+        assert_eq!(
+            decision.action,
+            yog_runtime::recovery::RecoveryAction::Force
+        );
+        assert!(decision.apply_to_similar);
+    }
 
     #[test]
     fn progress_uses_adaptive_video_size_units() {

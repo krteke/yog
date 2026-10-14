@@ -142,6 +142,7 @@ pub struct ActivityChanged;
 
 pub enum Activity {
     Running(String),
+    Waiting(String),
     Cancelling,
     Finished(RunStatus),
 }

@@ -26,10 +26,10 @@ plotters = {
     "ttf",
   ]
 }
-rustix = { workspace = true, features = ["fs"] }
+rustix = { workspace = true, features = ["fs", "event"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-tokio = { workspace = true, features = ["rt"] }
+tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
 tokio-util = { workspace = true, features = ["rt"] }
 toml.workspace = true
 walkdir.workspace = true

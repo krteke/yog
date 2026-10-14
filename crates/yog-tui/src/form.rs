@@ -519,6 +519,7 @@ impl CommandForm {
                     &mut self.recovery.file_mismatch
                 };
                 let policies = [
+                    MismatchPolicy::Ask,
                     MismatchPolicy::Abort,
                     MismatchPolicy::Force,
                     MismatchPolicy::Skip,

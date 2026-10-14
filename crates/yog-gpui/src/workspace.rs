@@ -295,18 +295,26 @@ impl Workspace {
             .unwrap_or_else(|| "No source selected".into());
         let bar = StatusBar::new().right(div().max_w_48().truncate().child(source));
         let activities = [
-            (Mode::Transcode, self.transcode.read(cx).activity()),
+            (Mode::Transcode, self.transcode.read(cx).activity(cx)),
             (Mode::Predict, self.predict.read(cx).activity()),
             (Mode::Emulate, self.emulate.read(cx).activity()),
         ];
         let active = activities.iter().any(|(_, activity)| {
-            matches!(activity, Some(Activity::Running(_) | Activity::Cancelling))
+            matches!(
+                activity,
+                Some(Activity::Running(_) | Activity::Waiting(_) | Activity::Cancelling)
+            )
         });
         let items = activities
             .into_iter()
             .filter_map(|(mode, activity)| {
                 let activity = activity?;
-                if active && !matches!(activity, Activity::Running(_) | Activity::Cancelling) {
+                if active
+                    && !matches!(
+                        activity,
+                        Activity::Running(_) | Activity::Waiting(_) | Activity::Cancelling
+                    )
+                {
                     return None;
                 }
                 let name = match mode {
@@ -316,6 +324,7 @@ impl Workspace {
                 };
                 let (tag, state, detail) = match activity {
                     Activity::Running(detail) => (Tag::info(), "Running", detail),
+                    Activity::Waiting(detail) => (Tag::warning(), "Waiting", detail),
                     Activity::Cancelling => (Tag::warning(), "Cancelling", String::new()),
                     Activity::Finished(RunStatus::Success) => {
                         (Tag::success(), "Completed", String::new())

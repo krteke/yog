@@ -39,9 +39,9 @@ impl RecoveryControls {
             })
         };
         let mode = select(vec!["Automatic", "Restart", "Off"], 0, cx);
-        let policies = vec!["Abort", "Force", "Skip", "Restart"];
+        let policies = vec!["Ask", "Abort", "Force", "Skip", "Restart"];
         let batch = select(policies.clone(), 0, cx);
-        let file = select(policies, 3, cx);
+        let file = select(policies, 0, cx);
         let subscriptions = [&mode, &batch, &file].map(|choice| {
             cx.subscribe(
                 choice,
@@ -169,8 +169,10 @@ impl Render for RecoveryControls {
         div().flex().flex_col().gap_4()
             .child(div().font_medium().child("Recovery"))
             .child(form)
-            .when(mode == "Automatic" && (selected(&self.batch, cx) == "Force" || selected(&self.file, cx) == "Force"), |this| this.child(div().text_sm().text_color(cx.theme().warning)
-                .child("Force trusts old records, including changed or missing outputs. Completed videos remain at their recorded paths.")))
+            .when(mode == "Automatic" && selected(&self.batch, cx) == "Force", |this| this.child(div().text_sm().text_color(cx.theme().warning)
+                .child("Batch Force reuses recorded settings. Individual files are still checked; completed videos remain at their recorded paths.")))
+            .when(mode == "Automatic" && selected(&self.file, cx) == "Force", |this| this.child(div().text_sm().text_color(cx.theme().warning)
+                .child("File Force trusts changed or missing files. Missing outputs are not regenerated.")))
             .when(mode == "Restart", |this| this.child(div().text_sm().text_color(cx.theme().muted_foreground)
                 .child("Rebuild state. Existing outputs are not overwritten unless enabled separately.")))
             .when_some(self.error.clone(), |this, error| this.child(div().text_sm().text_color(cx.theme().danger).child(error)))

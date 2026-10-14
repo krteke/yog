@@ -149,6 +149,7 @@ pub struct RecoveryInfo {
 
 #[derive(Debug)]
 pub enum RunEvent {
+    RecoveryDecisionRequired(crate::recovery::RecoveryRequest),
     RecoveryPrepared {
         path: PathBuf,
         reused: usize,

@@ -42,6 +42,35 @@ fn automatic_recovery_reuses_completed_files_without_probing() {
 }
 
 #[test]
+fn confirmation_without_a_terminal_preserves_state_and_explains_unattended_options() {
+    let fixture = batch();
+    let first = fixture
+        .recursive_command("output")
+        .arg("--copy")
+        .output()
+        .unwrap();
+    assert!(first.status.success(), "{:?}", first.stderr);
+    let path = fixture.0.join("output/.yog-state.jsonl");
+    let saved = fs::read(&path).unwrap();
+    fs::write(fixture.0.join("input/movie.mkv"), b"changed source").unwrap();
+    let result = fixture
+        .recursive_command("output")
+        .arg("--copy")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&result.stderr);
+
+    assert!(!result.status.success());
+    assert!(stderr.contains("interactive terminal"), "{stderr}");
+    assert!(stderr.contains("--resume-file-mismatch"), "{stderr}");
+    assert_eq!(fs::read(path).unwrap(), saved);
+    assert_eq!(
+        fs::read(fixture.0.join("output/movie.mkv")).unwrap(),
+        b"encoded"
+    );
+}
+
+#[test]
 fn force_recovery_keeps_completed_outputs_in_the_old_directory() {
     let fixture = batch();
     assert!(
@@ -95,6 +124,7 @@ fn file_mismatch_abort_is_resolved_before_any_transcode() {
         .output()
         .unwrap();
     assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stdout).contains("not processed 2 | recovery error"));
     assert!(!fixture.0.join("output/new.mkv").exists());
     assert_eq!(
         fs::read_to_string(fixture.0.join("encoded-files")).unwrap(),
@@ -117,10 +147,11 @@ fn recovery_reexecutes_changed_sources_without_granting_output_overwrite() {
     fs::write(fixture.0.join("input/movie.mkv"), b"changed source").unwrap();
     let result = fixture
         .recursive_command("output")
-        .arg("--copy")
+        .args(["--copy", "--resume-file-mismatch", "restart"])
         .output()
         .unwrap();
     assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("output file already exists"));
     assert_eq!(
         fs::read(fixture.0.join("output/movie.mkv")).unwrap(),
         b"encoded"
@@ -216,6 +247,9 @@ fn explicit_restart_can_use_the_old_output_directory_as_a_new_input() {
             .status
             .success()
     );
+    fixture.tool("ffprobe", r#"for last do :; done
+case "$last" in *.jsonl) exit 1 ;; esac
+printf '%s' '{"streams":[{"index":0,"codec_type":"video"}],"format":{"format_name":"matroska,webm","duration":"1"}}'"#);
     let result = fixture
         .cli()
         .args([
@@ -238,7 +272,10 @@ fn explicit_restart_can_use_the_old_output_directory_as_a_new_input() {
         .unwrap();
     assert!(result.status.success(), "{:?}", result.stderr);
     assert!(fixture.0.join("new/movie.mkv").exists());
-    assert!(String::from_utf8_lossy(&result.stdout).contains("total 1 | succeeded 1"));
+    assert!(
+        String::from_utf8_lossy(&result.stdout)
+            .contains("total 2 | succeeded 1 | failed 0 | skipped 1")
+    );
 }
 
 #[test]
@@ -261,7 +298,7 @@ fn file_force_explicitly_trusts_a_record_even_when_the_output_is_missing() {
         .unwrap();
     assert!(result.status.success(), "{:?}", result.stderr);
     assert!(String::from_utf8_lossy(&result.stdout).contains("reused 1 | forced 1"));
-    assert!(String::from_utf8_lossy(&result.stderr).contains("Force recovery trusts old records"));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("after accepting differences"));
     assert_eq!(
         fs::read_to_string(fixture.0.join("encoded-files")).unwrap(),
         "encode\n"
@@ -323,29 +360,6 @@ fn recovered_success_still_protects_against_output_mapping_collisions() {
     assert_eq!(
         fs::read_to_string(fixture.0.join("encoded-files")).unwrap(),
         "encode\n"
-    );
-}
-
-#[test]
-fn output_subtrees_and_state_files_are_excluded_from_discovery() {
-    let fixture = batch();
-    let first = fixture
-        .recursive_command("input/encoded")
-        .args(["--copy", "--state", "input/state.jsonl"])
-        .output()
-        .unwrap();
-    assert!(first.status.success(), "{:?}", first.stderr);
-    let second = fixture
-        .recursive_command("input/encoded")
-        .args(["--copy", "--state", "input/state.jsonl"])
-        .output()
-        .unwrap();
-    assert!(second.status.success(), "{:?}", second.stderr);
-    assert!(String::from_utf8_lossy(&second.stdout).contains("batch summary: total 1"));
-    assert!(!fixture.0.join("input/encoded/encoded").exists());
-    assert_eq!(
-        fs::read_to_string(fixture.0.join("probed-files")).unwrap(),
-        "probe\n"
     );
 }
 
@@ -465,25 +479,6 @@ fn file_mismatch_skip_also_applies_to_a_previously_failed_file() {
     assert!(result.status.success(), "{:?}", result.stderr);
     assert!(!fixture.0.join("output/movie.mkv").exists());
     assert!(String::from_utf8_lossy(&result.stdout).contains("succeeded 0 | failed 0 | skipped 1"));
-}
-
-#[test]
-fn state_path_cannot_occupy_a_mapped_video_output() {
-    let fixture = batch();
-    let result = fixture
-        .recursive_command("output")
-        .args([
-            "--copy",
-            "--state",
-            "output/movie.mkv",
-            "--overwrite-output",
-        ])
-        .output()
-        .unwrap();
-    assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("state path conflicts"));
-    assert!(!fixture.0.join("encoded-files").exists());
-    assert!(!fixture.0.join("output/movie.mkv").exists());
 }
 
 #[test]

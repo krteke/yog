@@ -40,6 +40,7 @@ impl RunKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunStage {
     Running,
+    Waiting,
     Cancelling,
     Finished(RunStatus),
 }
@@ -177,6 +178,9 @@ impl RunState {
 
     pub fn handle_event(&mut self, event: RunEvent) {
         match event {
+            RunEvent::RecoveryDecisionRequired(_) => {
+                unreachable!("the app owns recovery decisions")
+            }
             RunEvent::PhaseChanged(phase) => {
                 self.phase = Some(phase);
                 if phase != RunPhase::Transcoding {
@@ -397,7 +401,7 @@ impl RunState {
                 self.skipped = batch.skipped;
                 self.reused = batch.reused;
                 self.forced = batch.forced;
-                if let Some(error) = batch.state_error {
+                if let Some(error) = batch.state_error.or(batch.recovery_error) {
                     self.push_notice(NoticeKind::Error, format!("{error:#}"));
                 }
             }
@@ -557,6 +561,7 @@ mod tests {
             reused: 0,
             forced: 0,
             state_error: None,
+            recovery_error: None,
             failures: Vec::new(),
             cancelled: false,
         }));

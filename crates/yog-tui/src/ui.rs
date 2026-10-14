@@ -1,5 +1,6 @@
 mod candidate;
 mod picker;
+mod recovery;
 mod run;
 
 use ratatui::{
@@ -33,6 +34,11 @@ impl DrawApp for Frame<'_> {
 
         if let Some(state) = app.run() {
             self.draw_run(area, state);
+            if let Some(dialog) = app.recovery()
+                && dialog.visible
+            {
+                recovery::DrawRecovery::draw_recovery(self, area, dialog);
+            }
             return;
         }
 

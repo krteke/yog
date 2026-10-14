@@ -297,7 +297,7 @@ impl<'a> Diagnostics<'a> {
             batch.reused,
             batch.forced,
         );
-        if batch.cancelled || batch.state_error.is_some() {
+        if batch.cancelled || batch.state_error.is_some() || batch.recovery_error.is_some() {
             write!(
                 summary,
                 " | not processed {}",
@@ -310,6 +310,9 @@ impl<'a> Diagnostics<'a> {
         }
         if batch.state_error.is_some() {
             summary.push_str(" | state error");
+        }
+        if batch.recovery_error.is_some() {
+            summary.push_str(" | recovery error");
         }
         println!("{summary}");
     }
@@ -359,7 +362,7 @@ impl<'a> Diagnostics<'a> {
             );
         }
         if forced > 0 {
-            self.warning("Force recovery trusts old records; existing outputs stay at their recorded locations and are not revalidated");
+            self.warning("Recovery reused records after accepting differences; completed outputs remain at their recorded paths");
         }
     }
 

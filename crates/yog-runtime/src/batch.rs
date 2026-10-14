@@ -71,10 +71,19 @@ pub async fn run(
     let total = tasks.len();
     diagnostics.event(RunEvent::BatchDiscovered { total });
     if let Some(state) = recovery.as_mut()
-        && let Err(error) = state.classify(&tasks, cancellation).await
+        && let Err(error) = state.classify(&tasks, cancellation, diagnostics).await
     {
-        diagnostics.error(&error);
-        return RunOutcome::Failed(error);
+        let mut batch = BatchOutcome {
+            total,
+            cancelled: cancellation.is_cancelled(),
+            ..BatchOutcome::default()
+        };
+        if !batch.cancelled {
+            diagnostics.error(&error);
+            batch.recovery_error = Some(error);
+        }
+        diagnostics.batch_summary(&batch);
+        return RunOutcome::Batch(batch);
     }
 
     let empty_recovered = HashMap::new();

@@ -103,6 +103,168 @@ impl Drop for Batch {
 }
 
 #[tokio::test]
+async fn a_changed_manually_skipped_source_uses_the_file_mismatch_confirmation() {
+    let batch = Batch::new();
+    let tasks = batch.tasks();
+    let mut state = batch.open();
+    state
+        .start(&Diagnostics::new(false, false, &|_| {}))
+        .unwrap();
+    state.skip_manual(&tasks[0]);
+    drop(state);
+    fs::write(&tasks[0].input, b"changed source").unwrap();
+    let asked = std::sync::Mutex::new(false);
+    let sink = |event| {
+        if let RunEvent::RecoveryDecisionRequired(request) = event {
+            assert_eq!(request.scope, RecoveryScope::File);
+            assert_eq!(
+                request.differences[0].kind,
+                RecoveryDifferenceKind::SourceFingerprint
+            );
+            *asked.lock().unwrap() = true;
+            request.respond(RecoveryAction::Force, false);
+        }
+    };
+    let diagnostics = Diagnostics::new(false, false, &sink);
+    let mut restored = batch.open();
+    restored
+        .classify(
+            &tasks,
+            &tokio_util::sync::CancellationToken::new(),
+            &diagnostics,
+        )
+        .await
+        .unwrap();
+    assert!(*asked.lock().unwrap());
+    let restored = restored.recovered().get(&0).unwrap();
+    assert!(restored.info.forced);
+    assert!(matches!(
+        restored.result,
+        TaskResult::Skipped {
+            reason: SkipReason::Manual,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn a_pending_manual_skip_records_the_resolved_output_path() {
+    let mut batch = Batch::new();
+    batch.command.request.output = PathBuf::from(batch.root.file_name().unwrap()).join("output");
+    batch.options.recovery.path = Some(batch.root.join("manual.jsonl"));
+    let tasks = batch.tasks();
+    let mut state = batch.open();
+    state
+        .start(&Diagnostics::new(false, false, &|_| {}))
+        .unwrap();
+    state.skip_manual(&tasks[0]);
+    let (_, entries) = read_state(&state.path, &Diagnostics::new(false, false, &|_| {}))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        entries[&tasks[0].relative].output.path,
+        std::env::current_dir().unwrap().join(&tasks[0].output)
+    );
+    assert!(!tasks[0].output.exists());
+}
+
+#[tokio::test]
+async fn keeping_a_manual_skip_preserves_its_historical_partial_output() {
+    let batch = Batch::new();
+    batch.unfinished().await;
+    let tasks = batch.tasks();
+    let part = Output::part_path(&tasks[0].output).unwrap();
+    let mut state = batch.open();
+    state
+        .start(&Diagnostics::new(false, false, &|_| {}))
+        .unwrap();
+    state.skip_manual(&tasks[0]);
+    drop(state);
+    let mut restored = batch.open();
+    restored
+        .classify(
+            &tasks,
+            &tokio_util::sync::CancellationToken::new(),
+            &Diagnostics::new(false, false, &|_| {}),
+        )
+        .await
+        .unwrap();
+    assert!(restored.recovered().contains_key(&0));
+    assert!(restored.entries[&tasks[0].relative].part);
+    assert_eq!(fs::read(part).unwrap(), b"unfinished");
+}
+
+#[tokio::test]
+async fn retrying_manual_skips_bypasses_saved_settings_and_file_mismatch_questions() {
+    let mut batch = Batch::new();
+    let tasks = batch.tasks();
+    let mut state = batch.open();
+    state
+        .start(&Diagnostics::new(false, false, &|_| {}))
+        .unwrap();
+    state.skip_manual(&tasks[0]);
+    drop(state);
+    fs::write(&tasks[0].input, b"changed source").unwrap();
+    batch.options.recovery.keep_manual_skips = false;
+    batch.command.request.container = Some(Container::Mp4);
+    let mut restored = batch.open();
+    restored
+        .classify(
+            &tasks,
+            &tokio_util::sync::CancellationToken::new(),
+            &Diagnostics::new(false, false, &|_| {
+                panic!("explicit retry needs no recovery confirmation")
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(restored.recovered().is_empty());
+}
+
+#[tokio::test]
+async fn manually_skipped_input_is_kept_when_encoding_and_output_settings_change() {
+    let mut batch = Batch::new();
+    let tasks = batch.tasks();
+    let mut state = batch.open();
+    state
+        .start(&Diagnostics::new(false, false, &|_| {}))
+        .unwrap();
+    state.begin(0, &tasks[0]).unwrap();
+    state.finish(
+        &tasks[0].relative,
+        &TaskResult::Skipped {
+            reason: serde_json::from_str("\"manual\"").unwrap(),
+            message: "Manually skipped".into(),
+        },
+    );
+    drop(state);
+    batch.options.recovery.path = Some(batch.root.join("output/.yog-state.jsonl"));
+    batch.command.request.output = batch.root.join("other-output");
+    batch.command.request.container = Some(Container::Mp4);
+    let mut restored = batch.open();
+    restored
+        .classify(
+            &tasks,
+            &tokio_util::sync::CancellationToken::new(),
+            &Diagnostics::new(false, false, &|_| {
+                panic!("manual skips do not depend on encoding settings")
+            }),
+        )
+        .await
+        .unwrap();
+    let saved = restored
+        .recovered()
+        .get(&0)
+        .expect("manual skip is reusable");
+    assert_eq!(
+        serde_json::to_value(&saved.result).unwrap()["reason"],
+        "manual"
+    );
+    assert!(saved.info.output.is_none());
+    assert!(!batch.root.join("output/movie.mkv").exists());
+}
+
+#[tokio::test]
 async fn default_recovery_waits_without_changing_the_saved_state() {
     let mut batch = Batch::new();
     batch.complete().await;

@@ -85,6 +85,7 @@ impl DrawRuning for Frame<'_> {
             RunStage::Cancelling => {
                 format!("{} Cancelling...", SPINNER[state.spinner % SPINNER.len()])
             }
+            RunStage::Skipping => format!("{} Skipping...", SPINNER[state.spinner % SPINNER.len()]),
             RunStage::Waiting => "Waiting for confirmation".to_owned(),
             RunStage::Finished(RunStatus::Success) => "✓ Completed".to_owned(),
             RunStage::Finished(RunStatus::Failure) => "× Failed".to_owned(),
@@ -434,12 +435,31 @@ impl DrawRuning for Frame<'_> {
             Span::raw(" Scroll    "),
         ];
         match state.stage {
-            RunStage::Running => spans.extend([key("q/Esc"), Span::raw(" Cancel")]),
+            RunStage::Running => {
+                if state.skip_index().is_some() {
+                    spans.extend([
+                        key("s"),
+                        Span::raw(if state.phase == Some(RunPhase::CalculatingVmaf) {
+                            " Skip VMAF · "
+                        } else {
+                            " Skip current · "
+                        }),
+                        key("S"),
+                        Span::raw(" Skip tasks · "),
+                    ]);
+                }
+                spans.extend([key("q/Esc"), Span::raw(" Cancel")]);
+            }
             RunStage::Waiting => spans.extend([
                 key("r/Enter"),
                 Span::raw(" Review decision  "),
                 key("q"),
                 Span::raw(" Cancel"),
+            ]),
+            RunStage::Skipping => spans.extend([
+                Span::raw("Skipping... · "),
+                key("q/Esc"),
+                Span::raw(" Cancel batch"),
             ]),
             RunStage::Cancelling => {
                 spans.push(Span::styled(
@@ -554,6 +574,7 @@ fn phase_label(phase: RunPhase) -> &'static str {
 fn status_color(stage: RunStage) -> Color {
     match stage {
         RunStage::Running => ACCENT,
+        RunStage::Skipping => Color::Yellow,
         RunStage::Waiting => Color::Yellow,
         RunStage::Cancelling => Color::Yellow,
         RunStage::Finished(RunStatus::Success) => Color::Green,

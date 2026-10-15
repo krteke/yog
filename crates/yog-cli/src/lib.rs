@@ -7,7 +7,7 @@ use clap::Parser;
 
 pub use args::Args;
 use tokio::signal::unix::{SignalKind, signal};
-use tokio_util::sync::CancellationToken;
+use yog_runtime::control::RunControl;
 use yog_runtime::{Config, RunStatus, Validate};
 
 impl Args {
@@ -40,7 +40,7 @@ impl Args {
             }
         };
 
-        let cancelled = CancellationToken::new();
+        let control = RunControl::new();
         let mut interrupts = match signal(SignalKind::interrupt()) {
             Ok(interrupts) => interrupts,
             Err(error) => {
@@ -50,12 +50,12 @@ impl Args {
                 return ExitCode::FAILURE;
             }
         };
-        let token = cancelled.clone();
+        let token = control.clone();
         let signal_task = tokio::spawn(async move {
             interrupts.recv().await;
             token.cancel();
         });
-        let outcome = yog_runtime::terminal::run(command, options, config, cancelled).await;
+        let outcome = yog_runtime::terminal::run(command, options, config, control).await;
         signal_task.abort();
         let _ = signal_task.await;
 

@@ -1,30 +1,32 @@
 mod batch;
 mod config;
-#[cfg(feature = "dev-tools")]
-#[doc(hidden)]
-pub mod dev_tools;
 mod diagnostics;
 mod emulate;
 mod error;
-pub mod event;
 mod jsonl;
 mod output;
 mod path;
 mod progress;
-pub mod recovery;
 mod recursive;
 mod report;
-pub mod terminal;
 mod transcode;
 mod validate;
 mod verify;
 
+pub mod control;
+#[cfg(feature = "dev-tools")]
+#[doc(hidden)]
+pub mod dev_tools;
+pub mod event;
+pub mod recovery;
+pub mod terminal;
+
+use control::RunControl;
 use diagnostics::Diagnostics;
 use error::RunError;
 use event::{RunEvent, RunPhase, TaskResult};
 use report::Report;
 use std::{path::PathBuf, time::Duration};
-use tokio_util::sync::CancellationToken;
 use transcode::Transcoder;
 use yog_core::ffmpeg::{plan::TranscodeRequest, vmaf::VmafOptions};
 
@@ -108,7 +110,9 @@ impl RunOutcome {
                 if !batch.failures.is_empty()
                     || batch.state_error.is_some()
                     || batch.recovery_error.is_some()
-                    || (batch.total == batch.skipped && batch.resume_skipped == 0) =>
+                    || (batch.total == batch.skipped
+                        && batch.resume_skipped == 0
+                        && batch.manual_skipped == 0) =>
             {
                 RunStatus::Failure
             }
@@ -125,6 +129,8 @@ pub struct BatchOutcome {
     pub skipped: usize,
     /// Subset of skipped tasks explicitly bypassed by a recovery mismatch policy.
     pub resume_skipped: usize,
+    /// Subset of skipped tasks manually bypassed, including retained manual skips.
+    pub manual_skipped: usize,
     pub reused: usize,
     pub forced: usize,
     pub state_error: Option<anyhow::Error>,
@@ -151,9 +157,9 @@ pub async fn run(
     command: Command,
     options: Options,
     config: Config,
-    cancellation: CancellationToken,
+    control: RunControl,
 ) -> RunOutcome {
-    run_with_events(command, options, config, cancellation, |_| {}).await
+    run_with_events(command, options, config, control, |_| {}).await
 }
 
 /// Executes a command and forwards structured lifecycle and progress events to
@@ -164,13 +170,14 @@ pub async fn run_with_events(
     command: Command,
     options: Options,
     config: Config,
-    cancellation: CancellationToken,
+    control: RunControl,
     on_event: impl Fn(RunEvent) + Send + Sync,
 ) -> RunOutcome {
     let diagnostics = Diagnostics::new(options.verbose, options.terminal_output, &on_event);
-    let transcoder = Transcoder::new(&options, config, cancellation.clone());
+    let cancellation = control.cancellation();
+    let mut transcoder = Transcoder::new(&options, config, cancellation.clone());
     if command.recursive {
-        batch::run(command, &transcoder, &diagnostics, &cancellation, &options).await
+        batch::run(command, &mut transcoder, &diagnostics, &control, &options).await
     } else {
         let mut report = match Report::open(options.report.as_deref(), options.overwrite_report) {
             Ok(report) => report,
@@ -300,7 +307,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_does_not_apply_optional_validation() {
-        let cancellation = CancellationToken::new();
+        let cancellation = RunControl::new();
         cancellation.cancel();
         let outcome = run(
             Command {
@@ -322,7 +329,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_with_events_reports_single_task_lifecycle() {
-        let cancellation = CancellationToken::new();
+        let cancellation = RunControl::new();
         cancellation.cancel();
         let received = Arc::new(Mutex::new(Vec::new()));
         let event_log = Arc::clone(&received);

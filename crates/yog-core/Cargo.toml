@@ -11,17 +11,14 @@ serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
-tokio = {
-  workspace = true,
-  features = [
+tokio = { workspace = true, features = [
     "fs",
     "io-util",
     "macros",
     "process",
     "rt",
     "time",
-  ]
-}
+] }
 tokio-util = { workspace = true, features = ["io-util", "rt"] }
 
 clap = { workspace = true, features = ["derive"], optional = true }

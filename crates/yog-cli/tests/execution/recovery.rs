@@ -534,14 +534,14 @@ async fn cancellation_during_recovery_preflight_takes_precedence_over_file_misma
         command,
         options,
         yog_runtime::Config::default(),
-        tokio_util::sync::CancellationToken::new(),
+        yog_runtime::control::RunControl::new(),
     )
     .await;
     assert_eq!(first.status(), yog_runtime::RunStatus::Success);
     fs::write(fixture.0.join("input/movie.mkv"), b"changed source").unwrap();
     let (command, mut options) = runtime_batch(&fixture);
     options.recovery.file_mismatch = yog_runtime::recovery::MismatchPolicy::Abort;
-    let cancellation = tokio_util::sync::CancellationToken::new();
+    let cancellation = yog_runtime::control::RunControl::new();
     let outcome = yog_runtime::run_with_events(
         command,
         options,
@@ -574,7 +574,7 @@ async fn recovered_success_emits_one_completion_without_a_fake_start_and_is_repo
         command,
         options,
         yog_runtime::Config::default(),
-        tokio_util::sync::CancellationToken::new(),
+        yog_runtime::control::RunControl::new(),
     )
     .await;
     assert_eq!(first.status(), yog_runtime::RunStatus::Success);
@@ -585,7 +585,7 @@ async fn recovered_success_emits_one_completion_without_a_fake_start_and_is_repo
         command,
         options,
         yog_runtime::Config::default(),
-        tokio_util::sync::CancellationToken::new(),
+        yog_runtime::control::RunControl::new(),
         |event| events.lock().unwrap().push(event),
     )
     .await;

@@ -40,7 +40,7 @@ printf '{"streams":%s,"format":{"format_name":"%s","duration":"1"}}' "$streams" 
             ..yog_runtime::Options::default()
         },
         yog_runtime::Config::default(),
-        tokio_util::sync::CancellationToken::new(),
+        yog_runtime::control::RunControl::new(),
         |event| events.lock().unwrap().push(event),
     )
     .await;
@@ -101,7 +101,7 @@ async fn cancelling_before_the_first_batch_probe_does_not_probe_later_files() {
             fixture.0.join("probe-started").display(),
         ),
     );
-    let cancellation = tokio_util::sync::CancellationToken::new();
+    let cancellation = yog_runtime::control::RunControl::new();
     let events = Mutex::new(Vec::new());
 
     let outcome = yog_runtime::run_with_events(
@@ -183,7 +183,7 @@ printf '%s' '{"streams":[{"index":0,"codec_type":"video"}],"format":{"format_nam
             ..yog_runtime::Options::default()
         },
         yog_runtime::Config::default(),
-        tokio_util::sync::CancellationToken::new(),
+        yog_runtime::control::RunControl::new(),
         |event| events.lock().unwrap().push(event),
     )
     .await;
@@ -249,7 +249,7 @@ async fn probe_timeout_is_a_skip_not_a_transcode_failure() {
             ..yog_runtime::Options::default()
         },
         yog_runtime::Config::default(),
-        tokio_util::sync::CancellationToken::new(),
+        yog_runtime::control::RunControl::new(),
         |event| events.lock().unwrap().push(event),
     )
     .await;

@@ -12,7 +12,7 @@ use yog_core::{
 };
 
 use crate::{
-    event::{RecoveryInfo, TaskResult},
+    event::{RecoveryInfo, SkipReason, TaskResult},
     path::Absolute,
     report::{Record, container, percent, transcode::TranscodeResult},
 };
@@ -496,6 +496,8 @@ pub struct VmafRecord {
     n_subsample: Option<u32>,
     score: Option<f64>,
     error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skip_reason: Option<SkipReason>,
 }
 
 impl VmafRecord {
@@ -504,6 +506,7 @@ impl VmafRecord {
             n_subsample: options.n_subsample.map(|value| value.get()),
             score: None,
             error: None,
+            skip_reason: None,
         }
     }
 
@@ -514,6 +517,11 @@ impl VmafRecord {
 
     pub fn failed(mut self, error: String) -> Self {
         self.error = Some(error);
+        self
+    }
+
+    pub fn manually_skipped(mut self) -> Self {
+        self.skip_reason = Some(SkipReason::Manual);
         self
     }
 }

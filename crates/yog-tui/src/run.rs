@@ -40,6 +40,7 @@ impl RunKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunStage {
     Running,
+    Skipping,
     Waiting,
     Cancelling,
     Finished(RunStatus),
@@ -137,6 +138,8 @@ pub struct RunState {
     pub spinner: usize,
     started: Instant,
     finished_elapsed: Option<Duration>,
+    batch: bool,
+    active_task: Option<usize>,
 }
 
 impl RunState {
@@ -150,6 +153,8 @@ impl RunState {
             chart_png,
             chart_svg,
             stage: RunStage::Running,
+            batch: false,
+            active_task: None,
             phase: None,
             input: None,
             output: None,
@@ -189,6 +194,7 @@ impl RunState {
                 }
             }
             RunEvent::BatchDiscovered { total } => {
+                self.batch = true;
                 self.task_total = total;
             }
             RunEvent::TaskStarted {
@@ -198,6 +204,7 @@ impl RunState {
                 output,
             } => {
                 self.task_index = index;
+                self.active_task = Some(index);
                 self.task_total = total;
                 self.input = Some(input);
                 self.output = output;
@@ -306,6 +313,9 @@ impl RunState {
                 VmafOutcome::Cancelled => {
                     self.push_notice(NoticeKind::Warning, "VMAF cancelled".to_owned());
                 }
+                VmafOutcome::ManuallySkipped => {
+                    self.push_notice(NoticeKind::Info, "VMAF manually skipped".into());
+                }
             },
             RunEvent::Warning { message } => self.push_notice(NoticeKind::Warning, message),
             RunEvent::Error { message } => self.push_notice(NoticeKind::Error, message),
@@ -330,6 +340,10 @@ impl RunState {
                 input,
                 result,
             } => {
+                let unstarted = self.active_task.take().is_none();
+                if self.stage == RunStage::Skipping {
+                    self.stage = RunStage::Running;
+                }
                 match result.status() {
                     TaskStatus::Success => {
                         self.succeeded += 1;
@@ -358,7 +372,14 @@ impl RunState {
                 self.task_total = self.task_total.max(total);
                 self.progress.finished = true;
                 if let Some(message) = result.message() {
-                    let kind = if recovery.is_some() {
+                    let kind = if recovery.is_some()
+                        || matches!(
+                            result,
+                            RuntimeTaskResult::Skipped {
+                                reason: yog_runtime::event::SkipReason::Manual,
+                                ..
+                            }
+                        ) {
                         NoticeKind::Info
                     } else if result.status() == TaskStatus::Failure {
                         NoticeKind::Error
@@ -374,6 +395,24 @@ impl RunState {
                         .then(|| self.output.clone())
                         .flatten()
                 });
+                if unstarted
+                    && matches!(
+                        result,
+                        RuntimeTaskResult::Skipped {
+                            reason: yog_runtime::event::SkipReason::Manual,
+                            ..
+                        }
+                    )
+                {
+                    self.input = Some(input.clone());
+                    self.output = None;
+                    self.phase = None;
+                    self.duration = None;
+                    self.progress = Progress {
+                        finished: true,
+                        ..Progress::default()
+                    };
+                }
                 self.push_result(TaskResult {
                     position: Some((index, total)),
                     input,
@@ -386,6 +425,14 @@ impl RunState {
 
     pub fn request_cancel(&mut self) {
         self.stage = RunStage::Cancelling;
+    }
+
+    pub fn skip_index(&self) -> Option<usize> {
+        if self.batch && self.kind == RunKind::Transcode && self.stage == RunStage::Running {
+            self.active_task
+        } else {
+            None
+        }
     }
 
     pub fn finish(&mut self, outcome: RunOutcome) {
@@ -481,7 +528,7 @@ impl RunState {
         ((self.task_index - 1) as f64 + task) / self.task_total as f64
     }
 
-    fn push_notice(&mut self, kind: NoticeKind, text: String) {
+    pub fn push_notice(&mut self, kind: NoticeKind, text: String) {
         if self
             .notices
             .back()
@@ -534,6 +581,44 @@ mod tests {
     use yog_core::ffmpeg::prediction::{Estimate, QualityPrediction};
 
     #[test]
+    fn unstarted_manual_skip_does_not_display_the_previous_tasks_progress() {
+        let mut state = RunState::new(&Operation::Transcode);
+        state.handle_event(RunEvent::TaskStarted {
+            index: 1,
+            total: 3,
+            input: "first.mkv".into(),
+            output: Some("first.mp4".into()),
+        });
+        state.handle_event(RunEvent::TaskFinished {
+            recovery: None,
+            index: 1,
+            total: 3,
+            input: "first.mkv".into(),
+            result: RuntimeTaskResult::Success,
+        });
+        state.progress.speed = Some(4.0);
+        state.duration = Some(Duration::from_secs(60));
+        state.handle_event(RunEvent::TaskFinished {
+            recovery: None,
+            index: 2,
+            total: 3,
+            input: "second.mkv".into(),
+            result: RuntimeTaskResult::Skipped {
+                reason: yog_runtime::event::SkipReason::Manual,
+                message: "Manually skipped".into(),
+            },
+        });
+        assert_eq!(
+            state.input.as_deref(),
+            Some(std::path::Path::new("second.mkv"))
+        );
+        assert!(state.output.is_none());
+        assert!(state.progress.speed.is_none());
+        assert!(state.duration.is_none());
+        assert!(state.results[1].output.is_none());
+    }
+
+    #[test]
     fn batch_skips_update_immediately_and_are_not_counted_twice_at_completion() {
         let mut state = RunState::new(&Operation::Transcode);
         state.handle_event(RunEvent::BatchDiscovered { total: 2 });
@@ -558,6 +643,7 @@ mod tests {
             succeeded: 1,
             skipped: 1,
             resume_skipped: 0,
+            manual_skipped: 0,
             reused: 0,
             forced: 0,
             state_error: None,

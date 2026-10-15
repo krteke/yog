@@ -14,6 +14,8 @@ mod emulation;
 mod events;
 #[path = "execution/failures.rs"]
 mod failures;
+#[path = "execution/manual_skip.rs"]
+mod manual_skip;
 #[path = "execution/prediction.rs"]
 mod prediction;
 #[path = "execution/process_control.rs"]

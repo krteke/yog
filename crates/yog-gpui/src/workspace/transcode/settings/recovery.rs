@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use gpui_kit::component::{
     ActiveTheme, Disableable, IndexPath, StyledExt as _,
     button::Button,
+    checkbox::Checkbox,
     form::{Field, Form},
     input::{Input, InputState},
     select::{SearchableVec, Select, SelectEvent, SelectState},
@@ -22,6 +23,7 @@ pub(super) struct RecoveryControls {
     batch: Choice,
     file: Choice,
     running: bool,
+    keep_manual_skips: bool,
     error: Option<String>,
     _subscriptions: [Subscription; 3],
 }
@@ -56,6 +58,7 @@ impl RecoveryControls {
                 InputState::new(window, cx).placeholder("Automatic: output/.yog-state.jsonl")
             }),
             running: false,
+            keep_manual_skips: true,
             error: None,
             _subscriptions: subscriptions,
         }
@@ -79,6 +82,7 @@ impl RecoveryControls {
                 .to_ascii_lowercase()
                 .parse()
                 .unwrap(),
+            keep_manual_skips: self.keep_manual_skips,
         }
     }
 
@@ -165,6 +169,18 @@ impl Render for RecoveryControls {
                         .label("File mismatch")
                         .child(Select::new(&self.file).disabled(self.running).w_full()),
                 )
+                .child(
+                    Field::new().child(
+                        Checkbox::new("keep-manual-skips")
+                            .label("Keep manually skipped tasks")
+                            .checked(self.keep_manual_skips)
+                            .disabled(self.running)
+                            .on_change(cx.listener(|this, checked, _, cx| {
+                                this.keep_manual_skips = *checked;
+                                cx.notify();
+                            })),
+                    ),
+                )
             });
         div().flex().flex_col().gap_4()
             .child(div().font_medium().child("Recovery"))
@@ -184,6 +200,29 @@ mod tests {
     use super::*;
     use gpui_kit::{TestAppContext, component::Root, px, size, test::TestWindowExt as _};
     use yog_runtime::recovery::MismatchPolicy;
+
+    #[gpui_kit::test]
+    fn manual_skip_recovery_choice_is_editable_before_a_run(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut controls = None;
+        let handle = cx.open_window(size(px(520.), px(650.)), |window, cx| {
+            let view = cx.new(|cx| RecoveryControls::new(window, cx));
+            controls = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let controls = controls.unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(controls.read(cx).options(cx).keep_manual_skips);
+            window.click("keep-manual-skips", cx);
+            assert!(!controls.read(cx).options(cx).keep_manual_skips);
+            controls.update(cx, |controls, cx| controls.set_running(true, cx));
+            window.render_frame(cx);
+            window.click("keep-manual-skips", cx);
+            assert!(!controls.read(cx).options(cx).keep_manual_skips);
+        })
+        .unwrap();
+    }
 
     #[gpui_kit::test]
     fn recovery_controls_map_choices_and_disable_while_running(cx: &mut TestAppContext) {

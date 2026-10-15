@@ -59,6 +59,7 @@ impl RunPhase {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SkipReason {
+    Manual,
     NoVideo,
     ProbeFailed,
     ProbeTimedOut,
@@ -70,6 +71,7 @@ pub enum SkipReason {
 impl SkipReason {
     pub fn label(self) -> &'static str {
         match self {
+            Self::Manual => "Manually skipped",
             Self::NoVideo => "No video",
             Self::ProbeFailed => "Probe failed",
             Self::ProbeTimedOut => "Probe timed out",
@@ -139,6 +141,7 @@ pub enum VmafOutcome {
     Scored(f64),
     Failed(String),
     Cancelled,
+    ManuallySkipped,
 }
 
 #[derive(Debug, Clone)]

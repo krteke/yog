@@ -36,9 +36,10 @@ pub struct Transcoder {
     ffmpeg: Ffmpeg,
     verify: bool,
     vmaf: Option<VmafOptions>,
-    pub(super) config: Config,
-    pub(super) verbose: bool,
+    pub config: Config,
+    pub verbose: bool,
     terminal_output: bool,
+    run_cancellation: CancellationToken,
 }
 
 impl Transcoder {
@@ -47,13 +48,20 @@ impl Transcoder {
             probe: Ffprobe::new(&options.ffprobe, options.timeout)
                 .with_cancellation(cancelled.clone())
                 .with_data_hashes(options.verify),
-            ffmpeg: Ffmpeg::new(&options.ffmpeg, options.timeout).with_cancellation(cancelled),
+            ffmpeg: Ffmpeg::new(&options.ffmpeg, options.timeout)
+                .with_cancellation(cancelled.clone()),
             verify: options.verify,
             vmaf: options.vmaf,
             config,
             verbose: options.verbose,
             terminal_output: options.terminal_output,
+            run_cancellation: cancelled,
         }
+    }
+
+    pub fn set_cancellation(&mut self, cancellation: CancellationToken) {
+        self.probe.set_cancellation(cancellation.clone());
+        self.ffmpeg.set_cancellation(cancellation);
     }
 
     pub async fn probe(&self, input: &Path) -> Result<MediaInfo, RunError> {
@@ -390,14 +398,21 @@ impl Transcoder {
                 Err(error) => match RunError::at(RunPhase::CalculatingVmaf, error) {
                     RunError::Skipped { .. } => unreachable!("VMAF does not skip inputs"),
                     RunError::Cancelled => {
-                        record.fill_vmaf(
-                            VmafRecord::requested(options).failed("cancelled".to_owned()),
-                        );
-                        diagnostics.vmaf_cancelled(&target);
+                        let outcome = if self.run_cancellation.is_cancelled() {
+                            record.fill_vmaf(
+                                VmafRecord::requested(options).failed("cancelled".to_owned()),
+                            );
+                            diagnostics.vmaf_cancelled(&target);
+                            VmafOutcome::Cancelled
+                        } else {
+                            record.fill_vmaf(VmafRecord::requested(options).manually_skipped());
+                            diagnostics.vmaf_skipped(&target);
+                            VmafOutcome::ManuallySkipped
+                        };
                         diagnostics.event(RunEvent::VmafFinished {
                             output: target.clone(),
                             options,
-                            outcome: VmafOutcome::Cancelled,
+                            outcome,
                         });
                     }
                     RunError::Failed { error, .. } => {

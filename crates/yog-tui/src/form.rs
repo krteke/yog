@@ -67,6 +67,7 @@ pub enum Field {
     StatePath,
     BatchMismatch,
     FileMismatch,
+    KeepManualSkips,
     Verify,
     Vmaf,
     VmafInterval,
@@ -294,7 +295,11 @@ impl CommandForm {
                 fields.push(Field::StatePath);
             }
             if self.recovery.mode == RecoveryMode::Automatic {
-                fields.extend([Field::BatchMismatch, Field::FileMismatch]);
+                fields.extend([
+                    Field::BatchMismatch,
+                    Field::FileMismatch,
+                    Field::KeepManualSkips,
+                ]);
             }
         }
         fields.push(Field::Report);
@@ -330,6 +335,7 @@ impl CommandForm {
             Field::StatePath => "State file",
             Field::BatchMismatch => "Batch mismatch",
             Field::FileMismatch => "File mismatch",
+            Field::KeepManualSkips => "Keep manual skips",
             Field::Verify => "Verify",
             Field::Vmaf => "VMAF",
             Field::VmafInterval => "N subsample",
@@ -389,6 +395,7 @@ impl CommandForm {
             }
             Field::BatchMismatch => self.recovery.batch_mismatch.to_string(),
             Field::FileMismatch => self.recovery.file_mismatch.to_string(),
+            Field::KeepManualSkips => state(self.recovery.keep_manual_skips).to_owned(),
             Field::Verify => state(self.verify).to_owned(),
             Field::Vmaf => match self.vmaf {
                 VmafMode::Off => "Off".to_owned(),
@@ -442,6 +449,9 @@ impl CommandForm {
             }
             Field::Candidates => return FormAction::EditCandidates,
             Field::OverwriteOutput => self.overwrite_output = !self.overwrite_output,
+            Field::KeepManualSkips => {
+                self.recovery.keep_manual_skips = !self.recovery.keep_manual_skips
+            }
             Field::OverwriteChart => self.overwrite_chart = !self.overwrite_chart,
             Field::OverwriteReport => self.overwrite_report = !self.overwrite_report,
             Field::Verify => self.verify = !self.verify,
@@ -529,6 +539,7 @@ impl CommandForm {
                 *policy = policies[cycle(index, policies.len(), direction)];
             }
             Field::Verify => self.verify = direction > 0,
+            Field::KeepManualSkips => self.recovery.keep_manual_skips = direction > 0,
             Field::Vmaf => {
                 let index = match self.vmaf {
                     VmafMode::Off => 0,

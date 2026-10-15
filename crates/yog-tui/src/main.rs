@@ -5,6 +5,7 @@ mod file_picker;
 mod form;
 mod recovery;
 mod run;
+mod skip;
 mod text_input;
 mod ui;
 
@@ -14,7 +15,7 @@ use crossterm::event::{Event, EventStream, KeyEventKind};
 use futures_util::StreamExt;
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
+use yog_runtime::control::RunControl;
 use yog_runtime::{RunOutcome, event::RunEvent};
 
 use app::{App, AppAction};
@@ -57,7 +58,7 @@ async fn run(terminal: &mut DefaultTerminal) -> io::Result<()> {
     let mut app = App::default();
     let mut events = EventStream::new();
     let (runtime_tx, mut runtime_rx) = mpsc::unbounded_channel();
-    let mut cancellation = None;
+    let mut control = None;
     let mut ticker = tokio::time::interval(Duration::from_millis(120));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -73,15 +74,22 @@ async fn run(terminal: &mut DefaultTerminal) -> io::Result<()> {
                         AppAction::None => {}
                         AppAction::Quit => return Ok(()),
                         AppAction::Start(request) => {
-                            let token = CancellationToken::new();
-                            spawn_run(*request, token.clone(), runtime_tx.clone());
-                            cancellation = Some(token);
+                            let run_control = RunControl::new();
+                            spawn_run(*request, run_control.clone(), runtime_tx.clone());
+                            control = Some(run_control);
                         }
                         AppAction::Cancel => {
-                            cancellation
+                            control
                                 .as_ref()
-                                .expect("an active run must have a cancellation token")
+                                .expect("active run has a control handle")
                                 .cancel();
+                        }
+                        AppAction::Skip { index, count } => {
+                            let accepted = control
+                                .as_ref()
+                                .expect("active run has a control handle")
+                                .skip_tasks(index, count);
+                            app.skip_requested(accepted);
                         }
                     }
                 }
@@ -93,7 +101,7 @@ async fn run(terminal: &mut DefaultTerminal) -> io::Result<()> {
                 RuntimeMessage::Event(event) => app.handle_run_event(event),
                 RuntimeMessage::Finished(outcome) => {
                     app.finish_run(outcome);
-                    cancellation = None;
+                    control = None;
                 }
             },
             _ = ticker.tick(), if app.is_animating() => app.tick(),
@@ -103,7 +111,7 @@ async fn run(terminal: &mut DefaultTerminal) -> io::Result<()> {
 
 fn spawn_run(
     request: RunRequest,
-    cancellation: CancellationToken,
+    control: RunControl,
     messages: mpsc::UnboundedSender<RuntimeMessage>,
 ) {
     tokio::spawn(async move {
@@ -112,7 +120,7 @@ fn spawn_run(
             request.command,
             request.options,
             request.config,
-            cancellation,
+            control,
             move |event| {
                 let _ = events.send(RuntimeMessage::Event(event));
             },

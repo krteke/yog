@@ -1,5 +1,6 @@
 use crate::{
     Command, Config, Options, RunOutcome,
+    control::RunControl,
     event::RunEvent,
     recovery::{RecoveryAction, RecoveryDecision, RecoveryRequest, RecoveryScope},
 };
@@ -16,21 +17,16 @@ pub async fn run(
     command: Command,
     options: Options,
     config: Config,
-    cancellation: CancellationToken,
+    control: RunControl,
 ) -> RunOutcome {
+    let cancellation = control.cancellation();
     let terminal_output = options.terminal_output;
     let (requests, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-    let run = crate::run_with_events(
-        command,
-        options,
-        config,
-        cancellation.clone(),
-        move |event| {
-            if let RunEvent::RecoveryDecisionRequired(request) = event {
-                let _ = requests.send(request);
-            }
-        },
-    );
+    let run = crate::run_with_events(command, options, config, control, move |event| {
+        if let RunEvent::RecoveryDecisionRequired(request) = event {
+            let _ = requests.send(request);
+        }
+    });
     tokio::pin!(run);
     loop {
         tokio::select! {

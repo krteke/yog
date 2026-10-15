@@ -1,5 +1,6 @@
 use crate::{
     BatchOutcome, Command, Operation, Options, RunOutcome, TaskFailure, TaskOutcome,
+    control::RunControl,
     diagnostics::Diagnostics,
     error::RunError,
     event::{RunEvent, RunPhase, SkipReason, TaskResult},
@@ -14,16 +15,16 @@ use crate::{
     transcode::Transcoder,
 };
 use std::{collections::HashMap, path::Path};
-use tokio_util::sync::CancellationToken;
 use yog_core::ffmpeg::plan::TranscodeRequest;
 
 pub async fn run(
     command: Command,
-    transcoder: &Transcoder,
+    transcoder: &mut Transcoder,
     diagnostics: &Diagnostics<'_>,
-    cancellation: &CancellationToken,
+    control: &RunControl,
     options: &Options,
 ) -> RunOutcome {
+    let cancellation = control.cancellation();
     if cancellation.is_cancelled() {
         diagnostics.cancelled();
         return RunOutcome::Cancelled;
@@ -71,7 +72,7 @@ pub async fn run(
     let total = tasks.len();
     diagnostics.event(RunEvent::BatchDiscovered { total });
     if let Some(state) = recovery.as_mut()
-        && let Err(error) = state.classify(&tasks, cancellation, diagnostics).await
+        && let Err(error) = state.classify(&tasks, &cancellation, diagnostics).await
     {
         let mut batch = BatchOutcome {
             total,
@@ -162,7 +163,9 @@ pub async fn run(
             break;
         }
         let restored = recovered.remove(&offset);
-        let preparation_error = if restored.is_none() {
+        let preflight = preflight_skipped.remove(&offset);
+        let manual = !predict && restored.is_none() && preflight.is_none() && control.take_skip();
+        let preparation_error = if restored.is_none() && !manual {
             let error = recovery
                 .as_mut()
                 .and_then(|state| state.begin(offset, &task).err());
@@ -177,9 +180,17 @@ pub async fn run(
             (Some(restored.result), Some(restored.info))
         } else {
             (
-                preflight_skipped
-                    .remove(&offset)
-                    .filter(|_| preparation_error.is_none()),
+                if manual {
+                    if let Some(state) = recovery.as_mut() {
+                        state.skip_manual(&task);
+                    }
+                    Some(TaskResult::Skipped {
+                        reason: SkipReason::Manual,
+                        message: SkipReason::Manual.label().into(),
+                    })
+                } else {
+                    preflight.filter(|_| preparation_error.is_none())
+                },
                 None,
             )
         };
@@ -200,6 +211,9 @@ pub async fn run(
                 Record::Skipped(record),
             )
         } else {
+            if !predict {
+                transcoder.set_cancellation(control.begin_task(offset + 1));
+            }
             let request = TranscodeRequest {
                 input: task.input.clone(),
                 output: task.output.clone(),
@@ -212,7 +226,7 @@ pub async fn run(
                 output: (!predict).then(|| task.output.clone()),
             });
             diagnostics.begin_task();
-            execute_task(
+            let outcome = execute_task(
                 &command.operation,
                 request,
                 transcoder,
@@ -221,11 +235,17 @@ pub async fn run(
                     .as_mut()
                     .map(|state| (state, task.relative.as_path())),
                 preparation_error,
+                control,
             )
-            .await
+            .await;
+            if !predict {
+                control.finish_task();
+            }
+            outcome
         };
         let result = outcome.result();
         if info.is_none()
+            && !manual
             && let Some(state) = recovery.as_mut()
         {
             state.finish(&task.relative, &result);
@@ -252,6 +272,7 @@ pub async fn run(
             TaskOutcome::Error(error @ RunError::Skipped { reason, .. }) => {
                 batch.skipped += 1;
                 batch.resume_skipped += usize::from(reason == SkipReason::ResumeMismatch);
+                batch.manual_skipped += usize::from(reason == SkipReason::Manual);
                 if info.is_none() {
                     diagnostics.skipped_input(&task.input, &error);
                 }
@@ -282,7 +303,11 @@ pub async fn run(
     }
 
     batch.cancelled = cancellation.is_cancelled();
-    if total == batch.skipped && batch.resume_skipped == 0 && !batch.cancelled {
+    if total == batch.skipped
+        && batch.resume_skipped == 0
+        && batch.manual_skipped == 0
+        && !batch.cancelled
+    {
         diagnostics.error(&anyhow::anyhow!(
             "no video files found in {}",
             command.request.input.display()
@@ -300,6 +325,7 @@ async fn execute_task(
     diagnostics: &Diagnostics<'_>,
     recovery: Option<(&mut Recovery, &Path)>,
     preparation_error: Option<anyhow::Error>,
+    control: &RunControl,
 ) -> (TaskOutcome, Record) {
     let predict = matches!(operation, Operation::Predict);
     let probe = if let Some(error) = preparation_error {
@@ -340,6 +366,15 @@ async fn execute_task(
                     Err(error) => Err(error),
                 }
                 .into();
+                let outcome = match outcome {
+                    TaskOutcome::Error(RunError::Cancelled) if !control.is_cancelled() => {
+                        TaskOutcome::Error(RunError::Skipped {
+                            reason: SkipReason::Manual,
+                            error: anyhow::anyhow!(SkipReason::Manual.label()),
+                        })
+                    }
+                    outcome => outcome,
+                };
                 let record = record.finish(outcome.result());
                 (outcome, record)
             }

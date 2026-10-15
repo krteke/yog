@@ -44,7 +44,7 @@ struct TranscodeArgs {
     #[arg(long, global = true)]
     restart: bool,
     /// Disable both reading and writing batch state
-    #[arg(long, global = true, conflicts_with_all = ["state", "restart", "resume_batch_mismatch", "resume_file_mismatch"])]
+    #[arg(long, global = true, conflicts_with_all = ["state", "restart", "resume_batch_mismatch", "resume_file_mismatch", "retry_manual_skips"])]
     no_state: bool,
     /// Action when saved input/settings differ (default: ask; Force trusts records)
     #[arg(long, global = true, value_name = "ask|abort|force|skip|restart")]
@@ -52,6 +52,9 @@ struct TranscodeArgs {
     /// Action when a source/output fingerprint differs (default: ask; Force trusts records)
     #[arg(long, global = true, value_name = "ask|abort|force|skip|restart")]
     resume_file_mismatch: Option<MismatchPolicy>,
+    /// Reexecute manually skipped tasks instead of retaining their saved skips
+    #[arg(long, global = true)]
+    retry_manual_skips: bool,
     #[arg(short, long, global = true, value_name = "PATH")]
     output: Option<PathBuf>,
     #[arg(short, long, global = true)]
@@ -240,6 +243,7 @@ impl Args {
                     && (args.state.is_some()
                         || args.restart
                         || args.no_state
+                        || args.retry_manual_skips
                         || args.resume_batch_mismatch.is_some()
                         || args.resume_file_mismatch.is_some())
                 {
@@ -260,6 +264,7 @@ impl Args {
                     RecoveryMode::Automatic
                 };
                 options.recovery.path = args.state;
+                options.recovery.keep_manual_skips = !args.retry_manual_skips;
                 options.recovery.batch_mismatch = args
                     .resume_batch_mismatch
                     .unwrap_or(options.recovery.batch_mismatch);
@@ -338,6 +343,24 @@ fn missing_argument(argument: &str) -> clap::Error {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn retry_manual_skips_selects_reexecution_for_directory_transcodes() {
+        let args = Args::try_parse_from([
+            "yog",
+            "transcode",
+            "-i",
+            "input",
+            "-o",
+            "output",
+            "--recursive",
+            "--copy",
+            "--retry-manual-skips",
+        ])
+        .unwrap();
+        let (_, _, options) = args.into_runtime().unwrap();
+        assert!(!options.recovery.keep_manual_skips);
+    }
+
     #[test]
     fn recursive_transcode_accepts_independent_recovery_policies() {
         let parsed = Args::try_parse_from([

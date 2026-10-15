@@ -59,7 +59,7 @@ impl Settings {
         if matches!(
             result,
             SavedResult::Skipped {
-                reason: SkipReason::NoVideo
+                reason: SkipReason::NoVideo | SkipReason::Manual
             }
         ) {
             return Vec::new();
@@ -358,6 +358,20 @@ impl Recovery {
                 break;
             }
 
+            if matches!(
+                entry.result,
+                SavedResult::Skipped {
+                    reason: SkipReason::Manual
+                }
+            ) && !self.options.keep_manual_skips
+            {
+                if entry.part {
+                    self.cleanup
+                        .insert(index, Output::part_path(&entry.output.path)?);
+                }
+                continue;
+            }
+
             let differences =
                 self.header.settings[entry.setting].differences(&current, &entry.result);
             let mut forced = root_forced;
@@ -399,7 +413,9 @@ impl Recovery {
                 entry.result,
                 SavedResult::Success
                     | SavedResult::Skipped {
-                        reason: SkipReason::NoVideo | SkipReason::UnsupportedContainer
+                        reason: SkipReason::NoVideo
+                            | SkipReason::UnsupportedContainer
+                            | SkipReason::Manual
                     }
             );
             let mut redo = !reusable;
@@ -476,7 +492,8 @@ impl Recovery {
                         },
                         info: RecoveryInfo {
                             forced,
-                            output: Some(entry.output.path.clone()),
+                            output: (reason != SkipReason::Manual)
+                                .then(|| entry.output.path.clone()),
                         },
                     },
                 );
@@ -627,6 +644,35 @@ impl Recovery {
         self.entries.get_mut(relative).expect("task has begun").part = true;
         self.append(relative);
         self.error.is_none()
+    }
+
+    pub fn skip_manual(&mut self, task: &TaskPaths) {
+        if let Some(entry) = self.entries.get_mut(&task.relative)
+            && entry.part
+        {
+            entry.input = Fingerprint::read(&task.input).ok();
+            entry.result = SavedResult::Skipped {
+                reason: SkipReason::Manual,
+            };
+        } else {
+            self.entries.insert(
+                task.relative.clone(),
+                Entry {
+                    relative: task.relative.clone(),
+                    setting: self.current_setting,
+                    input: Fingerprint::read(&task.input).ok(),
+                    output: SavedOutput {
+                        path: self.header.settings[self.current_setting].output_for(&task.relative),
+                        fingerprint: None,
+                    },
+                    result: SavedResult::Skipped {
+                        reason: SkipReason::Manual,
+                    },
+                    part: false,
+                },
+            );
+        }
+        self.append(&task.relative);
     }
 
     pub fn published(&mut self, relative: &Path) {

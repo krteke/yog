@@ -1,4 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::num::NonZeroUsize;
 use yog_runtime::{RunOutcome, event::RunEvent};
 
 use crate::{
@@ -7,6 +8,7 @@ use crate::{
     form::{CommandForm, FormAction, RunRequest},
     recovery::{RecoveryDialog, RecoveryDialogAction},
     run::{RunStage, RunState},
+    skip::{SkipAction, SkipDialog},
 };
 
 pub enum AppAction {
@@ -14,6 +16,7 @@ pub enum AppAction {
     Quit,
     Start(Box<RunRequest>),
     Cancel,
+    Skip { index: usize, count: NonZeroUsize },
 }
 
 #[derive(Default)]
@@ -23,11 +26,32 @@ pub struct App {
     picker: Option<FilePicker>,
     run: Option<RunState>,
     recovery: Option<RecoveryDialog>,
+    skip: Option<SkipDialog>,
     error: Option<String>,
 }
 
 impl App {
     pub fn handle_key(&mut self, key: KeyEvent) -> AppAction {
+        if let Some(dialog) = &mut self.skip {
+            match dialog.handle_key(key) {
+                SkipAction::None => {}
+                SkipAction::Close => self.skip = None,
+                SkipAction::Cancel => {
+                    self.skip = None;
+                    self.run
+                        .as_mut()
+                        .expect("skip belongs to a run")
+                        .request_cancel();
+                    return AppAction::Cancel;
+                }
+                SkipAction::Submit(count) => {
+                    let index = dialog.index;
+                    self.skip = None;
+                    return AppAction::Skip { index, count };
+                }
+            }
+            return AppAction::None;
+        }
         if let Some(dialog) = &mut self.recovery {
             if !dialog.visible && matches!(key.code, KeyCode::Char('r') | KeyCode::Enter) {
                 dialog.visible = true;
@@ -81,6 +105,22 @@ impl App {
         }
 
         if let Some(run) = &mut self.run {
+            if let Some(index) = run.skip_index() {
+                if key.code == KeyCode::Char('s') {
+                    return AppAction::Skip {
+                        index,
+                        count: NonZeroUsize::new(1).unwrap(),
+                    };
+                }
+                if key.code == KeyCode::Char('S') {
+                    self.skip = Some(SkipDialog::new(
+                        index,
+                        run.input.clone().expect("active task has input"),
+                        run.phase == Some(yog_runtime::event::RunPhase::CalculatingVmaf),
+                    ));
+                    return AppAction::None;
+                }
+            }
             match key.code {
                 KeyCode::Tab | KeyCode::BackTab => {
                     run.toggle_panel();
@@ -113,7 +153,10 @@ impl App {
                     }
                     _ => AppAction::None,
                 },
-                RunStage::Running | RunStage::Waiting | RunStage::Cancelling
+                RunStage::Running
+                | RunStage::Skipping
+                | RunStage::Waiting
+                | RunStage::Cancelling
                     if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
                         || key.code == KeyCode::Char('c')
                             && key.modifiers.contains(KeyModifiers::CONTROL) =>
@@ -126,7 +169,10 @@ impl App {
                         AppAction::None
                     }
                 }
-                RunStage::Running | RunStage::Waiting | RunStage::Cancelling => AppAction::None,
+                RunStage::Running
+                | RunStage::Skipping
+                | RunStage::Waiting
+                | RunStage::Cancelling => AppAction::None,
             };
         }
 
@@ -178,11 +224,33 @@ impl App {
         self.recovery.as_ref()
     }
 
+    pub fn skip(&self) -> Option<&SkipDialog> {
+        self.skip.as_ref()
+    }
+
+    pub fn skip_requested(&mut self, accepted: bool) {
+        let run = self.run.as_mut().expect("skip belongs to a run");
+        if accepted {
+            run.stage = RunStage::Skipping;
+        } else {
+            run.push_notice(
+                crate::run::NoticeKind::Info,
+                "Task is no longer available to skip".into(),
+            );
+        }
+    }
+
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
     }
 
     pub fn handle_run_event(&mut self, event: RunEvent) {
+        if let RunEvent::TaskFinished { index, .. } = &event
+            && let Some(dialog) = &mut self.skip
+            && dialog.index == *index
+        {
+            dialog.finished = true;
+        }
         if let RunEvent::RecoveryDecisionRequired(request) = event {
             self.run
                 .as_mut()
@@ -198,6 +266,7 @@ impl App {
     }
 
     pub fn finish_run(&mut self, outcome: RunOutcome) {
+        self.skip = None;
         self.recovery = None;
         self.run
             .as_mut()
@@ -213,9 +282,12 @@ impl App {
     }
 
     pub fn is_animating(&self) -> bool {
-        self.run
-            .as_ref()
-            .is_some_and(|run| matches!(run.stage, RunStage::Running | RunStage::Cancelling))
+        self.run.as_ref().is_some_and(|run| {
+            matches!(
+                run.stage,
+                RunStage::Running | RunStage::Skipping | RunStage::Cancelling
+            )
+        })
     }
 }
 
@@ -263,6 +335,121 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect()
+    }
+
+    #[test]
+    fn entering_a_skip_count_submits_that_count_for_the_bound_task() {
+        let mut app = App {
+            run: Some(RunState::new(&yog_runtime::Operation::Transcode)),
+            ..App::default()
+        };
+        app.handle_run_event(RunEvent::BatchDiscovered { total: 4 });
+        app.handle_run_event(RunEvent::TaskStarted {
+            index: 2,
+            total: 4,
+            input: "/in/movie.mkv".into(),
+            output: Some("/out/movie.mkv".into()),
+        });
+        app.handle_key(key(KeyCode::Char('S')));
+        app.handle_key(key(KeyCode::Char('3')));
+        let AppAction::Skip { index, count } = app.handle_key(key(KeyCode::Enter)) else {
+            panic!("expected skip request")
+        };
+        assert_eq!(index, 2);
+        assert_eq!(count.get(), 3);
+        app.skip_requested(true);
+        assert_eq!(app.run().unwrap().stage, RunStage::Skipping);
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Char('s'))),
+            AppAction::None
+        ));
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Char('q'))),
+            AppAction::Cancel
+        ));
+        assert_eq!(app.run().unwrap().stage, RunStage::Cancelling);
+    }
+
+    #[test]
+    fn a_finished_skip_dialog_does_not_target_the_next_task() {
+        let mut app = App {
+            run: Some(RunState::new(&yog_runtime::Operation::Transcode)),
+            ..App::default()
+        };
+        app.handle_run_event(RunEvent::BatchDiscovered { total: 3 });
+        app.handle_run_event(RunEvent::TaskStarted {
+            index: 1,
+            total: 3,
+            input: "/in/first.mkv".into(),
+            output: Some("/out/first.mkv".into()),
+        });
+        app.handle_key(key(KeyCode::Char('S')));
+        app.handle_run_event(RunEvent::TaskFinished {
+            index: 1,
+            total: 3,
+            input: "/in/first.mkv".into(),
+            result: yog_runtime::event::TaskResult::Success,
+            recovery: None,
+        });
+        app.handle_run_event(RunEvent::TaskStarted {
+            index: 2,
+            total: 3,
+            input: "/in/second.mkv".into(),
+            output: Some("/out/second.mkv".into()),
+        });
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter)),
+            AppAction::None
+        ));
+        assert!(rendered(&app).contains("This task has finished"));
+        app.handle_key(key(KeyCode::Esc));
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Char('s'))),
+            AppAction::Skip { index: 2, .. }
+        ));
+    }
+
+    #[test]
+    fn a_zero_skip_count_is_not_submitted() {
+        let mut app = App {
+            run: Some(RunState::new(&yog_runtime::Operation::Transcode)),
+            ..App::default()
+        };
+        app.handle_run_event(RunEvent::BatchDiscovered { total: 2 });
+        app.handle_run_event(RunEvent::TaskStarted {
+            index: 1,
+            total: 2,
+            input: "/in/movie.mkv".into(),
+            output: Some("/out/movie.mkv".into()),
+        });
+        app.handle_key(key(KeyCode::Char('S')));
+        app.handle_key(key(KeyCode::Char('0')));
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter)),
+            AppAction::None
+        ));
+        assert!(rendered(&app).contains("positive whole number"));
+        assert_eq!(app.run().unwrap().stage, RunStage::Running);
+    }
+
+    #[test]
+    fn batch_skip_count_dialog_uses_the_current_task_and_does_not_cancel_the_run() {
+        let mut app = App {
+            run: Some(RunState::new(&yog_runtime::Operation::Transcode)),
+            ..App::default()
+        };
+        app.handle_run_event(RunEvent::BatchDiscovered { total: 3 });
+        app.handle_run_event(RunEvent::TaskStarted {
+            index: 1,
+            total: 3,
+            input: "/in/movie.mkv".into(),
+            output: Some("/out/movie.mkv".into()),
+        });
+        app.handle_key(key(KeyCode::Char('S')));
+        assert!(rendered(&app).contains("Count: [1]"));
+        assert!(matches!(app.handle_key(key(KeyCode::Esc)), AppAction::None));
+        assert_eq!(app.run().unwrap().stage, RunStage::Running);
+        assert!(!rendered(&app).contains("Count: [1]"));
     }
 
     #[test]

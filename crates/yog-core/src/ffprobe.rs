@@ -72,8 +72,12 @@ impl Ffprobe {
     }
 
     pub fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
-        self.inner.cancellation = cancellation;
+        self.set_cancellation(cancellation);
         self
+    }
+
+    pub fn set_cancellation(&mut self, cancellation: CancellationToken) {
+        self.inner.cancellation = cancellation;
     }
 
     pub fn with_data_hashes(mut self, enabled: bool) -> Self {

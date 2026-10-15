@@ -241,6 +241,12 @@ impl<'a> Diagnostics<'a> {
         }
     }
 
+    pub fn vmaf_skipped(&self, output: &Path) {
+        if self.terminal_output {
+            println!("vmaf: {} | manually skipped", output.display());
+        }
+    }
+
     pub fn vmaf_cancelled(&self, output: &Path) {
         self.event(RunEvent::Warning {
             message: format!("vmaf cancelled for {}", output.display()),
@@ -297,6 +303,9 @@ impl<'a> Diagnostics<'a> {
             batch.reused,
             batch.forced,
         );
+        if batch.manual_skipped > 0 {
+            write!(summary, " | manual {}", batch.manual_skipped).unwrap();
+        }
         if batch.cancelled || batch.state_error.is_some() || batch.recovery_error.is_some() {
             write!(
                 summary,
@@ -322,14 +331,18 @@ impl<'a> Diagnostics<'a> {
             return;
         }
         let result = failure.result();
+        let RunError::Skipped { reason, error } = failure else {
+            unreachable!("skipped_input expects a skip")
+        };
+        if *reason == crate::event::SkipReason::Manual {
+            println!("skipped: {}: {result}", input.display());
+            return;
+        }
         eprintln!(
             "warning: skipping {}: {result}: {}",
             input.display(),
             result.message().unwrap()
         );
-        let RunError::Skipped { error, .. } = failure else {
-            unreachable!("skipped_input expects a skip")
-        };
         if let Some(error) = Self::program_error(error) {
             Self::print_program_stderr(error, false);
         }

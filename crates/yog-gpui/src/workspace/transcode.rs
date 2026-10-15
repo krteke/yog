@@ -1,7 +1,9 @@
 mod recovery;
 mod settings;
+mod skip;
 
 use std::{
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -19,8 +21,8 @@ use gpui_kit::{
     ListAlignment, ListState, ParentElement as _, Render, Styled as _, Subscription, Window, div,
     prelude::FluentBuilder as _, px,
 };
-use tokio_util::sync::CancellationToken;
 use yog_core::ffmpeg::progress::Progress;
+use yog_runtime::control::RunControl;
 use yog_runtime::{
     RunOutcome, RunStatus,
     event::{
@@ -32,6 +34,7 @@ use yog_runtime::{
 use self::{
     recovery::{RecoveryAnswered, RecoveryDialog},
     settings::TranscodeSettings,
+    skip::{SkipDialog, SkipRequested},
 };
 use super::{
     components,
@@ -45,6 +48,7 @@ use super::{
 enum Stage {
     Idle,
     Running,
+    Skipping,
     Cancelling,
     Finished(RunStatus),
 }
@@ -60,8 +64,9 @@ pub struct TranscodePage {
     settings: Entity<TranscodeSettings>,
     messages: Entity<Messages>,
     recovery: Entity<RecoveryDialog>,
+    skip: Entity<SkipDialog>,
     stage: Stage,
-    cancellation: Option<CancellationToken>,
+    control: Option<RunControl>,
     error: Option<String>,
     notice: Option<(MessageLevel, String)>,
     phase: Option<RunPhase>,
@@ -70,6 +75,8 @@ pub struct TranscodePage {
     completed_output: Option<PathBuf>,
     task_index: usize,
     task_total: usize,
+    batch: bool,
+    active_task: Option<usize>,
     succeeded: usize,
     failed: usize,
     skipped: usize,
@@ -88,6 +95,7 @@ pub struct TranscodePage {
     _settings_observation: Subscription,
     _messages_subscription: Subscription,
     _recovery_subscription: Subscription,
+    _skip_subscription: Subscription,
 }
 
 impl EventEmitter<ActivityChanged> for TranscodePage {}
@@ -102,6 +110,14 @@ impl TranscodePage {
         let settings = cx.new(|cx| TranscodeSettings::new(source.clone(), preferences, window, cx));
         let messages = cx.new(|cx| Messages::new(window, cx));
         let recovery = cx.new(|_| RecoveryDialog::new());
+        let skip = cx.new(|cx| SkipDialog::new(window, cx));
+        let skip_subscription = cx.subscribe_in(
+            &skip,
+            window,
+            |page, _, request: &SkipRequested, window, cx| {
+                page.skip_tasks(request.index, request.count, window, cx);
+            },
+        );
         let recovery_subscription = cx.subscribe(&recovery, |_, _, _: &RecoveryAnswered, cx| {
             cx.emit(ActivityChanged);
             cx.notify();
@@ -119,8 +135,9 @@ impl TranscodePage {
             settings,
             messages,
             recovery,
+            skip,
             stage: Stage::Idle,
-            cancellation: None,
+            control: None,
             error: None,
             notice: None,
             phase: None,
@@ -129,6 +146,8 @@ impl TranscodePage {
             completed_output: None,
             task_index: 0,
             task_total: 1,
+            batch: false,
+            active_task: None,
             succeeded: 0,
             failed: 0,
             skipped: 0,
@@ -147,11 +166,15 @@ impl TranscodePage {
             _settings_observation: settings_observation,
             _messages_subscription: messages_subscription,
             _recovery_subscription: recovery_subscription,
+            _skip_subscription: skip_subscription,
         }
     }
 
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.stage, Stage::Running | Stage::Cancelling) {
+        if matches!(
+            self.stage,
+            Stage::Running | Stage::Skipping | Stage::Cancelling
+        ) {
             return;
         }
         let request = match self.settings.read(cx).build(cx) {
@@ -165,6 +188,8 @@ impl TranscodePage {
         };
 
         self.stage = Stage::Running;
+        self.batch = false;
+        self.active_task = None;
         self.settings
             .update(cx, |settings, cx| settings.set_running(true, cx));
         self.error = None;
@@ -201,9 +226,9 @@ impl TranscodePage {
             );
         });
 
-        let cancellation = CancellationToken::new();
-        self.cancellation = Some(cancellation.clone());
-        let mut receiver = execution::spawn(request, cancellation);
+        let control = RunControl::new();
+        self.control = Some(control.clone());
+        let mut receiver = execution::spawn(request, control);
         cx.spawn(async move |this, cx| {
             while let Some(batch) = receiver.recv(cx.background_executor()).await {
                 if this
@@ -224,8 +249,9 @@ impl TranscodePage {
     }
 
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(cancellation) = &self.cancellation {
-            cancellation.cancel();
+        if let Some(control) = &self.control {
+            control.cancel();
+            self.skip.update(cx, |skip, cx| skip.clear(window, cx));
             self.recovery
                 .update(cx, |recovery, cx| recovery.clear(window, cx));
             self.stage = Stage::Cancelling;
@@ -237,6 +263,56 @@ impl TranscodePage {
             );
             cx.emit(ActivityChanged);
             cx.notify();
+        }
+    }
+
+    fn skip_index(&self) -> Option<usize> {
+        if self.batch && matches!(self.stage, Stage::Running) {
+            self.active_task
+        } else {
+            None
+        }
+    }
+
+    fn skip_tasks(
+        &mut self,
+        index: usize,
+        count: NonZeroUsize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .control
+            .as_ref()
+            .is_some_and(|control| control.skip_tasks(index, count))
+        {
+            self.stage = Stage::Skipping;
+            self.message(
+                MessageLevel::Info,
+                if count.get() == 1 {
+                    "Skipping current task".into()
+                } else {
+                    format!("Skipping {count} tasks, including the current task")
+                },
+                window,
+                cx,
+            );
+        } else {
+            self.notice = Some((
+                MessageLevel::Info,
+                "Task is no longer available to skip".into(),
+            ));
+        }
+        cx.emit(ActivityChanged);
+        cx.notify();
+    }
+
+    fn open_skip_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(index) = self.skip_index() {
+            let name = self.current_name.clone().expect("active task has an input");
+            let vmaf = self.phase == Some(RunPhase::CalculatingVmaf);
+            self.skip
+                .update(cx, |skip, cx| skip.open(index, name, vmaf, window, cx));
         }
     }
 
@@ -289,6 +365,7 @@ impl TranscodePage {
                     self.message(MessageLevel::Info, self.phase_label().into(), window, cx);
                 }
                 RunEvent::BatchDiscovered { total } => {
+                    self.batch = true;
                     self.task_total = total;
                     self.message(
                         MessageLevel::Info,
@@ -304,6 +381,7 @@ impl TranscodePage {
                     output,
                 } => {
                     self.task_index = index;
+                    self.active_task = Some(index);
                     self.task_total = total;
                     self.current_name = Some(input.display().to_string());
                     self.current_output = output;
@@ -340,6 +418,15 @@ impl TranscodePage {
                     VmafOutcome::Cancelled => {
                         self.notice = Some((MessageLevel::Warning, "VMAF cancelled".into()));
                     }
+                    VmafOutcome::ManuallySkipped => {
+                        self.notice = Some((MessageLevel::Info, "VMAF manually skipped".into()));
+                        self.message(
+                            MessageLevel::Info,
+                            format!("VMAF manually skipped: {}", output.display()),
+                            window,
+                            cx,
+                        );
+                    }
                 },
                 RunEvent::Warning { message } => {
                     self.message(MessageLevel::Warning, message.clone(), window, cx);
@@ -373,6 +460,26 @@ impl TranscodePage {
                     recovery,
                     ..
                 } => {
+                    let unstarted = self.active_task.take().is_none();
+                    if unstarted
+                        && matches!(
+                            result,
+                            RuntimeTaskResult::Skipped {
+                                reason: SkipReason::Manual,
+                                ..
+                            }
+                        )
+                    {
+                        self.current_name = Some(input.display().to_string());
+                        self.current_output = None;
+                        self.phase = None;
+                        self.duration = None;
+                        self.progress = Progress::default();
+                    }
+                    self.skip.update(cx, |skip, cx| skip.invalidate(index, cx));
+                    if matches!(self.stage, Stage::Skipping) {
+                        self.stage = Stage::Running;
+                    }
                     self.task_index = index;
                     self.task_total = total;
                     self.progress.finished = true;
@@ -401,7 +508,17 @@ impl TranscodePage {
                                 MessageLevel::Info
                             } else {
                                 self.skipped += 1;
-                                MessageLevel::Warning
+                                if matches!(
+                                    result,
+                                    RuntimeTaskResult::Skipped {
+                                        reason: SkipReason::Manual,
+                                        ..
+                                    }
+                                ) {
+                                    MessageLevel::Info
+                                } else {
+                                    MessageLevel::Warning
+                                }
                             }
                         }
                         TaskStatus::Cancelled => MessageLevel::Warning,
@@ -435,6 +552,8 @@ impl TranscodePage {
                 _ => {}
             },
             WorkerMessage::Finished(outcome) => {
+                self.active_task = None;
+                self.skip.update(cx, |skip, cx| skip.clear(window, cx));
                 self.recovery
                     .update(cx, |recovery, cx| recovery.clear(window, cx));
                 self.messages
@@ -443,7 +562,7 @@ impl TranscodePage {
                 self.settings
                     .update(cx, |settings, cx| settings.set_running(false, cx));
                 self.finished_elapsed = self.started.map(|started| started.elapsed());
-                self.cancellation = None;
+                self.control = None;
                 let failure = match outcome {
                     RunOutcome::Failed(error) => {
                         let detail = format!("{error:#}");
@@ -471,7 +590,9 @@ impl TranscodePage {
                     Stage::Finished(RunStatus::Cancelled) => {
                         (MessageLevel::Warning, "Run cancelled")
                     }
-                    Stage::Idle | Stage::Running | Stage::Cancelling => unreachable!(),
+                    Stage::Idle | Stage::Running | Stage::Skipping | Stage::Cancelling => {
+                        unreachable!()
+                    }
                 };
                 self.message(
                     level,
@@ -487,7 +608,9 @@ impl TranscodePage {
     }
 
     fn phase_label(&self) -> &'static str {
-        if self.phase == Some(RunPhase::Planning) {
+        if self.batch && self.active_task.is_none() && self.task_index > 0 {
+            "Processing batch"
+        } else if self.phase == Some(RunPhase::Planning) {
             "Preparing transcode"
         } else {
             execution::phase_label(self.phase)
@@ -513,6 +636,7 @@ impl TranscodePage {
                 Some(Activity::Running(label))
             }
             Stage::Cancelling => Some(Activity::Cancelling),
+            Stage::Skipping => Some(Activity::Running("Skipping current task".into())),
             Stage::Finished(status) => Some(Activity::Finished(status)),
         }
     }
@@ -541,6 +665,7 @@ impl TranscodePage {
             }
             Stage::Running => (self.phase_label(), "Running", Tag::info()),
             Stage::Cancelling => ("Cancelling transcode", "Cancelling", Tag::warning()),
+            Stage::Skipping => ("Skipping current task", "Skipping", Tag::warning()),
             Stage::Finished(RunStatus::Success) => {
                 ("Transcode complete", "Completed", Tag::success())
             }
@@ -549,7 +674,10 @@ impl TranscodePage {
                 ("Transcode cancelled", "Cancelled", Tag::secondary())
             }
         };
-        let active = matches!(self.stage, Stage::Running | Stage::Cancelling);
+        let active = matches!(
+            self.stage,
+            Stage::Running | Stage::Skipping | Stage::Cancelling
+        );
         let progress = (self.phase == Some(RunPhase::Transcoding))
             .then(|| self.progress_percent())
             .flatten();
@@ -900,7 +1028,10 @@ impl TranscodePage {
     }
 
     fn render_inspector(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let running = matches!(self.stage, Stage::Running | Stage::Cancelling);
+        let running = matches!(
+            self.stage,
+            Stage::Running | Stage::Skipping | Stage::Cancelling
+        );
         let ready =
             self.source.read(cx).valid_path().is_some() && self.settings.read(cx).has_output(cx);
         let footer = div()
@@ -919,6 +1050,41 @@ impl TranscodePage {
             })
             .when_some(self.error.clone(), |this, error| {
                 this.child(div().text_sm().text_color(cx.theme().danger).child(error))
+            })
+            .when(self.batch && running, |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .child(
+                            Button::new("skip-current")
+                                .label(if self.phase == Some(RunPhase::CalculatingVmaf) {
+                                    "Skip VMAF"
+                                } else {
+                                    "Skip current"
+                                })
+                                .disabled(self.skip_index().is_none())
+                                .on_click(cx.listener(|page, _, window, cx| {
+                                    if let Some(index) = page.skip_index() {
+                                        page.skip_tasks(
+                                            index,
+                                            NonZeroUsize::new(1).unwrap(),
+                                            window,
+                                            cx,
+                                        );
+                                    }
+                                })),
+                        )
+                        .child(
+                            Button::new("skip-tasks")
+                                .label("Skip tasks…")
+                                .disabled(self.skip_index().is_none())
+                                .on_click(cx.listener(|page, _, window, cx| {
+                                    page.open_skip_dialog(window, cx)
+                                })),
+                        ),
+                )
             })
             .child(div().flex().justify_end().child(if running {
                 Button::new("cancel-transcode")
@@ -955,8 +1121,8 @@ fn estimate_remaining(duration: Duration, processed_us: i64, speed: f64) -> Opti
 
 impl Drop for TranscodePage {
     fn drop(&mut self) {
-        if let Some(cancellation) = &self.cancellation {
-            cancellation.cancel();
+        if let Some(control) = &self.control {
+            control.cancel();
         }
     }
 }
@@ -982,6 +1148,270 @@ mod tests {
         RunStatus,
         event::{RunEvent, RunPhase},
     };
+
+    #[gpui_kit::test]
+    #[cfg(unix)]
+    fn submitting_skip_count_controls_the_running_batch(cx: &mut TestAppContext) {
+        use std::{fs, os::unix::fs::PermissionsExt, sync::mpsc};
+        use yog_core::ffmpeg::plan::TranscodeRequest;
+        use yog_runtime::{Command, Config, Operation, Options, RunOutcome, control::RunControl};
+
+        struct RunningBatch {
+            control: RunControl,
+            worker: Option<std::thread::JoinHandle<RunOutcome>>,
+        }
+        impl Drop for RunningBatch {
+            fn drop(&mut self) {
+                self.control.cancel();
+                if let Some(worker) = self.worker.take() {
+                    worker.join().unwrap();
+                }
+            }
+        }
+
+        let fixture = tempfile::tempdir().unwrap();
+        let input = fixture.path().join("input");
+        let output = fixture.path().join("output");
+        fs::create_dir(&input).unwrap();
+        fs::write(input.join("first.mkv"), b"video").unwrap();
+        fs::write(input.join("second.mkv"), b"video").unwrap();
+        let probe = fixture.path().join("ffprobe");
+        fs::write(&probe, "#!/bin/sh\nwhile :; do :; done\n").unwrap();
+        fs::set_permissions(&probe, fs::Permissions::from_mode(0o700)).unwrap();
+        let control = RunControl::new();
+        let (events, receiver) = mpsc::channel();
+        let backend_control = control.clone();
+        let worker = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(yog_runtime::run_with_events(
+                    Command {
+                        request: TranscodeRequest::new(input, output),
+                        operation: Operation::Transcode,
+                        recursive: true,
+                    },
+                    Options {
+                        ffprobe: probe,
+                        timeout: Some(Duration::from_secs(10)),
+                        terminal_output: false,
+                        ..Options::default()
+                    },
+                    Config::default(),
+                    backend_control,
+                    move |event| {
+                        let _ = events.send(event);
+                    },
+                ))
+        });
+        let mut running = RunningBatch {
+            control: control.clone(),
+            worker: Some(worker),
+        };
+        cx.update(gpui_kit::init);
+        let mut workspace = None;
+        let handle = cx.open_window(size(px(1100.), px(850.)), |window, cx| {
+            let view = cx.new(|cx| Workspace::new(window, cx));
+            workspace = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let workspace = workspace.unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            workspace.read(cx).transcode.clone().update(cx, |page, cx| {
+                page.stage = Stage::Running;
+                page.control = Some(control.clone());
+                loop {
+                    let event = receiver.recv_timeout(Duration::from_secs(3)).unwrap();
+                    let started = matches!(event, RunEvent::TaskStarted { .. });
+                    page.handle_message(WorkerMessage::Event(event), window, cx);
+                    if started {
+                        break;
+                    }
+                }
+            });
+            window.render_frame(cx);
+            window.click("skip-tasks", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("skip-count", cx);
+            window.press("secondary-a", cx);
+            window.input("2", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                matches!(workspace.read(cx).transcode.read(cx).stage, Stage::Skipping),
+                "notice: {:?}, count: {:?}",
+                workspace.read(cx).transcode.read(cx).notice,
+                workspace
+                    .read(cx)
+                    .transcode
+                    .read(cx)
+                    .skip
+                    .read(cx)
+                    .count(cx)
+            );
+            assert!(!control.is_cancelled());
+        });
+        let outcome = running.worker.take().unwrap().join().unwrap();
+        assert_eq!(outcome.status(), RunStatus::Success, "{outcome:?}");
+        let RunOutcome::Batch(batch) = outcome else {
+            panic!("expected batch")
+        };
+        assert_eq!(batch.manual_skipped, 2);
+        assert!(batch.failures.is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn skip_count_dialog_is_bound_to_the_displayed_task(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut workspace = None;
+        let handle = cx.open_window(size(px(1100.), px(850.)), |window, cx| {
+            let view = cx.new(|cx| Workspace::new(window, cx));
+            workspace = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let workspace = workspace.unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.transcode.update(cx, |page, cx| {
+                    page.stage = Stage::Running;
+                    page.handle_message(
+                        WorkerMessage::Event(RunEvent::BatchDiscovered { total: 4 }),
+                        window,
+                        cx,
+                    );
+                    page.handle_message(
+                        WorkerMessage::Event(RunEvent::TaskStarted {
+                            index: 2,
+                            total: 4,
+                            input: "/in/current.mkv".into(),
+                            output: Some("/out/current.mkv".into()),
+                        }),
+                        window,
+                        cx,
+                    );
+                });
+            });
+            window.render_frame(cx);
+            window.click("skip-tasks", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("skip-count", cx);
+            window.press("secondary-a", cx);
+            window.input("3", cx);
+            assert_eq!(
+                workspace
+                    .read(cx)
+                    .transcode
+                    .read(cx)
+                    .skip
+                    .read(cx)
+                    .count(cx)
+                    .unwrap()
+                    .get(),
+                3
+            );
+            workspace.update(cx, |workspace, cx| {
+                workspace.transcode.update(cx, |page, cx| {
+                    page.handle_message(
+                        WorkerMessage::Event(RunEvent::TaskFinished {
+                            index: 2,
+                            total: 4,
+                            input: "/in/current.mkv".into(),
+                            result: yog_runtime::event::TaskResult::Success,
+                            recovery: None,
+                        }),
+                        window,
+                        cx,
+                    );
+                })
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("confirm-skip-tasks", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.try_find("confirm-skip-tasks").is_some(),
+                "stale submission must leave the dialog open"
+            );
+            window.press("escape", cx);
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn unstarted_manual_skip_clears_the_previous_tasks_progress(cx: &mut TestAppContext) {
+        use yog_runtime::event::{SkipReason, TaskResult as RuntimeTaskResult};
+
+        cx.update(gpui_kit::init);
+        cx.open_window(size(px(1100.), px(850.)), |window, cx| {
+            let view = cx.new(|cx| Workspace::new(window, cx));
+            view.update(cx, |workspace, cx| {
+                workspace.transcode.update(cx, |page, cx| {
+                    page.stage = Stage::Running;
+                    page.handle_message(
+                        WorkerMessage::Event(RunEvent::TaskStarted {
+                            index: 1,
+                            total: 3,
+                            input: "first.mkv".into(),
+                            output: Some("first.mp4".into()),
+                        }),
+                        window,
+                        cx,
+                    );
+                    page.handle_message(
+                        WorkerMessage::Event(RunEvent::TaskFinished {
+                            recovery: None,
+                            index: 1,
+                            total: 3,
+                            input: "first.mkv".into(),
+                            result: RuntimeTaskResult::Success,
+                        }),
+                        window,
+                        cx,
+                    );
+                    page.progress.speed = Some(4.0);
+                    page.duration = Some(Duration::from_secs(60));
+                    page.handle_message(
+                        WorkerMessage::Event(RunEvent::TaskFinished {
+                            recovery: None,
+                            index: 2,
+                            total: 3,
+                            input: "second.mkv".into(),
+                            result: RuntimeTaskResult::Skipped {
+                                reason: SkipReason::Manual,
+                                message: "Manually skipped".into(),
+                            },
+                        }),
+                        window,
+                        cx,
+                    );
+                    assert_eq!(page.current_name.as_deref(), Some("second.mkv"));
+                    assert!(page.current_output.is_none());
+                    assert!(page.progress.speed.is_none());
+                    assert!(page.duration.is_none());
+                });
+            });
+            Root::new(view, window, cx)
+        });
+    }
 
     fn recovery_request() -> (
         yog_runtime::recovery::RecoveryRequest,

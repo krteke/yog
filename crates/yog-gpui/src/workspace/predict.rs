@@ -24,12 +24,12 @@ use gpui_kit::{
     ListAlignment, ListState, ParentElement as _, Render, Styled as _, Subscription, Window, div,
     prelude::FluentBuilder as _, px,
 };
-use tokio_util::sync::CancellationToken;
 use yog_core::ffmpeg::{
     encoding::RateControl,
     plan::{TranscodeRequest, VideoAction},
     prediction::Prediction,
 };
+use yog_runtime::control::RunControl;
 use yog_runtime::{
     Command, Operation, RunOutcome, RunStatus, Validate,
     event::{RunEvent, RunPhase, TaskResult, TaskStatus},
@@ -70,7 +70,7 @@ pub struct PredictPage {
     overwrite_report: bool,
     messages: Entity<Messages>,
     stage: Stage,
-    cancellation: Option<CancellationToken>,
+    control: Option<RunControl>,
     error: Option<String>,
     phase: Option<RunPhase>,
     task_index: usize,
@@ -147,7 +147,7 @@ impl PredictPage {
             report: cx.new(|cx| InputState::new(window, cx).placeholder("Optional report path")),
             messages,
             stage: Stage::Idle,
-            cancellation: None,
+            control: None,
             error: None,
             phase: None,
             task_index: 0,
@@ -296,9 +296,9 @@ impl PredictPage {
         self.messages
             .update(cx, |messages, cx| messages.clear(window, cx));
         self.message(MessageLevel::Info, "Starting prediction".into(), window, cx);
-        let cancellation = CancellationToken::new();
-        self.cancellation = Some(cancellation.clone());
-        let mut receiver = execution::spawn(request, cancellation);
+        let control = RunControl::new();
+        self.control = Some(control.clone());
+        let mut receiver = execution::spawn(request, control);
         cx.spawn(async move |this, cx| {
             while let Some(batch) = receiver.recv(cx.background_executor()).await {
                 if this
@@ -319,8 +319,8 @@ impl PredictPage {
     }
 
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(cancellation) = &self.cancellation {
-            cancellation.cancel();
+        if let Some(control) = &self.control {
+            control.cancel();
             self.stage = Stage::Cancelling;
             self.message(
                 MessageLevel::Info,
@@ -429,7 +429,7 @@ impl PredictPage {
                     .update(cx, |messages, cx| messages.finish(window, cx));
                 self.stage = Stage::Finished(outcome.status());
                 self.elapsed = self.started.map(|started| started.elapsed());
-                self.cancellation = None;
+                self.control = None;
                 match outcome {
                     RunOutcome::Failed(error) => self.error = Some(format!("{error:#}")),
                     RunOutcome::Batch(batch) => {
@@ -490,8 +490,8 @@ impl PredictPage {
 
 impl Drop for PredictPage {
     fn drop(&mut self) {
-        if let Some(cancellation) = &self.cancellation {
-            cancellation.cancel();
+        if let Some(control) = &self.control {
+            control.cancel();
         }
     }
 }

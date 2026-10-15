@@ -54,6 +54,7 @@ pub struct RecoveryOptions {
     pub path: Option<PathBuf>,
     pub batch_mismatch: MismatchPolicy,
     pub file_mismatch: MismatchPolicy,
+    pub keep_manual_skips: bool,
 }
 
 impl Default for RecoveryOptions {
@@ -63,6 +64,7 @@ impl Default for RecoveryOptions {
             path: None,
             batch_mismatch: MismatchPolicy::Ask,
             file_mismatch: MismatchPolicy::Ask,
+            keep_manual_skips: true,
         }
     }
 }

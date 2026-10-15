@@ -23,11 +23,11 @@ use gpui_kit::{
     IntoElement, ListAlignment, ListState, ObjectFit, ParentElement as _, Render, Styled as _,
     StyledImage as _, Subscription, Window, div, img, prelude::FluentBuilder as _, px,
 };
-use tokio_util::sync::CancellationToken;
 use yog_core::ffmpeg::{
     decoding::DecodingBackend,
     plan::{TranscodeRequest, VideoAction},
 };
+use yog_runtime::control::RunControl;
 use yog_runtime::{
     Candidate, Command, Config, EmulationOptions, Operation, RunOutcome, RunStatus, Validate,
     event::{RunEvent, RunPhase, TaskResult, TaskStatus},
@@ -93,7 +93,7 @@ pub struct EmulatePage {
     overwrite_chart: bool,
     messages: Entity<Messages>,
     stage: Stage,
-    cancellation: Option<CancellationToken>,
+    control: Option<RunControl>,
     error: Option<String>,
     destination_error: Option<String>,
     phase: Option<RunPhase>,
@@ -164,7 +164,7 @@ impl EmulatePage {
             overwrite_chart: false,
             messages,
             stage: Stage::Idle,
-            cancellation: None,
+            control: None,
             error: None,
             destination_error: None,
             phase: None,
@@ -384,9 +384,9 @@ impl EmulatePage {
         self.messages
             .update(cx, |messages, cx| messages.clear(window, cx));
         self.message(MessageLevel::Info, "Starting emulation".into(), window, cx);
-        let cancellation = CancellationToken::new();
-        self.cancellation = Some(cancellation.clone());
-        let mut receiver = execution::spawn(request, cancellation);
+        let control = RunControl::new();
+        self.control = Some(control.clone());
+        let mut receiver = execution::spawn(request, control);
         cx.spawn(async move |this, cx| {
             while let Some(batch) = receiver.recv(cx.background_executor()).await {
                 if this
@@ -407,8 +407,8 @@ impl EmulatePage {
     }
 
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(cancellation) = &self.cancellation {
-            cancellation.cancel();
+        if let Some(control) = &self.control {
+            control.cancel();
             self.stage = Stage::Cancelling;
             self.message(
                 MessageLevel::Info,
@@ -535,7 +535,7 @@ impl EmulatePage {
                     .update(cx, |messages, cx| messages.finish(window, cx));
                 self.stage = Stage::Finished(outcome.status());
                 self.elapsed = self.started.map(|start| start.elapsed());
-                self.cancellation = None;
+                self.control = None;
                 self.current = None;
                 if let RunOutcome::Failed(error) = outcome {
                     self.error = Some(format!("{error:#}"));
@@ -588,8 +588,8 @@ impl EmulatePage {
 
 impl Drop for EmulatePage {
     fn drop(&mut self) {
-        if let Some(cancellation) = &self.cancellation {
-            cancellation.cancel();
+        if let Some(control) = &self.control {
+            control.cancel();
         }
     }
 }

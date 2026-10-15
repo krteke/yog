@@ -8,7 +8,7 @@ use std::{
 };
 
 use gpui_kit::BackgroundExecutor;
-use tokio_util::sync::CancellationToken;
+use yog_runtime::control::RunControl;
 use yog_runtime::{
     Command, Config, Options, RunOutcome, RunStatus,
     event::{RunEvent, RunPhase},
@@ -175,7 +175,7 @@ pub fn same_path(left: &Path, right: &Path) -> bool {
     matches!((resolve(left), resolve(right)), (Some(left), Some(right)) if left == right)
 }
 
-pub fn spawn(request: RunRequest, cancellation: CancellationToken) -> WorkerReceiver {
+pub fn spawn(request: RunRequest, control: RunControl) -> WorkerReceiver {
     let (sender, receiver) = channel();
     std::thread::spawn(move || {
         let capture = logging::capture(sender.clone());
@@ -187,7 +187,7 @@ pub fn spawn(request: RunRequest, cancellation: CancellationToken) -> WorkerRece
                 request.command,
                 request.options,
                 request.config,
-                cancellation,
+                control,
                 |event| {
                     // Lifecycle events must be delivered in order. Only the
                     // dedicated worker thread waits for this bounded queue;
@@ -238,7 +238,7 @@ mod tests {
                 },
                 config: Config::default(),
             },
-            CancellationToken::new(),
+            RunControl::new(),
         );
         // Deliberately let the worker fill the queue before the GUI consumes it.
         std::thread::sleep(Duration::from_millis(100));

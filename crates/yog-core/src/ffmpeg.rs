@@ -38,8 +38,12 @@ impl Ffmpeg {
     }
 
     pub fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
-        self.inner.cancellation = cancellation;
+        self.set_cancellation(cancellation);
         self
+    }
+
+    pub fn set_cancellation(&mut self, cancellation: CancellationToken) {
+        self.inner.cancellation = cancellation;
     }
 
     pub fn timeout(&self) -> Option<Duration> {

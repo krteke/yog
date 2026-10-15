@@ -2,6 +2,7 @@ mod candidate;
 mod picker;
 mod recovery;
 mod run;
+mod skip;
 
 use ratatui::{
     Frame,
@@ -34,6 +35,9 @@ impl DrawApp for Frame<'_> {
 
         if let Some(state) = app.run() {
             self.draw_run(area, state);
+            if let Some(dialog) = app.skip() {
+                skip::DrawSkip::draw_skip(self, area, dialog);
+            }
             if let Some(dialog) = app.recovery()
                 && dialog.visible
             {

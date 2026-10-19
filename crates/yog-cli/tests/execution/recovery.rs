@@ -133,7 +133,7 @@ fn file_mismatch_abort_is_resolved_before_any_transcode() {
 }
 
 #[test]
-fn recovery_reexecutes_changed_sources_without_granting_output_overwrite() {
+fn recovery_restarts_changed_sources_but_skips_existing_outputs_without_overwrite() {
     let fixture = batch();
     assert!(
         fixture
@@ -150,8 +150,8 @@ fn recovery_reexecutes_changed_sources_without_granting_output_overwrite() {
         .args(["--copy", "--resume-file-mismatch", "restart"])
         .output()
         .unwrap();
-    assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("output file already exists"));
+    assert!(result.status.success(), "{:?}", result.stderr);
+    assert!(String::from_utf8_lossy(&result.stdout).contains("failed 0 | skipped 1"));
     assert_eq!(
         fs::read(fixture.0.join("output/movie.mkv")).unwrap(),
         b"encoded"
@@ -179,7 +179,8 @@ fn restarting_state_does_not_grant_output_overwrite() {
         .args(["--copy", "--restart"])
         .output()
         .unwrap();
-    assert!(!result.status.success());
+    assert!(result.status.success(), "{:?}", result.stderr);
+    assert!(String::from_utf8_lossy(&result.stdout).contains("failed 0 | skipped 1"));
     assert_eq!(
         fs::read(fixture.0.join("output/movie.mkv")).unwrap(),
         b"encoded"

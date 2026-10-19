@@ -221,6 +221,30 @@ printf encoded > "$last""#,
 }
 
 #[test]
+fn existing_outputs_do_not_hide_batch_output_collisions() {
+    let fixture = Fixture::new("touch ffmpeg-started");
+    fs::create_dir(fixture.0.join("input")).unwrap();
+    fs::create_dir(fixture.0.join("output")).unwrap();
+    fs::write(fixture.0.join("input/same.mkv"), b"first").unwrap();
+    fs::write(fixture.0.join("input/same.avi"), b"second").unwrap();
+    fs::write(fixture.0.join("output/same.webm"), b"original").unwrap();
+
+    let result = fixture
+        .recursive_command("output")
+        .args(["-C", "webm", "--copy"])
+        .output()
+        .unwrap();
+
+    assert_eq!(result.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("multiple input files map to"));
+    assert_eq!(
+        fs::read(fixture.0.join("output/same.webm")).unwrap(),
+        b"original"
+    );
+    assert!(!fixture.0.join("ffmpeg-started").exists());
+}
+
+#[test]
 fn recursive_mode_rejects_output_collisions_before_starting_ffmpeg() {
     let fixture = Fixture::new("touch ffmpeg-started");
     fs::create_dir(fixture.0.join("input")).unwrap();

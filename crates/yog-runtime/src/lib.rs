@@ -112,7 +112,8 @@ impl RunOutcome {
                     || batch.recovery_error.is_some()
                     || (batch.total == batch.skipped
                         && batch.resume_skipped == 0
-                        && batch.manual_skipped == 0) =>
+                        && batch.manual_skipped == 0
+                        && batch.existing_skipped == 0) =>
             {
                 RunStatus::Failure
             }
@@ -131,6 +132,7 @@ pub struct BatchOutcome {
     pub resume_skipped: usize,
     /// Subset of skipped tasks manually bypassed, including retained manual skips.
     pub manual_skipped: usize,
+    pub existing_skipped: usize,
     pub reused: usize,
     pub forced: usize,
     pub state_error: Option<anyhow::Error>,

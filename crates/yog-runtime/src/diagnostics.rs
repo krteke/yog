@@ -12,7 +12,7 @@ use yog_core::ffmpeg::{
 use crate::{
     emulate::{EmulationJob, EmulationOptions},
     error::RunError,
-    event::{EventSink, RecoveryInfo, RunEvent, TaskResult},
+    event::{EventSink, RecoveryInfo, RunEvent, SkipReason, TaskResult},
 };
 
 pub struct Diagnostics<'a> {
@@ -306,6 +306,9 @@ impl<'a> Diagnostics<'a> {
         if batch.manual_skipped > 0 {
             write!(summary, " | manual {}", batch.manual_skipped).unwrap();
         }
+        if batch.existing_skipped > 0 {
+            write!(summary, " | existing {}", batch.existing_skipped).unwrap();
+        }
         if batch.cancelled || batch.state_error.is_some() || batch.recovery_error.is_some() {
             write!(
                 summary,
@@ -334,7 +337,7 @@ impl<'a> Diagnostics<'a> {
         let RunError::Skipped { reason, error } = failure else {
             unreachable!("skipped_input expects a skip")
         };
-        if *reason == crate::event::SkipReason::Manual {
+        if matches!(reason, SkipReason::Manual | SkipReason::ExistingOutput) {
             println!("skipped: {}: {result}", input.display());
             return;
         }

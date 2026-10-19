@@ -64,6 +64,7 @@ pub enum SkipReason {
     ProbeFailed,
     ProbeTimedOut,
     UnsupportedContainer,
+    ExistingOutput,
     AlreadyCompleted,
     ResumeMismatch,
 }
@@ -76,6 +77,7 @@ impl SkipReason {
             Self::ProbeFailed => "Probe failed",
             Self::ProbeTimedOut => "Probe timed out",
             Self::UnsupportedContainer => "Unsupported container",
+            Self::ExistingOutput => "Existing output",
             Self::AlreadyCompleted => "Already completed",
             Self::ResumeMismatch => "Resume mismatch",
         }

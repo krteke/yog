@@ -1,5 +1,124 @@
-use super::support::Fixture;
+use super::support::{Fixture, read_report};
 use std::fs;
+
+#[test]
+fn an_all_existing_output_batch_succeeds_without_probing_or_overwriting() {
+    let fixture = Fixture::new("touch ffmpeg-started; exit 9");
+    fixture.tool("ffprobe", "touch ffprobe-started; exit 9");
+    fs::create_dir(fixture.0.join("input")).unwrap();
+    fs::create_dir(fixture.0.join("output")).unwrap();
+    fs::write(fixture.0.join("input/movie.mkv"), b"source").unwrap();
+    fs::write(fixture.0.join("output/movie.mkv"), b"original").unwrap();
+
+    let result = fixture
+        .recursive_command("output")
+        .args(["--no-state", "--report", "results.jsonl", "--copy"])
+        .output()
+        .unwrap();
+
+    assert!(result.status.success(), "{:?}", result.stderr);
+    assert_eq!(
+        fs::read(fixture.0.join("output/movie.mkv")).unwrap(),
+        b"original"
+    );
+    assert!(!fixture.0.join("ffprobe-started").exists());
+    assert!(!fixture.0.join("ffmpeg-started").exists());
+    assert!(!fixture.0.join("output/.part.movie.mkv").exists());
+    assert!(!fixture.0.join("output/.yog-state.jsonl").exists());
+    let records = read_report(&fixture, "results.jsonl");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["skipped"]["result"]["status"], "skipped");
+    assert_eq!(records[0]["skipped"]["result"]["reason"], "existing_output");
+    assert!(String::from_utf8_lossy(&result.stdout).contains("failed 0 | skipped 1"));
+    assert!(!String::from_utf8_lossy(&result.stderr).contains("no video files found"));
+}
+
+#[test]
+fn existing_outputs_are_recorded_as_skipped_while_new_tasks_are_transcoded() {
+    let fixture = Fixture::new("for last do :; done; printf encoded > \"$last\"");
+    fs::create_dir(fixture.0.join("input")).unwrap();
+    fs::create_dir(fixture.0.join("output")).unwrap();
+    fs::write(fixture.0.join("input/done.mkv"), b"done").unwrap();
+    fs::write(fixture.0.join("input/new.mkv"), b"new").unwrap();
+    fs::write(fixture.0.join("output/done.mkv"), b"original").unwrap();
+
+    let result = fixture
+        .recursive_command("output")
+        .args(["--report", "results.jsonl", "--copy"])
+        .output()
+        .unwrap();
+
+    assert!(result.status.success(), "{:?}", result.stderr);
+    assert_eq!(
+        fs::read(fixture.0.join("output/done.mkv")).unwrap(),
+        b"original"
+    );
+    assert_eq!(
+        fs::read(fixture.0.join("output/new.mkv")).unwrap(),
+        b"encoded"
+    );
+    let records = read_report(&fixture, "results.jsonl");
+    assert_eq!(records.len(), 2);
+    let skipped = records.iter().find_map(|row| row.get("skipped")).unwrap();
+    assert_eq!(skipped["result"]["reason"], "existing_output");
+    let state = read_report(&fixture, "output/.yog-state.jsonl");
+    assert!(
+        state
+            .iter()
+            .any(|entry| entry["result"]["reason"] == "existing_output")
+    );
+    assert!(String::from_utf8_lossy(&result.stdout).contains("succeeded 1 | failed 0 | skipped 1"));
+}
+
+#[test]
+fn overwrite_output_reencodes_existing_batch_outputs() {
+    let fixture = Fixture::new("for last do :; done; printf replacement > \"$last\"");
+    fs::create_dir(fixture.0.join("input")).unwrap();
+    fs::create_dir(fixture.0.join("output")).unwrap();
+    fs::write(fixture.0.join("input/movie.mkv"), b"source").unwrap();
+    fs::write(fixture.0.join("output/movie.mkv"), b"original").unwrap();
+
+    let result = fixture
+        .recursive_command("output")
+        .args(["--overwrite-output", "--copy"])
+        .output()
+        .unwrap();
+
+    assert!(result.status.success(), "{:?}", result.stderr);
+    assert_eq!(
+        fs::read(fixture.0.join("output/movie.mkv")).unwrap(),
+        b"replacement"
+    );
+    assert!(String::from_utf8_lossy(&result.stdout).contains("succeeded 1 | failed 0 | skipped 0"));
+}
+
+#[test]
+fn an_unowned_batch_part_is_a_failure_not_an_existing_output_skip() {
+    let fixture = Fixture::new("touch ffmpeg-started");
+    fs::create_dir(fixture.0.join("input")).unwrap();
+    fs::create_dir(fixture.0.join("output")).unwrap();
+    fs::write(fixture.0.join("input/movie.mkv"), b"source").unwrap();
+    fs::write(fixture.0.join("output/.part.movie.mkv"), b"unfinished").unwrap();
+
+    let result = fixture
+        .recursive_command("output")
+        .args(["--no-state", "--report", "results.jsonl", "--copy"])
+        .output()
+        .unwrap();
+
+    assert_eq!(result.status.code(), Some(1));
+    assert_eq!(
+        fs::read(fixture.0.join("output/.part.movie.mkv")).unwrap(),
+        b"unfinished"
+    );
+    assert!(!fixture.0.join("ffmpeg-started").exists());
+    let records = read_report(&fixture, "results.jsonl");
+    assert_eq!(records[0]["transcode"]["result"]["status"], "failed");
+    assert_eq!(
+        records[0]["transcode"]["result"]["phase"],
+        "preparing_output"
+    );
+}
 
 #[test]
 fn recursive_mode_probes_each_file_just_before_transcoding_it() {

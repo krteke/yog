@@ -163,7 +163,16 @@ pub async fn run(
             break;
         }
         let restored = recovered.remove(&offset);
-        let preflight = preflight_skipped.remove(&offset);
+        let preflight = preflight_skipped.remove(&offset).or_else(|| {
+            (!predict
+                && restored.is_none()
+                && !command.request.overwrite_output
+                && task.output.is_file())
+            .then(|| TaskResult::Skipped {
+                reason: SkipReason::ExistingOutput,
+                message: format!("output file already exists: {}", task.output.display()),
+            })
+        });
         let manual = !predict && restored.is_none() && preflight.is_none() && control.take_skip();
         let preparation_error = if restored.is_none() && !manual {
             let error = recovery
@@ -273,6 +282,7 @@ pub async fn run(
                 batch.skipped += 1;
                 batch.resume_skipped += usize::from(reason == SkipReason::ResumeMismatch);
                 batch.manual_skipped += usize::from(reason == SkipReason::Manual);
+                batch.existing_skipped += usize::from(reason == SkipReason::ExistingOutput);
                 if info.is_none() {
                     diagnostics.skipped_input(&task.input, &error);
                 }
@@ -306,6 +316,7 @@ pub async fn run(
     if total == batch.skipped
         && batch.resume_skipped == 0
         && batch.manual_skipped == 0
+        && batch.existing_skipped == 0
         && !batch.cancelled
     {
         diagnostics.error(&anyhow::anyhow!(

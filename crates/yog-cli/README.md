@@ -1,124 +1,249 @@
-# yog CLI
+# Yog CLI
+
+Yog processes video through FFmpeg / FFprobe and provides three subcommands: `transcode` performs actual transcoding, `predict` makes sample-based predictions for one configuration, and `emulate` predicts multiple quality levels or configurations and plots curves.
+
+## Running the CLI
 
 ```sh
-cargo run -p yog-cli -- transcode -i input.mkv -o output.mkv --encode-x264 --preset medium --quality 23
-cargo run -p yog-cli -- transcode -i input.mkv -o output.mkv --copy
-cargo run -p yog-cli -- transcode -i input.mkv -o output.mkv --decode-vaapi=/dev/dri/renderD128 --encode-nvenc h264
-cargo run -p yog-cli -- transcode -i input.mkv -o output.mkv --encode-x265 --preset slow --bitrate 4000000
-cargo run -p yog-cli -- transcode -i input.mkv -o output.mkv --decode-vaapi --encode-vaapi hevc --device /dev/dri/renderD128 --quality 27
 cargo run -p yog-cli -- --help
-cargo run -p yog-cli -- transcode --encode-nvenc --help
-cargo run -p yog-cli -- transcode -i input.mkv -o output.mkv --verify --encode-x264
-cargo run -p yog-cli -- transcode -i input.mkv -o output.mkv --vmaf --encode-x264
-cargo run -p yog-cli -- transcode -i input.mkv -o output.mkv --vmaf=5 --encode-x264
-cargo run -p yog-cli -- predict -i input.mkv --encode-x264 --quality 23
-cargo run -p yog-cli -- emulate -i input.mkv --png quality.png --svg quality.svg --range 18-30 --encode-x264 --preset medium
-cargo run -p yog-cli -- emulate -i input.mkv --svg compare.svg --candidate vaapi:libsvtav1:7:2-40 --candidate software:libx264:medium:18-30
-cargo run -p yog-cli -- transcode -i input.mp4 -o output.mp4 -C mp4 -v --copy
-cargo run -p yog-cli -- transcode -i input.mkv -o output.mkv --quiet --copy
 ```
 
-[config.toml](./config.example.toml)
+View help for an operation or encoder:
 
 ```sh
-cargo run -p yog-cli -- -i input.mkv transcode -o output.mkv --encode-x265 --quality 23 --vmaf --report run.jsonl
-cargo run -p yog-cli -- -i media/ predict --recursive --encode-svt-av1 --quality 30 --report estimates.jsonl
-cargo run -p yog-cli -- -i input.mkv emulate --png quality.png --range 18-30 --encode-x264 --report curve.jsonl
+yog transcode --help
+yog transcode --encode-nvenc --help
 ```
 
-### File format
+The first command shows transcoding options; the second shows NVENC encoding options. Encoders can also be selected by their regular subcommand names, such as `x264`. This guide consistently uses the `--encode-x264` form.
 
-JSONL
+FFmpeg and FFprobe must be available before running tasks. Your local FFmpeg build and drivers must support the selected encoders, hardware backends, and filters. Predict, Emulate, and post-transcode VMAF calculations require `libvmaf`.
 
-```json
-{"transcode":{"input":"/media/in.mkv","output":"/media/out.mkv","result":{"status":"success"},"container":"mkv","video":{"action":"encode","encoder":"libx265","rate":{"kind":"quality","parameter":"CRF","value":23},"preset":"medium","multipass":null,"device":null},"decoding":"software","source":{"bytes":734003200,"duration_seconds":3661.5,"streams":{"video":1,"audio":2,"subtitle":1,"attachment":1,"cover":0,"other":0},"video":{"codec":"hevc","width":1920,"height":1080,"frame_rate":"24000/1001","bit_rate":"1500000"},"audio":[{"codec":"aac","channels":2,"sample_rate":"48000"}]},"metrics":{"bytes":412345678,"duration_seconds":3661.5,"size_percent":56.18,"elapsed_seconds":812.4,"speed":4.507,"frames":87833,"fps":108.1},"verify":{"outcome":"complete","warnings":[]},"vmaf":{"n_subsample":7,"score":95.25,"error":null}}}
+## Common options
+
+These options apply to all three subcommands. They can appear before or after the operation name, or after the encoder subcommand.
+
+### Input: `-i / --input PATH`
+
+An input is required for every run. Pass a file in normal mode, or a directory for `transcode --recursive` and `predict --recursive`.
+
+### Container: `-C / --container FORMAT`
+
+Explicitly select the container format. Supported values are `mkv`, `mp4`, `mov`, `m4a`, `3gp`, `3g2`, `f4v`, `ismv`, `psp`, `webm`, `ts`, `m2ts`, `avi`, `flv`, `asf`, `wmv`, `mpg` (alias: `mpeg`), `vob`, `ogg`, and `ogv`.
+
+When omitted, the container is selected from the input file and FFprobe format information. In single-file mode, keep the output extension consistent with the container. In batch mode, explicitly selecting a container replaces the output extensions accordingly.
+
+Predict / Emulate use this option to select the sample output container. Container overhead is also part of the prediction conditions.
+
+### Decoder
+
+- No hardware decoding option: software decoding.
+- `--decode-vaapi[=DEVICE]`: VAAPI decoding, for example `--decode-vaapi=/dev/dri/renderD128`.
+- `--decode-cuda[=DEVICE]`: CUDA decoding, for example `--decode-cuda=0`.
+- `--decode-qsv[=DEVICE]`: QSV decoding, with an optional device.
+
+The three hardware decoding options are mutually exclusive. The device is optional; when supplied, it must be joined with `=`. Decoders and encoders are selected independently: VAAPI decoding can be paired with x265 software encoding.
+
+### Configuration file: `-c / --config PATH`
+
+Read a TOML configuration file. When omitted, Yog looks for `yog/config.toml` under the system configuration directory. On Linux, this is usually `$XDG_CONFIG_HOME/yog/config.toml`, or `~/.config/yog/config.toml` when that variable is unset. A missing automatically discovered file falls back to defaults; a missing explicitly specified file is an error.
+
+[Configuration example](config.example.toml)
+
+`progress_tick_interval_ms` controls the terminal progress refresh interval in milliseconds. `prediction.samples` is the requested sample count, and `sample_sec` is the requested duration of each sample in seconds. Predict and Emulate share these settings; the actual samples depend on conditions such as media length. `emulation.width / height` control chart dimensions in pixels. Omitted settings use defaults; unknown settings are rejected.
+
+### Tools, timeout, and output
+
+- `--ffmpeg PATH`, `--ffprobe PATH`: executable paths; by default, `ffmpeg` and `ffprobe` are located through PATH.
+- `-t / --timeout SECONDS`: the execution time limit for each subprocess; unlimited by default.
+- `--verbose`: detailed diagnostics and full prediction information, including ranges. The default log level is raised to Debug, showing actual executed commands and FFmpeg logs. Normal mode shows progress, a Predict spinner, and concise summaries.
+- `--quiet`: disable runtime terminal output and logs; mutually exclusive with `--verbose`. Tasks still run, requested Report / State files are written, and exit codes are returned. Clap argument parsing errors are still displayed.
+- `-h / --help`: help for the current command level. At the top level, `-V / --version` displays the version.
+
+Logs can be filtered with `RUST_LOG`, for example `RUST_LOG=yog_core=debug yog ...`. This does not re-enable logs when `--quiet` is used.
+
+## Transcode: actual transcoding
+
+```sh
+yog -i input.mkv transcode -o output.mkv --encode-x265 --quality 23 --preset medium
 ```
 
-```json
-{"predict":{"input":"/media/in.mkv","result":{"status":"success"},"container":"mkv","video":{"action":"encode","encoder":"libx264","rate":{"kind":"quality","parameter":"CRF","value":23},"preset":null,"multipass":null,"device":null},"decoding":"software","sampling":{"requested_samples":5,"sample_seconds":2.0,"measured_samples":2,"sampled_seconds":4.0},"source":{"bytes":734003200,"duration_seconds":3661.5,"streams":{"video":1,"audio":2,"subtitle":1,"attachment":1,"cover":0,"other":0},"video":{"codec":"h264","width":1920,"height":1080,"frame_rate":"24000/1001","bit_rate":"1500000"},"audio":[{"codec":"aac","channels":2,"sample_rate":"48000"}]},"speed":{"value":2.667,"low":2.0,"high":4.0},"transcode_seconds":{"value":1372.7,"low":915.4,"high":1830.8},"output_bytes":{"value":61712345670,"low":50000000000,"high":70000000000},"size_percent":840.0,"quality":{"frames":240,"source_stream_index":0,"vmaf":{"value":96.5,"low":96.5,"high":96.5},"ssim":{"value":0.99,"low":0.99,"high":0.99},"psnr_y_db":{"value":42.0,"low":42.0,"high":42.0}},"samples":[{"start_seconds":0.0,"duration_seconds":2.0,"encode_seconds":0.75,"speed":2.667,"timed_payload_bytes":3000000,"scored_frames":120,"vmaf":96.5,"ssim":0.99,"psnr_y_db":42.0}]}}
+Encode video with x265 at CRF 23 and the medium preset. If no video action is selected, the default is `--copy`, which copies video streams. Audio, subtitles, attachments, and other streams are mapped and copied by the transcode plan according to container capabilities.
+
+### Output and batch processing
+
+`-o / --output PATH` is required. In single-file mode it is the final output path; with `-r / --recursive`, it is the output root directory. Batch processing preserves the relative input directory structure. Filenames are also preserved when no container is specified; selecting a container replaces their extensions.
+
+Batch processing scans paths and checks output conflicts first, then probes and executes each file individually. Inputs without video, inputs that cannot be probed, and inputs for which no container can be selected are recorded as skipped. Video transcoding failures are recorded without stopping subsequent tasks, and a summary is printed at the end. Batch preparation errors, such as output mapping conflicts or failure to prepare the Report, still prevent execution from starting. Manual cancellation stops subsequent tasks and produces a summary.
+
+Without overwrite permission, an existing final output file is recorded as **Skipped · Existing output**, and batch processing continues with the next item. Single-file mode still treats an existing output as an error.
+
+`--overwrite-output` allows final video files to be replaced. Output is first written to `.part.filename` in the same directory, for example `.part.movie.mkv`, and is published as `movie.mkv` only after success. Existing `.part.*` files not claimed by recovery are not overwritten directly.
+
+### Encoders and rate control
+
+Encoder options also apply to Predict. Emulate uses encoder and preset settings, but determines quality from its quality points.
+
+`-q / --quality N` selects the encoder's quality control. `-b / --bitrate N` specifies a positive integer video bitrate in **bit/s**, for example `4000000`. These options are mutually exclusive. When neither is supplied, FFmpeg / encoder defaults are used.
+
+- `--copy`: Transcode only; copy video.
+- `--encode-x264`, `--encode-x265`: `libx264`, `libx265`, with CRF in `0–51`. `-p / --preset` accepts `ultrafast / superfast / veryfast / faster / fast / medium / slow / slower / veryslow`.
+- `--encode-svt-av1`: `libsvtav1`, with CRF in `0–63` and `-p / --preset` in `0–13`.
+- `--encode-aom-av1`: `libaom-av1`, with CRF in `0–63`. `-u / --cpu-used` ranges from `0–8` and controls speed versus encoding efficiency.
+- `--encode-rav1e`: `librav1e`, with QP in `0–255` and `-s / --speed` in `0–10`.
+- `--encode-nvenc CODEC`: requires `h264 / hevc / av1`. CQ ranges from `0–51` for H.264 and HEVC, or `0–63` for AV1. `-p / --preset` accepts `p1–p7`. `-m / --multipass` accepts `disabled / qres / fullres`, meaning disabled, quarter-resolution analysis, and full-resolution analysis respectively.
+- `--encode-qsv CODEC`: requires `h264 / hevc / av1`. `global_quality` ranges from `1–51`. `-p / --preset` accepts `veryfast / faster / fast / medium / slow / slower / veryslow`.
+- `--encode-vaapi CODEC`: requires `h264 / hevc / av1`. H.264 and HEVC use QP in `0–52`; AV1 uses `global_quality` in `0–255`. `-d / --device PATH` selects the encoding device, defaulting to `/dev/dri/renderD128`. There is no preset option.
+
+### Verification and VMAF
+
+`-v / --verify` checks transcoding results before publication, including streams and relevant media checks. Copy mode also uses packet information for comparison. A definite verification failure fails the item and preserves any existing target; incomplete verification may only produce warnings. The outcome is written to the Report's `verify` field.
+
+`--vmaf` or `--vmaf=full` calculates VMAF for every frame. `--vmaf=N` samples every N frames, where N is a positive integer, for example `--vmaf=5`. The optional value must be supplied using `=`.
+
+VMAF runs independently after the video has been successfully published. The VMAF thread count is set from the available CPU parallelism; there is currently no separate CLI thread option.
+
+### Report
+
+`--report PATH` writes JSONL results containing statuses, encoding settings, source media facts, and available measurements. `--overwrite-report` allows an existing Report to be truncated and rewritten; without permission, an existing file prevents the run from starting.
+
+### State and resuming batches
+
+The following options are available only with `transcode --recursive`:
+
+- By default, Yog reads `.yog-state.jsonl` from the output directory and creates it if missing. Matching completed records appear as **Already completed** and are not transcoded again. This differs from **Existing output**, which is based only on file existence.
+- `--state PATH`: specify the state file.
+- `--no-state`: neither read nor write State; mutually exclusive with the other recovery options. Existing outputs are still skipped.
+- `--restart`: discard previous completion / skip decisions and reschedule using the current settings. This does not automatically grant output overwrite permission. To actually re-encode existing outputs, also pass `--overwrite-output`.
+- `--retry-manual-skips`: reschedule manually skipped items from State. By default, these skips are retained.
+- `--resume-batch-mismatch POLICY`: the policy for differences in input root, output root, container, or encoding / decoding settings.
+- `--resume-file-mismatch POLICY`: the policy for differences in source or completed output fingerprints.
+
+Both policies default to `ask`. Available values are:
+
+- `ask`: pause, display the differences, and wait for a choice. Enter `1 / 2 / 3 / 4` for Abort / Force / Skip / Restart. Append `all` to apply the choice to later differences of the same kind in this run.
+- `abort`: stop recovery.
+- `force`: ignore differences and trust reusable records.
+- `skip`: skip affected items, record `resume_mismatch`, and retain the original records for a future choice.
+- `restart`: restart the entire batch for settings-level differences, or reschedule the affected file for file-level differences. Both respect `--overwrite-output`.
+
+Unattended execution, redirected input, and `--quiet` cannot answer `ask`; set both policies in advance. For full reuse criteria and the format, see the [State reference](../../docs/state.md).
+
+## Predict: predictions for one configuration
+
+```sh
+yog -i input.mkv predict --encode-svt-av1 --preset 6 --quality 30
 ```
 
-```json
-{"emulate":{"input":"/media/in.mkv","result":{"status":"success"},"container":"mkv","video":{"action":"encode","encoder":"libx264","rate":{"kind":"quality","parameter":"CRF","value":20},"preset":"medium","multipass":null,"device":null},"decoding":"software","source":{"bytes":734003200,"duration_seconds":3661.5,"streams":{"video":1,"audio":2,"subtitle":1,"attachment":1,"cover":0,"other":0},"video":{"codec":"h264","width":1920,"height":1080,"frame_rate":"24000/1001","bit_rate":"1500000"},"audio":[{"codec":"aac","channels":2,"sample_rate":"48000"}]},"sampling":{"requested_samples":5,"sample_seconds":2.0,"measured_samples":2,"sampled_seconds":4.0},"speed":{"value":2.667,"low":2.0,"high":4.0},"transcode_seconds":{"value":1372.7,"low":915.4,"high":1830.8},"output_bytes":{"value":6171234567,"low":5000000000,"high":7000000000},"size_percent":840.0,"quality":{"frames":240,"source_stream_index":0,"vmaf":{"value":96.5,"low":96.5,"high":96.5},"ssim":null,"psnr_y_db":null},"samples":[{"start_seconds":0.0,"duration_seconds":2.0,"encode_seconds":0.75,"speed":2.667,"timed_payload_bytes":3000000,"scored_frames":120,"vmaf":96.5,"ssim":null,"psnr_y_db":null}],"candidate_index":null,"outputs":{"png":"/media/quality.png","svg":null}}}
+Encode samples using SVT-AV1 / preset 6 / CRF 30 to estimate the full video's size, encoding time, speed, VMAF, and other metrics.
+
+Predict-specific options:
+
+- `-r / --recursive`: predict directory inputs individually, with task error isolation and a summary.
+- `--report PATH`: record predictions and sample data for each input.
+- `--overwrite-report`: allow an existing Report to be replaced.
+
+The `[prediction]` configuration controls sample count and duration. Normal output shows one summary line per item; `--verbose` expands the samples and prediction bounds.
+
+## Emulate: quality curves and configuration comparisons
+
+Emulate processes one input file and repeatedly runs the real prediction workflow. At least one of `--png PATH` and `--svg PATH` is required.
+
+### One encoder and quality points
+
+```sh
+yog -i input.mkv emulate --png curve.png --svg curve.svg --range 18,23,28-30 --encode-x265 --preset medium
 ```
 
-```json
-{"skipped":{"input":"/media/notes.md","result":{"status":"skipped","reason":"probe_failed","message":"probe failed: ..."}}}
+Predict at CRF 18, 23, 28, 29, and 30, generating PNG and SVG from the same data. `--range POINTS` accepts comma-separated discrete values and inclusive ascending ranges. It can be repeated; points are sorted and deduplicated. Omitting it or passing an empty string uses the encoder's full quality range.
+
+Place encoder options after `--encode-*` to set the preset, device, or multipass mode. Emulate sets quality for each point.
+
+### Multiple Candidates
+
+Repeat `--candidate DECODE:ENCODE:PRESET:RANGE[:MULTIPASS]` to define multiple configurations:
+
+- `DECODE`: `software / vaapi / cuda / qsv`. A hardware device can be specified as `vaapi=/dev/dri/renderD128`, for example.
+- `ENCODE`: `libx264 / libx265 / libsvtav1 / libaom-av1 / librav1e`, or `h264/hevc/av1` followed by `_nvenc / _qsv / _vaapi`. A VAAPI encoding device can be specified as `hevc_vaapi=/dev/dri/renderD128`.
+- `PRESET`: the corresponding preset; AOM uses a cpu-used number, and rav1e uses a speed number.
+- `RANGE`: the same quality-point syntax as `--range`. Leave it empty for the full range, but retain the field and its colon.
+- `MULTIPASS`: optional and supported only by NVENC; accepts `disabled / qres / fullres`.
+
+```sh
+yog -i input.mkv emulate --svg compare.svg --candidate software:libx265:medium:18,23,28 --candidate vaapi:libsvtav1:6:20-35
 ```
 
-All task records use `result.status`: `success`, `skipped`, `failed`, or `cancelled`.
-Skipped results include `reason` (`no_video`, `probe_failed`, `probe_timed_out`,
-`unsupported_container`) and `message`. Failed results include the operation `phase`,
-`timed_out`, and `message`; transcode measurements are stored in `metrics`.
+The first configuration uses software decoding / x265 / medium at three discrete CRF points. The second uses VAAPI decoding / SVT-AV1 / preset 6 at every CRF from 20 through 35.
 
-### Conventions
+### Charts, Report, and failures
 
-- **Units.** Bytes are bytes, durations are seconds, `size_percent` is
-  `output bytes / input bytes * 100` (it can exceed 100), `speed` is processed
-  media seconds per wall-clock second, and `frame_rate` is ffprobe's
-  `"numerator/denominator"` string.
-- **Nulls.** Unknown measurements are `null`, and optional objects such as
-  `verify`, `vmaf`, `metrics`, and `source` are `null` as a whole. Array fields
-  are `[]`. The fields inside `result` depend on its status.
-- **Writing.** The report is truncated when the run starts, and every record is
-  appended and flushed as soon as it is produced, so a cancelled or failed run
-  keeps what it already measured. Failures are reported inside the record
-  (`result`), never by deleting or rewriting lines. `emulate` writes
-  one line per quality point, in ascending point order; a run that fails before
-  its first point (for example an unreadable input or a chart path that already
-  exists) writes no line at all.
+`--overwrite-chart` permits replacing PNG / SVG files only; `--overwrite-report` permits replacing the Report only. `--report PATH` records one line per attempted quality point. Candidate indices start at 1.
 
-### Field reference
+The horizontal axis identifies the quality parameter, such as CRF / CQ / QP. The left axis shows VMAF and the right axis shows estimated size; each vertical axis uses its data's minimum and maximum as bounds. Solid lines represent VMAF, dashed lines represent size, and the same color identifies the same configuration. Multiple Candidates use numbered labels with configuration descriptions. Sizes use appropriate units, such as `800 MiB` and `1.1 GiB`. Dimensions are controlled by `[emulation].width / height`.
 
-`transcode` records:
+## Common option combinations
 
-| Field | Description |
-| --- | --- |
-| `input`, `output` | Absolute paths of the source and the published output. |
-| `result` | Terminal status and its structured classification. Failed results include `phase`, `timed_out`, and `message`. |
-| `container` | Resolved output container extension (`mkv`, `mp4`, ...); `null` before the container is resolved. |
-| `video.action` | `copy` or `encode`. |
-| `video.encoder` | ffmpeg encoder name (`libx265`, `hevc_nvenc`, ...); `null` for `copy`. |
-| `video.rate.kind` | `quality` or `bitrate`. |
-| `video.rate.parameter` | ffmpeg option carrying the rate: `CRF`, `CQ`, `QP`, `global_quality`, or `b`. |
-| `video.rate.value` | Quality value or bitrate in bits per second. |
-| `video.preset` | Encoder speed/effort knob: a string for x264/x265/NVENC/QSV (`medium`, `p4`, ...) and a number for SVT-AV1/AOM AV1/rav1e (`cpu-used`/`speed`). |
-| `video.multipass` | NVENC multipass mode (`disabled`, `qres`, `fullres`), otherwise `null`. |
-| `video.device` | VAAPI encoding device, otherwise `null`. |
-| `decoding` | `software`, or `vaapi`, `cuda`, `qsv` with an optional `:<device>`. |
-| `source` | Probed input facts: `bytes`, `duration_seconds`, stream counts, the first regular video stream, and every audio stream. `streams.cover` counts cover art (`attached_pic`), which is excluded from `streams.video`. |
-| `source.video.bit_rate` | Input video bit rate in bits per second. |
-| `metrics` | Measured output: published `bytes`, `duration_seconds` from ffmpeg's final progress report, `size_percent`, `elapsed_seconds` for the ffmpeg run, aggregate `speed`, last reported `frames` and `fps`. |
-| `verify` | Present only with `--verify`: `outcome` is `complete`, `missing_audio_after_seek`, or `incomplete`, plus the warning strings printed to stderr. |
-| `vmaf` | Present only with `--vmaf`: the requested `n_subsample`, the `score` or the `error`. |
+### Copy streams into a different container
 
-`predict` records replace `metrics`/`verify`/`vmaf` with the prediction itself,
-while retaining the shared `result`:
+```sh
+yog -i input.mp4 -C mkv transcode -o output.mkv --copy
+```
 
-| Field | Description |
-| --- | --- |
-| `sampling` | The prediction settings from the config: `requested_samples`, `sample_seconds`, and the `measured_samples`/`sampled_seconds` that were actually encoded. |
-| `speed`, `transcode_seconds`, `output_bytes` | `{value, low, high}` estimates. |
-| `size_percent` | Estimated output size as a percentage of the input size. |
-| `quality` | Aggregated `vmaf`/`ssim`/`psnr_y_db` estimates over all scored `frames`, and the `source_stream_index` they were scored against. |
-| `samples` | Per-sample measurements: window `start_seconds` and `duration_seconds`, `encode_seconds`, `speed`, `timed_payload_bytes`, `scored_frames`, and the quality metrics. |
+### Hardware decoding with software encoding
 
-`emulate` records are `predict` records measured at a single quality point: one
-line per point, in ascending point order. `candidate_index` identifies the
-`--candidate` behind the line, while `video` and `decoding` contain its actual
-settings. `video.rate` is the point that was measured rather than a requested
-rate, and `outputs` names the charts the run was asked to write. A run with
-partial point failures still renders the successful points; when every point
-fails, `outputs` can name files that were not created.
+```sh
+yog -i input.mkv --decode-vaapi=/dev/dri/renderD128 transcode -o output.mkv --encode-x265 --preset slow --quality 23
+```
 
-| Field | Description |
-| --- | --- |
-| `video.rate` | The quality point of this line: `{"kind":"quality","parameter":"CRF","value":20}`. `parameter` is the ffmpeg option of the encoder, such as `CRF`, `CQ`, `QP`, or `global_quality`. |
-| `candidate_index` | One-based position of the `--candidate` used for this line, or `null` when the encoder subcommand was used. |
-| `outputs.png`, `outputs.svg` | Requested chart paths, or `null` when that chart was not asked for. |
-| everything else | Identical to a `predict` record, including `sampling`, `speed`, `output_bytes`, `size_percent`, `quality`, and `samples`. |
+### NVENC target bitrate
 
-`skipped` records describe batch inputs that failed probing, contain no regular
-video, or cannot resolve an output container. They include the input and a
-structured `result`; each skipped input contributes to the batch's skipped count.
-Every other line is `transcode`, `predict`, or `emulate`.
+```sh
+yog -i input.mkv transcode -o output.mkv --encode-nvenc hevc --preset p5 --bitrate 4000000 --multipass fullres
+```
+
+### Batch transcoding with a Report
+
+```sh
+yog -i media transcode -r -o encoded -C mkv --report run-1.jsonl --encode-svt-av1 --preset 6 --quality 30
+```
+
+### Resume based on existing outputs, without State
+
+```sh
+yog -i media transcode -r -o encoded --no-state --copy
+```
+
+### Unattended recovery, leaving mismatched items for later
+
+```sh
+yog -i media transcode -r -o encoded --resume-batch-mismatch skip --resume-file-mismatch skip --report resumed.jsonl --encode-svt-av1 --preset 6 --quality 30
+```
+
+### Explicitly re-encode from scratch
+
+```sh
+yog -i media transcode -r -o encoded --restart --overwrite-output --encode-svt-av1 --preset 6 --quality 28
+```
+
+### Transcode, verify, score, and report
+
+```sh
+yog -i input.mkv transcode -o output.mkv --verify --vmaf=5 --report result.jsonl --encode-x264 --preset medium --quality 23
+```
+
+### Predict first, then run the full transcode
+
+```sh
+yog -i input.mkv predict --encode-svt-av1 --preset 6 --quality 30
+yog -i input.mkv transcode -o output.mkv --encode-svt-av1 --preset 6 --quality 30
+```
+
+### Adjust sampling and inspect commands
+
+```sh
+yog -c config.toml -i input.mkv predict --verbose --encode-x265 --quality 23
+```
+
+## Exit codes and results
+
+Success returns `0`, execution failure returns `1`, and Ctrl+C cancellation returns `130`. A batch returns its overall result after cleanup; the last file alone does not determine success. Actual task failures, State write errors, and recovery errors cause failure. A batch with no processable video also fails. Existing outputs, explicit manual skips, and policy-based skips do not trigger this "no video" failure.

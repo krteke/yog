@@ -2,6 +2,64 @@ use super::support::{Fixture, read_report};
 use std::{fs, sync::Mutex, time::Duration};
 
 #[tokio::test]
+async fn existing_output_emits_one_skip_without_starting_a_task() {
+    use yog_runtime::event::{RunEvent, TaskResult};
+
+    let fixture = Fixture::new("exit 9");
+    fs::create_dir(fixture.0.join("input")).unwrap();
+    fs::create_dir(fixture.0.join("output")).unwrap();
+    fs::write(fixture.0.join("input/movie.mkv"), b"source").unwrap();
+    fs::write(fixture.0.join("output/movie.mkv"), b"original").unwrap();
+    let events = Mutex::new(Vec::new());
+
+    let outcome = yog_runtime::run_with_events(
+        yog_runtime::Command {
+            request: yog_core::ffmpeg::plan::TranscodeRequest::new(
+                fixture.0.join("input"),
+                fixture.0.join("output"),
+            ),
+            operation: yog_runtime::Operation::Transcode,
+            recursive: true,
+        },
+        yog_runtime::Options {
+            ffmpeg: fixture.0.join("ffmpeg"),
+            ffprobe: fixture.0.join("ffprobe"),
+            terminal_output: false,
+            ..yog_runtime::Options::default()
+        },
+        yog_runtime::Config::default(),
+        yog_runtime::control::RunControl::new(),
+        |event| events.lock().unwrap().push(event),
+    )
+    .await;
+
+    assert_eq!(outcome.status(), yog_runtime::RunStatus::Success);
+    let yog_runtime::RunOutcome::Batch(batch) = outcome else {
+        panic!("expected batch, got {outcome:?}");
+    };
+    assert_eq!(batch.total, 1);
+    assert_eq!(batch.skipped, 1);
+    assert_eq!(batch.reused, 0);
+    assert!(batch.failures.is_empty());
+    let events = events.into_inner().unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, RunEvent::TaskStarted { .. }))
+    );
+    let finished: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            RunEvent::TaskFinished { result, .. } => Some(result),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(finished.len(), 1);
+    assert!(matches!(finished[0], TaskResult::Skipped { .. }));
+    assert_eq!(finished[0].to_string(), "Skipped · Existing output");
+}
+
+#[tokio::test]
 async fn recursive_events_count_all_candidates_and_each_kind_of_skipped_input() {
     let fixture = Fixture::new("for last do :; done; printf encoded > \"$last\"");
     fs::create_dir(fixture.0.join("input")).unwrap();

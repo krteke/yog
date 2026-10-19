@@ -644,6 +644,7 @@ mod tests {
             skipped: 1,
             resume_skipped: 0,
             manual_skipped: 0,
+            existing_skipped: 0,
             reused: 0,
             forced: 0,
             state_error: None,
